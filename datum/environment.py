@@ -6,7 +6,8 @@ import configparser
 import os
 
 # "csv_path" is set by the :csv command, it should default to None
-_default_config = {"rows_to_print": 50,
+_default_config = {"single_query_input": 0, #can also be 1
+                   "rows_to_print": 50,
                    "column_display_length": 100,
                    "null_string": "[NULL]",
                    "newline_replacement": "[NL]",
@@ -59,6 +60,10 @@ def _read_config(config_file_path):
     config = {}
     config_file = configparser.ConfigParser()
     config_file.read(config_file_path)
+    config["single_query_input"] = config_file.getint(
+        "general",
+        "single_query_input",
+        fallback=_default_config["single_query_input"])
     config["rows_to_print"] = config_file.getint(
         "general",
         "rows_to_print",

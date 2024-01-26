@@ -83,6 +83,10 @@ def prompt_for_query_or_command():
         if last.startswith(":"):
             # For commands, ignore all prior input
             return last
+        if config["single_query_input"] == 1:
+            last = lines[-1]
+            if last.strip()[-1:] == ";":
+                return '\n'.join(lines)
 
 
 def prompt_parameters(query):
