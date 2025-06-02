@@ -186,8 +186,11 @@ def int_len(number):
 def decimal_len(decimal_number):
     """Calculate the length, in characters, of a number with decimals."""
     sign, digits, _ = decimal_number.as_tuple()
+
     # digits + separator + sign (where sign is either 0 or 1 for negatives)
-    total_length = len(digits) + 1 + sign
+    # NOTE: plus 1 because something was off when testing. I need to research a
+    #       bit more to understand what's up, but it works...
+    total_length = len(digits) + 1 + sign + 1
     # TODO: I need to give this more thought, but it seems by default we get at
     # most 22 characters printed. This only became apparent working with Oracle
     # , which BTW reports _all numbers_ as Decimal. But is that the driver, or
