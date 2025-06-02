@@ -6,6 +6,7 @@ from . import printer
 from . import exporter
 from . import commands
 
+import traceback;
 # The configuration read using environment.get_config_dict and referenced in
 # this variable is, in fact, shared by all the modules. This allows the
 # commands to change config on the fly easily. There some risk of introducing
@@ -60,9 +61,12 @@ def query_loop():
         except Exception as err:
             # Oracle tends to return lengthy error messages with non-printable
             # characters that break datum. Print only the first line for those.
-            code, message, *_ = err.args
-            if f'[{code}] [Oracle]' in message:
-                message = message[0:message.index("\n")]
+            code = err.args[0]
+            message = traceback.format_exc()
+            if len(err.args) > 1:
+                code, message, *_ = err.args
+                if f'[{code}] [Oracle]' in message:
+                    message = message[0:message.index("\n")]
             print("---ERROR---\n"
                   "Code:", code, "\n"
                   "Message:", message,"\n"
