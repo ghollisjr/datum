@@ -18,8 +18,6 @@ def export_cursor_results(a_cursor):
     to the path.
     """
     global _config
-    # Before trying anything, clear the value from the config dict.
-    # Even if there's an error, we should go back to printing results.
     path = _config["csv_path"]
     try:
         export_resultset(path, a_cursor)
