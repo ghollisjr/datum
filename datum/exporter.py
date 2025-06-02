@@ -43,6 +43,9 @@ def export_resultset(path, cursor, prefix=None):
 
     This function will attempt to keep the user updated as the export happens.
     """
+    if not cursor.description:
+        print('\n(No output to export)')
+        return
     batch_size = 100000
     print('Writing resultset, one ! per', batch_size, 'rows:')
     with open(path, 'a', encoding='utf-8', newline='') as outputfile:
