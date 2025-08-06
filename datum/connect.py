@@ -13,6 +13,7 @@ _user = None
 _pass = None
 _integrated = False
 _timeout = 30
+_params = None
 
 # The first newline here is useful for spacing later
 _header_message = """
@@ -26,7 +27,7 @@ a new line or ";;" at the end of a query.
 def initialize_module(docopt_args, config):
     """Construct/deconstruct the connection string for the current session."""
     global _conn_string, _driver, _dsn, _server, _database, _user, _pass
-    global _integrated, _timeout
+    global _integrated, _timeout, _params
     _conn_string = docopt_args["--conn-string"]
     if docopt_args["--conn-string"]:
         # We will use the connection string as-is
@@ -51,6 +52,7 @@ def initialize_module(docopt_args, config):
     _user = docopt_args["--user"]
     _pass = docopt_args["--pass"]
     _integrated = docopt_args["--integrated"]
+    _params = ";".join(docopt_args["--param"])
     _timeout = config["command_timeout"]
     _build_connection_string()
 
@@ -98,7 +100,7 @@ def get_connection(force_new=False):
 
 def _build_connection_string():
     global _conn_string, _driver, _dsn, _server, _database, _user, _pass
-    global _integrated
+    global _integrated, _params
     _conn_string = ""
     if _dsn:
         _conn_string += f"DSN={_dsn};"
@@ -114,6 +116,7 @@ def _build_connection_string():
         _conn_string += f"Uid={_user};"
     if _pass:
         _conn_string += f"Pwd={_pass};"
+    _conn_string += _params
 
 
 # source:

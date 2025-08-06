@@ -7,6 +7,7 @@ Usage:
     datum (--driver=<odbc_driver> | --dsn=<dsn>)
           [--server=<server> --database=<database>]
           [--user=<username> --pass=<password> --integrated]
+          [--param <name=value>]...
           [--config=<path>]
 
 Options:
@@ -32,8 +33,13 @@ to connect to:
 Then for security, if needed (can be skipped for SQLite or if DSN, etc.):
 
   --integrated           Use Integrated Security (MSSQL).
-  --user=<username>      SQL Login user
-  --pass=<password>      SQL Login password
+  --user=<username>      SQL Login user.
+  --pass=<password>      SQL Login password.
+
+Since ODBC is extensible, and drivers can support arbitrary parameters, they
+can be added in pairs using:
+
+  --param <name=value>   You can add as many as needed.
 
 Last optional parameter:
   --config=<path>        Path to the INI file that declares config values and
@@ -43,7 +49,8 @@ Last optional parameter:
 
 If the value for any parameter starts with ENV= then the contents of an env var
 are used. For example: --pass=ENV=DB_SECRET would get the value for <password>
-from $DB_SECRET.
+from $DB_SECRET. It is supported in --param values too.
+
 """
 from docopt import docopt
 from . import datum

@@ -26,6 +26,24 @@ def resolve_envvar_args(args):
         # I'd rather str(value) than check the type, I don't know why
         if str(value).startswith("ENV="):
             args[key] = os.getenv(value[4:])
+    # --param entries, these are always string
+    edited_params = []
+    for param in args["--param"]:
+        index_eq = param.find("=")
+        # I don't think this is a common case, but :shrug:
+        if param.startswith("ENV="):
+            edited_params.append(os.getenv(param[4:]))
+        elif index_eq > -1:
+            # If there's an =, split on the first one. Just in case the value
+            # has an = sign.
+            key = param[:index_eq]
+            value = param[index_eq + 1:]
+            if value.startswith("ENV="):
+                value = os.getenv(value[4:])
+            edited_params.append(f"{key}={value}")
+        else:
+            edited_params.append(param)
+    args["--param"] = edited_params
 
 
 def get_config_dict(commands_arg):
