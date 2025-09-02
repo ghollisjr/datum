@@ -109,10 +109,10 @@ Return the password value, or nil if can't be determined/found."
       (auth-info-password (sql-datum--get-auth-source))
     ;; else: read from minibuffer if 'ask
     (if (eq 'ask sql-password)
-        (read-passwd "Password (empty to skip): "))
+        (read-passwd "Password (empty to skip): ")
       ;; finally, if it's non-empty string, use as-is
       (unless (string-empty-p sql-password)
-        sql-password)))
+        sql-password))))
 
 (defun sql-datum--get-auth-source ()
   "Return the `auth-source' token for the current server@database pair.
