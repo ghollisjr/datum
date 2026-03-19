@@ -6,12 +6,12 @@ import configparser
 import os
 
 # "csv_path" is set by the :csv command, it should default to None
-_default_config = {"rows_to_print": 50,
-                   "column_display_length": 100,
+_default_config = {"rows_to_print": 0,
+                   "column_display_length": 0,
                    "null_string": "[NULL]",
                    "newline_replacement": "[NL]",
                    "tab_replacement": "[TAB]",
-                   "command_timeout": 30,
+                   "command_timeout": 0,
                    "csv_path": None,
                    "custom_commands": {}}
 

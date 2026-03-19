@@ -12,7 +12,7 @@ _database = None
 _user = None
 _pass = None
 _integrated = False
-_timeout = 30
+_timeout = 0
 _params = None
 
 # The first newline here is useful for spacing later
@@ -43,6 +43,7 @@ def initialize_module(docopt_args, config):
             if 'database' in piece:
                 _, value = piece.split("=")
                 _database = value
+        _timeout = config["command_timeout"]
         return
 
     _driver = docopt_args["--driver"]
@@ -99,12 +100,13 @@ def get_connection(force_new=False):
     # explicitly close the old connection, if there was one. So we don't check.
     _connection = pyodbc.connect(_conn_string, autocommit=True)
     _connection.add_output_converter(-155, _handle_datetimeoffset)
-    try:
-        _connection.timeout = _timeout
-    except Exception as e:
-        # Connecting to Excel files using ODBC, it said "Optional feature not
-        # implemented". So if the timeout can't be set, just print a message
-        print('WARNING: command timeout not set')
+    if _timeout:
+        try:
+            _connection.timeout = _timeout
+        except Exception as e:
+            # Connecting to Excel files using ODBC, it said "Optional feature not
+            # implemented". So if the timeout can't be set, just print a message
+            print('WARNING: command timeout not set')
     return _connection
 
 

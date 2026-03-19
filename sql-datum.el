@@ -287,7 +287,8 @@ Automatically added to `completion-at-point-functions' in sql-mode
 and sql-interactive-mode buffers that use datum."
   (when sql-datum-populate-completion
     (let* ((buf (or (and (derived-mode-p 'sql-interactive-mode) (current-buffer))
-                    (sql-find-sqli-buffer 'datum)))
+                    (let ((b (sql-find-sqli-buffer 'datum)))
+                      (and b (get-buffer b)))))
            (tables   (and buf (buffer-local-value 'sql-datum--tables   buf)))
            (schemas  (and buf (buffer-local-value 'sql-datum--schemas  buf)))
            (col-hash (and buf (buffer-local-value 'sql-datum--columns  buf)))

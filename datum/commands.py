@@ -44,6 +44,7 @@ _help_text = """
 :user                  Show the current database user.
 :version               Show the server version.
 :use <database>        Switch to a different database (where supported).
+:pwd                   Show current user, server, database, and version.
 
 :reconnect             Force a new connection, discarding the old one.
 :csv [path]            Legacy: export all output to CSV. No arg to disable.
@@ -396,6 +397,28 @@ def version(args):
         print(f"Error getting server version: {err}")
 
 
+def pwd(args):
+    """Built-in :pwd command — show current login, server, database, version."""
+    global _driver
+    cursor = connect.get_connection().cursor()
+    info = {}
+    for label, sql in [("User", _driver.sql_current_user),
+                       ("Database", _driver.sql_current_database),
+                       ("Server", _driver.sql_server_version)]:
+        try:
+            cursor.execute(sql)
+            row = cursor.fetchone()
+            if row:
+                info[label] = str(row[0]).split("\n")[0]
+        except Exception:
+            info[label] = "(unavailable)"
+    server_or_dsn = connect.get_server_or_dsn()
+    print(f"  User:     {info.get('User', '?')}")
+    print(f"  Server:   {server_or_dsn}")
+    print(f"  Database: {info.get('Database', '?')}")
+    print(f"  Version:  {info.get('Server', '?')}")
+
+
 def use_database(args):
     """Built-in :use command — switch database."""
     if not args:
@@ -457,4 +480,5 @@ _builtins = {
     ":user":       current_user,
     ":version":    version,
     ":use":        use_database,
+    ":pwd":        pwd,
 }
