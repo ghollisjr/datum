@@ -34,14 +34,15 @@ def initialize_module(docopt_args, config):
         # but attempt to extract server/dsn and db name for the prompt
         components = _conn_string.split(";")
         for piece in components:
-            if 'dsn' in piece:
-                _, value = piece.split("=")
+            lower = piece.lower()
+            if '=' not in piece:
+                continue
+            key, value = piece.split("=", 1)
+            if 'dsn' in lower:
                 _dsn = value
-            if 'server' in piece:
-                _, value = piece.split("=")
+            if 'server' in lower:
                 _server = value
-            if 'database' in piece:
-                _, value = piece.split("=")
+            if 'database' in lower:
                 _database = value
         _timeout = config["command_timeout"]
         return
@@ -81,8 +82,19 @@ def get_conn_string():
 
 
 def get_server_or_dsn():
-    """Return the server name or DSN for mode line display."""
-    return _server or _dsn or "-"
+    """Return the server name or DSN for mode line display.
+    Falls back to querying the ODBC driver if no explicit server/DSN."""
+    if _server:
+        return _server
+    if _dsn:
+        return _dsn
+    # Try to extract server name from the live connection
+    try:
+        import pyodbc
+        conn = get_connection()
+        return conn.getinfo(pyodbc.SQL_SERVER_NAME) or "-"
+    except Exception:
+        return "-"
 
 
 def get_connection(force_new=False):
