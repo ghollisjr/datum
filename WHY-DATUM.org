@@ -1,0 +1,232 @@
+#+TITLE: Why Datum?
+#+OPTIONS: toc:2 num:nil
+
+Datum is a database query tool that gets out of your way. It connects to
+anything with an ODBC driver, auto-detects the dialect, and gives you a clean
+REPL with one-keystroke access to the operations you actually use every day. If
+you live in Emacs, it feels like the database is part of your editor.
+
+* The short version
+
+- One tool for every database: MSSQL, PostgreSQL, SQLite, MySQL, Oracle,
+  Snowflake -- if it has an ODBC driver, Datum talks to it.
+- Three keystrokes to peek at a table. =C-c t t= and you're looking at rows.
+- Completion that actually works: table names, schema names, column names, all
+  fed from live introspection, all available in your editing buffer.
+- Export a query to Parquet with one command. Import a CSV into a table with
+  one command. No external scripts, no context switching.
+- The entire system is two parts: one Python package, one Emacs Lisp file.
+  No language servers, no Docker containers, no browser tabs.
+
+* What's wrong with the alternatives?
+
+** DBeaver, DataGrip, Azure Data Studio, etc.
+
+They're powerful. They're also a separate application. You leave your editor,
+you lose your flow, you Alt-Tab back and forth copying SQL between windows. You
+wait for Java to start. You manage yet another set of connections, yet another
+set of keybindings, yet another update cycle.
+
+Datum lives *inside* Emacs. Your SQL buffer, your query results, your
+completion candidates, your scratch buffers -- they're all just Emacs buffers.
+=C-c C-r= sends a region, =C-c t t= peeks at a table, =C-c t c= counts rows.
+You never leave.
+
+** psql / sqlcmd / mysql CLI
+
+These are fine tools, but they're each tied to one database engine. They don't
+talk to each other. You learn =\dt= for Postgres, then switch to MSSQL and now
+it's =sp_help=, then SQLite and it's =.tables=. Each one has its own
+configuration, its own output formatting, its own quirks.
+
+Datum gives you *one* interface. =:tables= works everywhere. =:columns=
+works everywhere. =:running= works everywhere. The dialect differences are
+handled internally -- you type the same commands regardless of which database
+you're connected to.
+
+** Org-mode Babel / ob-sql
+
+Babel is great for literate documents. It's not great for exploration. You
+write a source block, execute it, read the result, modify the block, execute
+again. There's no REPL, no completion, no live introspection. Connecting
+requires manual header arguments. Switching databases means editing those
+headers.
+
+Datum gives you a real REPL with history, completion, and immediate feedback,
+while still letting you use =sql-mode= buffers for more deliberate work.
+
+** Emacs sql.el (raw)
+
+=sql.el= provides the framework, but out of the box you get a bare comint
+buffer with no completion, no introspection, no export/import, no dialect-aware
+operations. You're on your own for everything beyond "send SQL, see text."
+
+Datum builds on =sql.el= and fills in everything it's missing.
+
+* What makes Datum different
+
+** Compute in Python, display in Emacs
+
+Datum's architecture is deliberately simple. Python does all the heavy lifting:
+connection management, query execution, result formatting, file I/O. Emacs is a
+smart terminal that silently consumes structured metadata from the output stream.
+
+There's no language server protocol. No REST API. No WebSocket. No JSON-RPC.
+Just stdout lines with an invisible envelope protocol that Emacs strips before
+you ever see them. This means:
+
+- Startup is instant (no server to launch)
+- The Python side is usable standalone from any terminal
+- The Emacs side is a single file with no dependencies beyond =sql.el=
+- Debugging is trivial -- it's just text flowing through a pipe
+
+** Dialect-aware without dialect lock-in
+
+Datum auto-detects whether you're talking to MSSQL, PostgreSQL, or something
+else, by inspecting the driver name, DSN, or even the port number. Once it
+knows, every operation adapts:
+
+| Operation     | MSSQL                            | PostgreSQL                                 |
+|---------------+----------------------------------+--------------------------------------------|
+| Top N rows    | =SELECT TOP 10 * FROM t=         | =SELECT * FROM t LIMIT 10=                 |
+| Random sample | =... ORDER BY NEWID()=           | =... ORDER BY RANDOM()=                    |
+| Table exists  | =SELECT OBJECT_ID('t')=          | =SELECT to_regclass('t')=                  |
+| Introspection | =sys.objects=, =sys.schemas=     | =information_schema=, =pg_stat_activity=   |
+
+You don't think about this. You press =C-c t t= and the right SQL appears.
+
+** One-keystroke table operations
+
+The =C-c t= prefix gives you instant access to the operations that account for
+90% of ad-hoc database work:
+
+| Keys      | What it does                         |
+|-----------+--------------------------------------|
+| =C-c t t= | Show first N rows (=C-u 20= for 20) |
+| =C-c t c= | Count rows                           |
+| =C-c t s= | Random sample of N rows              |
+| =C-c t d= | Describe columns                     |
+| =C-c t x= | Check if a table exists              |
+| =C-c t D= | Drop table (with confirmation)       |
+| =C-c t e= | Export table to file                 |
+| =C-c t i= | Import file into table (=C-u= for batch size) |
+
+Every one of these prompts with completion from the live table cache. No
+typing table names from memory.
+
+** Real completion, everywhere
+
+Run =:tables= once and every table name is a completion candidate -- in the
+REPL, in your scratch buffer, in any =sql-mode= buffer. Run =:columns= on a
+few tables and column names join the pool too. Candidates are annotated so you
+can tell tables from schemas from columns at a glance.
+
+This works with whatever completion framework you use: built-in, Company, Corfu,
+Vertico -- anything that respects =completion-at-point-functions=.
+
+** Export and import without leaving your seat
+
+#+begin_example
+C-c t e  →  pick a table  →  pick a file  →  done.
+C-c t i  →  pick a file   →  pick a table  →  done.
+#+end_example
+
+Datum uses Polars when available for maximum speed, falls back to PyArrow, and
+falls back again to stdlib CSV. You don't configure this. It just picks the
+fastest option you have installed.
+
+Import infers the schema automatically and creates the table for you. Append
+mode, replace mode, or error-if-exists -- your choice. The batch size is
+tunable per-call with =C-u= or globally via =sql-datum-import-batch-size=, so
+wide tables with many columns don't blow the ODBC parameter limit.
+
+** Running queries with auto-refresh
+
+=C-c s r= opens a dedicated buffer showing what's currently executing on the
+server. It auto-refreshes every 5 seconds and stops the timer automatically
+when you close the buffer. No polling loop left running in the background, no
+resource leak.
+
+** Multiple scratch buffers
+
+=C-c q= opens a scratch SQL buffer wired to your connection. =C-u C-c q= opens
+another one. Each has full completion and keybindings. Keep one for
+exploration, one for a long-running analysis, one for DDL -- they all share the
+same connection and introspection state.
+
+** The mode line tells you where you are
+
+#+begin_example
+[datum:postgres:mydb:localhost:postgres]
+#+end_example
+
+Dialect, database, server, user -- always visible, always current. When you
+=:use= a different database, the mode line updates. When the dialect is
+detected, the mode line updates. No guessing which connection you're using.
+
+** Secure by default
+
+Passwords are passed through a temporary environment variable that's cleared
+immediately after the process starts. They never appear in =list-processes= or
+=/proc=. For even stronger security, use Emacs =auth-source= with an encrypted
+=.authinfo.gpg= or your system keyring.
+
+** Custom commands in an INI file
+
+#+begin_src ini
+[queries]
+top=SELECT * FROM {table} LIMIT {how_many}
+find=SELECT * FROM {table} WHERE {field} = ?
+#+end_src
+
+={placeholder}= values are prompted and string-formatted. =?= values go through
+ODBC parameter binding -- properly escaped, safe from injection. You can
+combine both in one command. Your most-used queries become one-word commands.
+
+* What it looks like in practice
+
+#+begin_example
+;; Connect
+M-x sql-connect RET my-postgres RET
+datum: connecting in background...
+datum: connected.
+
+;; Open a scratch buffer
+C-c q
+datum: scratch buffer ready
+
+;; See what tables exist
+C-c s t
+  public    users         BASE TABLE
+  public    orders        BASE TABLE
+  public    products      BASE TABLE
+
+;; Peek at a table
+C-c t t  →  users
+SELECT * FROM users LIMIT 10;;
+
+  id    name       email              created_at
+  ----  ---------  -----------------  --------------------
+  1     Alice      alice@example.com  2024-01-15 09:30:00
+  2     Bob        bob@example.com    2024-01-16 14:22:00
+  ...
+
+;; How many rows?
+C-c t c  →  users
+SELECT COUNT(*) FROM users;;
+  count
+  ------
+  48231
+
+;; Export to Parquet
+C-c t e  →  users  →  /tmp/users.parquet
+datum: exporting users to /tmp/users.parquet
+datum: export complete — /tmp/users.parquet (parquet)
+
+;; Switch databases
+C-c u  →  analytics
+datum: switching to database analytics (reconnecting...)
+datum: connected to analytics.
+#+end_example
+
+Two files. No configuration ceremony. Just connect and query.
