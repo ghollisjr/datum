@@ -420,18 +420,31 @@ def pwd(args):
 
 
 def use_database(args):
-    """Built-in :use command — switch database."""
+    """Built-in :use command — switch database.
+
+    On databases that support USE (e.g. MSSQL), sends the SQL command directly.
+    On others (e.g. PostgreSQL), reconnects with the new database name.
+    """
+    global _driver
     if not args:
         print(":use requires a database name.")
         return
     db = args[0]
-    try:
-        cursor = connect.get_connection().cursor()
-        cursor.execute(f"USE {db}")
-        print(f"Switched to database: {db}")
-        envelope.meta("database", db)
-    except Exception as err:
-        print(f"Error switching database: {err}")
+    if _driver.dialect_name in ("postgres", "ansi"):
+        try:
+            connect.switch_database(db)
+            print(f"Reconnected to database: {db}")
+            envelope.meta("database", db)
+        except Exception as err:
+            print(f"Error switching database: {err}")
+    else:
+        try:
+            cursor = connect.get_connection().cursor()
+            cursor.execute(f"USE {db}")
+            print(f"Switched to database: {db}")
+            envelope.meta("database", db)
+        except Exception as err:
+            print(f"Error switching database: {err}")
 
 
 # --- Helpers ---

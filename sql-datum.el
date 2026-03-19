@@ -483,6 +483,142 @@ The buffer with name BUFFER will be used or created."
         (insert (completing-read "Table: " tables nil t))
       (user-error "datum: no tables cached — run :tables first"))))
 
+(defun sql-datum-export (path)
+  "Export the next query's results to PATH via :out.
+Prompts for a file path with completion.  Format is inferred from
+extension (.csv, .parquet, .json).  With prefix argument, overwrite
+existing files (:force)."
+  (interactive
+   (list (read-file-name "Export to: " nil nil nil nil
+                         (lambda (f)
+                           (or (file-directory-p f)
+                               (string-match-p "\\.\\(csv\\|parquet\\|json\\)\\'" f))))))
+  (let* ((abs-path (expand-file-name path))
+         (force (if current-prefix-arg " :force" ""))
+         (buf (sql-find-sqli-buffer 'datum)))
+    (unless buf
+      (user-error "No active datum buffer found"))
+    (comint-send-string (get-buffer buf)
+                        (format ":out %s%s\n" abs-path force))
+    (message "datum: :out target set to %s — run your query now%s"
+             abs-path (if current-prefix-arg " (overwrite)" ""))))
+
+(defun sql-datum-import (path table-name mode)
+  "Import file at PATH into TABLE-NAME via :in.
+Prompts for a file path, table name (with completion from cache),
+and import mode."
+  (interactive
+   (let* ((file (read-file-name "Import file: " nil nil t nil
+                                (lambda (f)
+                                  (or (file-directory-p f)
+                                      (string-match-p "\\.\\(csv\\|parquet\\|json\\)\\'" f)))))
+          (buf  (sql-find-sqli-buffer 'datum))
+          (tables (and buf (buffer-local-value 'sql-datum--tables
+                                               (get-buffer buf))))
+          (table (completing-read "Into table: " tables nil nil))
+          (mode  (completing-read "Mode: "
+                                  '("default (error if exists)"
+                                    ":insert (append)"
+                                    ":replace (drop & recreate)")
+                                  nil t nil nil
+                                  "default (error if exists)")))
+     (list file table
+           (pcase mode
+             ((pred (string-prefix-p ":insert"))  ":insert")
+             ((pred (string-prefix-p ":replace")) ":replace")
+             (_ nil)))))
+  (let* ((abs-path (expand-file-name path))
+         (mode-flag (if mode (concat " " mode) ""))
+         (buf (sql-find-sqli-buffer 'datum)))
+    (unless buf
+      (user-error "No active datum buffer found"))
+    (comint-send-string (get-buffer buf)
+                        (format ":in %s %s%s\n" abs-path table-name mode-flag))
+    (message "datum: importing %s into %s%s"
+             (file-name-nondirectory abs-path) table-name
+             (or mode-flag " (default)"))))
+
+(defun sql-datum--send-command (cmd)
+  "Send CMD string to the active datum process."
+  (let ((buf (sql-find-sqli-buffer 'datum)))
+    (unless buf
+      (user-error "No active datum buffer found"))
+    (comint-send-string (get-buffer buf) (concat cmd "\n"))))
+
+(defun sql-datum-pwd ()
+  "Show current user, server, database, and version via :pwd."
+  (interactive)
+  (sql-datum--send-command ":pwd"))
+
+(defun sql-datum-tables ()
+  "List all tables and views via :tables."
+  (interactive)
+  (sql-datum--send-command ":tables"))
+
+(defun sql-datum-columns (table)
+  "List columns for TABLE via :columns."
+  (interactive
+   (let* ((buf (sql-find-sqli-buffer 'datum))
+          (tables (and buf (buffer-local-value 'sql-datum--tables
+                                               (get-buffer buf)))))
+     (list (completing-read "Table: " tables nil nil))))
+  (sql-datum--send-command (format ":columns %s" table)))
+
+(defun sql-datum-databases ()
+  "List all databases via :databases."
+  (interactive)
+  (sql-datum--send-command ":databases"))
+
+(defun sql-datum-schemas ()
+  "List all schemas via :schemas."
+  (interactive)
+  (sql-datum--send-command ":schemas"))
+
+(defun sql-datum-running ()
+  "List currently running queries via :running."
+  (interactive)
+  (sql-datum--send-command ":running"))
+
+(defun sql-datum-version ()
+  "Show server version via :version."
+  (interactive)
+  (sql-datum--send-command ":version"))
+
+(defun sql-datum-user ()
+  "Show current database user via :user."
+  (interactive)
+  (sql-datum--send-command ":user"))
+
+(defun sql-datum-use-database (db)
+  "Switch to database DB via :use.
+Prompts with completion from the cached database list."
+  (interactive
+   (let* ((buf (sql-find-sqli-buffer 'datum))
+          (databases (and buf (buffer-local-value 'sql-datum--databases
+                                                  (get-buffer buf)))))
+     (list (completing-read "Switch to database: " databases nil nil))))
+  (sql-datum--send-command (format ":use %s" db)))
+
+;;; ---------------------------------------------------------------------------
+;;; Keybindings
+;;; ---------------------------------------------------------------------------
+
+(with-eval-after-load 'sql
+  ;; C-c t: table import/export
+  (define-key sql-mode-map (kbd "C-c t e") #'sql-datum-export)
+  (define-key sql-mode-map (kbd "C-c t i") #'sql-datum-import)
+  ;; C-c s: session info
+  (define-key sql-mode-map (kbd "C-c s p") #'sql-datum-pwd)
+  (define-key sql-mode-map (kbd "C-c s t") #'sql-datum-tables)
+  (define-key sql-mode-map (kbd "C-c s c") #'sql-datum-columns)
+  (define-key sql-mode-map (kbd "C-c s d") #'sql-datum-databases)
+  (define-key sql-mode-map (kbd "C-c s s") #'sql-datum-schemas)
+  (define-key sql-mode-map (kbd "C-c s r") #'sql-datum-running)
+  (define-key sql-mode-map (kbd "C-c s v") #'sql-datum-version)
+  (define-key sql-mode-map (kbd "C-c s u") #'sql-datum-user)
+  ;; C-c u: switch database
+  (define-key sql-mode-map (kbd "C-c u")   #'sql-datum-use-database))
+
 ;;; ---------------------------------------------------------------------------
 ;;; Product registration
 ;;; ---------------------------------------------------------------------------

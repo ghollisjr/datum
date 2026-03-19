@@ -110,6 +110,28 @@ def get_connection(force_new=False):
     return _connection
 
 
+def switch_database(db):
+    """Change the database and reconnect.
+
+    For databases like PostgreSQL that don't support USE, this rebuilds the
+    connection string with the new database and opens a fresh connection.
+    """
+    import re
+    global _database, _conn_string
+    _database = db
+    # If built from individual params, rebuild cleanly
+    if _params is not None:
+        _build_connection_string()
+    else:
+        # Raw --conn-string: replace or append Database=
+        if re.search(r'Database=[^;]*', _conn_string, re.IGNORECASE):
+            _conn_string = re.sub(r'Database=[^;]*', f'Database={db}',
+                                  _conn_string, flags=re.IGNORECASE)
+        else:
+            _conn_string += f";Database={db}"
+    get_connection(force_new=True)
+
+
 def _build_connection_string():
     global _conn_string, _driver, _dsn, _server, _database, _user, _pass
     global _integrated, _params

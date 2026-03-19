@@ -1,0 +1,435 @@
+#+TITLE: Datum
+#+AUTHOR: Sebastian Monia & Gary Hollis
+#+OPTIONS: toc:3 num:nil
+
+A command-line tool to query databases via ODBC, with a first-class Emacs
+frontend.
+
+Datum keeps all compute in Python and uses Emacs as a smart terminal.
+Structured data flows between them via an envelope protocol that is invisible
+to the user but keeps the Emacs side informed about dialect, metadata, and
+introspection results.
+
+* Features
+
+- Connect to any database with an ODBC driver (MSSQL, PostgreSQL, SQLite, MySQL, Oracle, ...)
+- Auto-detect SQL dialect or set it explicitly
+- Introspection commands: =:tables=, =:columns=, =:schemas=, =:databases=, =:running=
+- Export query results to CSV, Parquet, or JSON (=:out=)
+- Import files into SQL tables with schema inference (=:in=)
+- Custom query templates with placeholders and ODBC parameters
+- Emacs integration: completion-at-point, mode line status, keybindings
+- Optional Polars backend for faster import/export (falls back to pyarrow or stdlib)
+
+* Installation
+
+** Python package
+
+#+begin_src shell
+pip install git+https://github.com/sebasmonia/datum.git
+#+end_src
+
+Or for development (changes take effect immediately):
+
+#+begin_src shell
+cd /path/to/datum
+pip install -e .
+#+end_src
+
+** Dependencies
+
+| Package  | Status   | Purpose                          |
+|----------+----------+----------------------------------|
+| =pyodbc= | Required | ODBC database connectivity       |
+| =docopt= | Required | CLI argument parsing             |
+| =polars= | Optional | Fast import/export (preferred)   |
+| =pyarrow= | Optional | Import/export fallback           |
+
+Install optional dependencies for best performance:
+
+#+begin_src shell
+pip install polars
+#+end_src
+
+** Emacs package
+
+Place =sql-datum.el= in your =load-path= and add to your init file:
+
+#+begin_src emacs-lisp
+(require 'sql-datum)
+#+end_src
+
+* Connecting to a database
+
+** Using individual parameters
+
+#+begin_src shell
+datum --driver "ODBC Driver 18 for SQL Server" \
+      --server myserver --database mydb \
+      --user sa --pass ENV=DB_SECRET
+#+end_src
+
+** Using a DSN
+
+#+begin_src shell
+datum --dsn MyDSN
+#+end_src
+
+** Using a connection string
+
+#+begin_src shell
+datum --conn-string="Driver={PostgreSQL Unicode};Server=localhost;Database=mydb;Uid=postgres;Pwd=secret"
+#+end_src
+
+** Environment variable substitution
+
+Any parameter value starting with =ENV== pulls from an environment variable:
+
+#+begin_src shell
+datum --driver "PostgreSQL Unicode" --server localhost \
+      --user ENV=PG_USER --pass ENV=PG_PASS --database mydb
+#+end_src
+
+** Dialect detection
+
+Datum auto-detects the SQL dialect from the driver name or DSN.  You can
+override it with =--sql-type=:
+
+#+begin_src shell
+datum --dsn MyDSN --sql-type postgres
+#+end_src
+
+Supported dialects: =mssql=, =postgres=, =ansi= (fallback).
+
+* Query input
+
+Type SQL at the =>= prompt.  Queries are sent to the server when you:
+
+- End a line with =;;=
+- Type =GO= on its own line
+
+#+begin_example
+>select * from users;;
+
+>select *
+>from orders
+>where total > 100
+>GO
+#+end_example
+
+** Parameterized queries
+
+Use =?= as an ODBC parameter placeholder.  Datum prompts for each value:
+
+#+begin_example
+>select * from users where name = ? and age > ?;;
+1>Alice
+2>30
+#+end_example
+
+Values are properly escaped by pyodbc.
+
+* Built-in commands
+
+All commands start with =:= and are entered at the prompt.
+
+** Session info
+
+| Command             | Description                                    |
+|---------------------+------------------------------------------------|
+| =:help=             | Print the command list                         |
+| =:pwd=              | Show current user, server, database, version   |
+| =:user=             | Show the current database user                 |
+| =:version=          | Show the server version                        |
+| =:reconnect=        | Force a new connection                         |
+
+** Display settings
+
+| Command             | Description                                    |
+|---------------------+------------------------------------------------|
+| =:rows [n]=         | Max rows to print (0 = all, default)           |
+| =:chars [n]=        | Max chars per column (0 = no limit, default)   |
+| =:null [string]=    | String for NULL values (=OFF= = empty string)  |
+| =:newline [string]= | Replacement for newlines (=OFF= = keep as-is)  |
+| =:tab [string]=     | Replacement for tabs (=OFF= = keep as-is)      |
+| =:timeout [n]=      | Command timeout in seconds (0 = no limit)      |
+
+** Introspection
+
+| Command             | Description                                    |
+|---------------------+------------------------------------------------|
+| =:databases=        | List all databases on the server               |
+| =:schemas=          | List all schemas in the current database        |
+| =:tables=           | List all tables and views                      |
+| =:columns <table>=  | List columns (supports =schema.table=)         |
+| =:running=          | List currently running queries                 |
+| =:use <database>=   | Switch to a different database                 |
+| =:type [dialect]=   | Show or set the SQL dialect                    |
+
+** Export (=:out=)
+
+Export the *next* query's results to a file.  Format is inferred from the
+file extension.
+
+#+begin_example
+>:out /tmp/results.csv
+:out target set to: /tmp/results.csv (will error if file exists)
+Run your query now. The next query's results will be exported.
+
+>select * from orders;;
+#+end_example
+
+Supported formats: =.csv=, =.parquet=, =.json= (newline-delimited).
+
+Use =:force= to overwrite an existing file:
+
+#+begin_example
+>:out /tmp/results.parquet :force
+#+end_example
+
+** Import (=:in=)
+
+Import a file into a SQL table.  Schema is inferred automatically.
+
+#+begin_example
+>:in /tmp/data.csv my_table
+#+end_example
+
+Modes:
+
+| Syntax                            | Behavior                      |
+|-----------------------------------+-------------------------------|
+| =:in file table=                  | Error if table exists         |
+| =:in file table :insert=         | Append to existing table      |
+| =:in file table :replace=        | Drop, recreate, and insert    |
+
+Supported formats: =.csv=, =.parquet=, =.json=.
+
+When Polars is installed, it handles file reading and type inference.
+Otherwise falls back to pyarrow (for parquet/json) or stdlib csv.
+
+** Legacy CSV export
+
+#+begin_example
+>:csv /tmp/session_output.csv
+#+end_example
+
+Appends all subsequent query output to the file until disabled with =:csv=
+(no argument).
+
+** Script execution
+
+#+begin_example
+>:script /path/to/query.sql
+#+end_example
+
+Reads and executes a SQL file.  Supports ={placeholder}= and =?= parameters
+like custom commands.
+
+* Configuration file
+
+Datum looks for an INI file in this order:
+
+1. The path given by =--config=
+2. =$XDG_CONFIG_HOME/datum/config.ini=
+3. =~/.config/datum/config.ini=
+
+** Example configuration
+
+#+begin_src ini
+[general]
+rows_to_print=0
+column_display_length=0
+null_string=[NULL]
+newline_replacement=[NL]
+tab_replacement=[TAB]
+
+[queries]
+top=SELECT * FROM {table} LIMIT {how_many}
+find=SELECT * FROM {table} WHERE {column} LIKE '%{pattern}%'
+#+end_src
+
+** Custom commands
+
+Queries in the =[queries]= section become commands prefixed with =:=.
+They support two levels of parameterization:
+
+- ={placeholder}= -- replaced via Python string formatting (prompted interactively)
+- =?= -- ODBC parameterized values (escaped by pyodbc)
+
+#+begin_example
+>:top
+table>users
+how_many>10
+
+Command query:
+ SELECT * FROM users LIMIT 10
+#+end_example
+
+You can combine both:
+
+#+begin_src ini
+[queries]
+search=SELECT * FROM {table} WHERE {field} = ?
+#+end_src
+
+#+begin_example
+>:search
+field>name
+table>users
+
+Command query:
+ SELECT * FROM users WHERE name = ?
+1>Alice
+#+end_example
+
+* Emacs integration
+
+** Setup
+
+#+begin_src emacs-lisp
+(use-package sql-datum
+  :load-path "/path/to/datum"
+  :after sql
+  :config
+  ;; PostgreSQL via DSN
+  (add-to-list 'sql-connection-alist
+               '("my-postgres"
+                 (sql-product 'datum)
+                 (sql-send-terminator ";;")
+                 (sql-server "localhost")
+                 (sql-database "mydb")
+                 (sql-user "postgres")
+                 (sql-password 'ask)
+                 (sql-datum-options '("--driver" "PostgreSQL Unicode"))))
+  ;; MSSQL with integrated auth
+  (add-to-list 'sql-connection-alist
+               '("my-mssql"
+                 (sql-product 'datum)
+                 (sql-send-terminator ";;")
+                 (sql-server "sqlserver.local")
+                 (sql-database "northwind")
+                 (sql-user "")
+                 (sql-password "")
+                 (sql-datum-options '("--driver" "ODBC Driver 18 for SQL Server"
+                                      "--integrated"))))
+  ;; SQLite
+  (add-to-list 'sql-connection-alist
+               '("my-sqlite"
+                 (sql-product 'datum)
+                 (sql-send-terminator ";;")
+                 (sql-server "")
+                 (sql-user "")
+                 (sql-password "")
+                 (sql-datum-options '("--driver" "SQLite3"))
+                 (sql-database "/path/to/database.db"))))
+#+end_src
+
+Then use =M-x sql-connect= and pick a connection, or =M-x sql-datum= to be
+prompted for parameters interactively.
+
+** Password handling
+
+Three options for =sql-password=:
+
+- A literal string (visible in =list-processes=)
+- ='ask= -- prompted with =read-passwd= each time
+- ='auth-source= -- looked up via Emacs =auth-source= (supports =.authinfo.gpg=, GNOME Keyring, etc.)
+
+For =auth-source=, add an entry keyed by connection name:
+
+#+begin_example
+machine my-postgres login postgres password secret123
+#+end_example
+
+By default, passwords are passed via a temporary environment variable
+(=SQLDATUMPASS=) so they don't appear in process listings.
+
+** Keybindings
+
+All keybindings are active in =sql-mode= buffers.
+
+*** Table operations (=C-c t=)
+
+| Key       | Command              | Description                              |
+|-----------+----------------------+------------------------------------------|
+| =C-c t e= | =sql-datum-export=   | Set =:out= target (=C-u= for =:force=)  |
+| =C-c t i= | =sql-datum-import=   | Import a file into a table               |
+
+*** Session info (=C-c s=)
+
+| Key       | Command              | Description                              |
+|-----------+----------------------+------------------------------------------|
+| =C-c s p= | =sql-datum-pwd=      | Show user, server, database, version     |
+| =C-c s t= | =sql-datum-tables=   | List tables                              |
+| =C-c s c= | =sql-datum-columns=  | List columns (prompts for table)         |
+| =C-c s d= | =sql-datum-databases= | List databases                          |
+| =C-c s s= | =sql-datum-schemas=  | List schemas                             |
+| =C-c s r= | =sql-datum-running=  | Show running queries                     |
+| =C-c s v= | =sql-datum-version=  | Show server version                      |
+| =C-c s u= | =sql-datum-user=     | Show current user                        |
+
+** Completion at point
+
+After running =:tables= or =:columns=, table, schema, and column names are
+available for completion in both the SQLi buffer and =sql-mode= editing
+buffers.  Works with =completion-at-point= (=C-M-i=), Company, Corfu, etc.
+
+** Mode line
+
+The mode line shows connection status:
+
+#+begin_example
+[datum:postgres:mydb:localhost:postgres]
+#+end_example
+
+Format: =[datum:dialect:database:server:user]=
+
+** Running queries auto-refresh
+
+When you run =:running= (or =C-c s r=), the results open in a dedicated
+buffer that auto-refreshes every 5 seconds (customizable via
+=sql-datum-running-refresh-interval=).
+
+| Key | Action               |
+|-----+----------------------|
+| =g= | Manual refresh       |
+| =a= | Toggle auto-refresh  |
+| =q= | Quit and stop timer  |
+
+The timer stops automatically when the buffer is no longer visible.
+
+** Customization
+
+| Variable                             | Default          | Description                          |
+|--------------------------------------+------------------+--------------------------------------|
+| =sql-datum-program=                  | ="datum"=        | Path to the datum executable         |
+| =sql-datum-password-variable=        | ="SQLDATUMPASS"= | Env var for password passing         |
+| =sql-datum-populate-completion=      | =t=              | Enable completion from introspection |
+| =sql-datum-open-result-file=         | =t=              | Offer to open =:out= result files    |
+| =sql-datum-running-refresh-interval= | =5=              | Auto-refresh interval (seconds)      |
+
+* Envelope protocol
+
+Datum communicates structured data to Emacs via envelope lines:
+
+#+begin_example
+##DATUM:type:payload##
+#+end_example
+
+These are stripped from the visible buffer by a =comint-preoutput-filter= and
+acted on silently.
+
+| Type          | Payload              | Purpose                           |
+|---------------+----------------------+-----------------------------------|
+| =info=        | message              | Status message in minibuffer      |
+| =warn=        | message              | Warning in minibuffer             |
+| =error=       | message              | Error in minibuffer               |
+| =dialect=     | mssql/postgres/ansi  | Set SQL dialect                   |
+| =meta=        | key:value            | Metadata (server, database, etc.) |
+| =result-file= | path:format          | Exported file notification        |
+| =introspect=  | kind:json-array      | Introspection data for completion |
+
+* License
+
+MIT. See [[file:LICENSE][LICENSE]].

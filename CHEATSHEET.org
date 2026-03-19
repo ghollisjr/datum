@@ -1,0 +1,128 @@
+#+TITLE: Datum Cheatsheet
+#+OPTIONS: toc:nil num:nil
+
+* Emacs Keybindings
+
+** Table Operations (=C-c t=)
+
+| Key       | Action                                      |
+|-----------+---------------------------------------------|
+| =C-c t e= | Export next query results (=C-u= to force)  |
+| =C-c t i= | Import file into table                      |
+
+** Session Info (=C-c s=)
+
+| Key       | Action                   |
+|-----------+--------------------------|
+| =C-c s p= | Show user/server/db/ver  |
+| =C-c s t= | List tables              |
+| =C-c s c= | List columns for table   |
+| =C-c s d= | List databases           |
+| =C-c s s= | List schemas             |
+| =C-c s r= | Running queries          |
+| =C-c s v= | Server version           |
+| =C-c s u= | Current user             |
+
+** Other
+
+| Key     | Action            |
+|---------+-------------------|
+| =C-c u= | Switch database   |
+
+* Running Queries Buffer
+
+| Key | Action               |
+|-----+----------------------|
+| =g= | Refresh              |
+| =a= | Toggle auto-refresh  |
+| =q= | Quit                 |
+
+* Query Input
+
+| Terminator | Meaning                        |
+|------------+--------------------------------|
+| =;;=       | End of line, send query        |
+| =GO=       | Own line, send preceding lines |
+| =?=        | ODBC parameter (prompted)      |
+
+* Built-in Commands
+
+** Session
+
+| Command       | Description                  |
+|---------------+------------------------------|
+| =:help=       | List all commands            |
+| =:pwd=        | User, server, database, ver  |
+| =:user=       | Current user                 |
+| =:version=    | Server version               |
+| =:reconnect=  | Force new connection         |
+| =:use <db>=   | Switch database (reconnects on PostgreSQL) |
+| =:type [val]= | Show/set dialect             |
+| =:exit=       | End session                  |
+
+** Display
+
+| Command          | Description                     |
+|------------------+---------------------------------|
+| =:rows [n]=      | Max rows (0 = all)              |
+| =:chars [n]=     | Max chars/column (0 = all)      |
+| =:null [str]=    | NULL display (=OFF= = blank)    |
+| =:newline [str]= | Newline replacement (=OFF= = keep) |
+| =:tab [str]=     | Tab replacement (=OFF= = keep)  |
+| =:timeout [n]=   | Timeout secs (0 = none)         |
+
+** Introspection
+
+| Command          | Description              |
+|------------------+--------------------------|
+| =:databases=     | List databases           |
+| =:schemas=       | List schemas             |
+| =:tables=        | List tables and views    |
+| =:columns <tbl>= | Columns (=schema.table=) |
+| =:running=       | Running queries          |
+
+** Export / Import
+
+| Command                          | Description                       |
+|----------------------------------+-----------------------------------|
+| =:out <path> [:force]=           | Export next query (.csv/.parquet/.json) |
+| =:in <path> <table>=            | Import (error if exists)          |
+| =:in <path> <table> :insert=    | Import (append)                   |
+| =:in <path> <table> :replace=   | Import (drop & recreate)          |
+| =:csv [path]=                    | Legacy session CSV export         |
+| =:script [path]=                 | Run SQL file                      |
+
+* Connection Examples
+
+#+begin_src shell
+# PostgreSQL
+datum --driver "PostgreSQL Unicode" --server localhost --database mydb --user postgres --pass ENV=PG_PASS
+
+# MSSQL integrated auth
+datum --driver "ODBC Driver 18 for SQL Server" --server myserver --database mydb --integrated
+
+# SQLite
+datum --driver SQLite3 --database /path/to/db.sqlite
+
+# DSN
+datum --dsn MyDSN
+
+# Connection string
+datum --conn-string="Driver={PostgreSQL Unicode};Server=localhost;Database=mydb;Uid=postgres;Pwd=secret"
+#+end_src
+
+* Config File Location
+
+1. =--config <path>=
+2. =$XDG_CONFIG_HOME/datum/config.ini=
+3. =~/.config/datum/config.ini=
+
+* Custom Commands
+
+#+begin_src ini
+[queries]
+top=SELECT * FROM {table} LIMIT {how_many}
+find=SELECT * FROM {table} WHERE {field} = ?
+#+end_src
+
+={placeholder}= is prompted and string-formatted. =?= is an ODBC parameter (escaped).
