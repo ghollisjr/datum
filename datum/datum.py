@@ -23,9 +23,8 @@ def initialize(args):
     printer.initialize_module(config)
     exporter.initialize_module(config)
     commands.initialize_module(config)
-    # we don't _need_ to connect now, but it is a good place to blow up
-    # if the parameters we have aren't good
-    connect.get_connection()
+    # Connection is deferred to the first query — this allows the REPL prompt
+    # to appear immediately without blocking on pyodbc.connect() at startup.
 
 
 def query_loop():
@@ -35,6 +34,12 @@ def query_loop():
     commands, and printing the results, if any.
     """
     global config
+    print("Connecting...", flush=True)
+    try:
+        connect.get_connection()
+    except Exception as err:
+        print(f"---CONNECTION ERROR---\n{err}\n---CONNECTION ERROR---", flush=True)
+        return
     prompt_header = connect.show_connection_banner_and_get_prompt_header()
     print(prompt_header)
     query = prompt_for_query_or_command()

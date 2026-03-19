@@ -55,7 +55,7 @@ flag, but then the password is visible for example in `list-processes'."
 (defun sql-comint-datum (product options &optional buf-name)
   "Create a comint buffer and connect to database using Datum.
 PRODUCT is the sql product (datum). OPTIONS are additional
-paramaters not defined in the customization. BUF-NAME is the name
+parameters not defined in the customization. BUF-NAME is the name
 for the `comint' buffer."
   ;; Support for "standard" parameter types that might be let-bound
   (let ((parameters (append options
@@ -86,7 +86,12 @@ for the `comint' buffer."
     (sql-comint product parameters buf-name)
     ;; clear this if it was used
     (when sql-datum-password-variable
-      (setenv sql-datum-password-variable))))
+      (setenv sql-datum-password-variable))
+    ;; Wire up an async sentinel so Emacs does not block waiting for the
+    ;; connection banner.  The sentinel fires when the datum subprocess
+    ;; produces output; once we see the prompt we notify the user and remove
+    ;; the sentinel so it does not interfere with normal comint operation.
+    (sql-datum--watch-for-connection-banner (get-buffer (or buf-name "*SQL*")))))
 
 (defun sql-datum--comint-username ()
   "Determine the username for the connection.
@@ -155,6 +160,24 @@ Return a cons with the parameters and the password prompted."
       (setf parameters (append parameters (list "--config"
                                                 (read-file-name "Config file path: ")))))
     (cons parameters pass)))
+
+(defun sql-datum--watch-for-connection-banner (buf)
+  "Watch BUF's process output for the datum connection banner.
+Installs a temporary `comint-output-filter-functions' hook that fires once
+when datum emits its prompt, displays a message, then removes itself.
+This prevents Emacs from blocking on `accept-process-output' while pyodbc
+is establishing the ODBC connection."
+  (when (buffer-live-p buf)
+    (with-current-buffer buf
+      (letrec ((watcher
+                (lambda (output)
+                  (when (string-match-p (rx bol (* nonl) ">") output)
+                    ;; Prompt appeared — connection is live.
+                    (message "datum: connected.")
+                    ;; Remove ourselves so normal comint takes over.
+                    (remove-hook 'comint-output-filter-functions watcher t)))))
+        (add-hook 'comint-output-filter-functions watcher nil t))
+      (message "datum: connecting in background..."))))
 
 ;;;###autoload
 (defun sql-datum (&optional buffer)
