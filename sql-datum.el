@@ -298,9 +298,10 @@ and sql-interactive-mode buffers that use datum."
                                     (setq all (append v all)))
                                   col-hash)
                          (delete-dups all))))
-           (bounds  (bounds-of-thing-at-point 'symbol))
-           (start   (or (car bounds) (point)))
-           (end     (or (cdr bounds) (point)))
+           (end     (point))
+           (start   (save-excursion
+                      (skip-chars-backward "a-zA-Z0-9_.#")
+                      (point)))
            (candidates (append tables schemas columns)))
       (when candidates
         (list start end candidates
@@ -317,7 +318,7 @@ and sql-interactive-mode buffers that use datum."
 The capf function itself checks for an active datum connection and
 returns nil if none is found, so this is safe for non-datum buffers."
   (add-hook 'completion-at-point-functions
-            #'sql-datum-completion-at-point nil t))
+            #'sql-datum-completion-at-point -90 t))
 
 (add-hook 'sql-mode-hook #'sql-datum--sql-mode-hook)
 
@@ -373,8 +374,9 @@ for the `comint' buffer."
       (add-hook 'comint-preoutput-filter-functions
                 #'sql-datum--preoutput-filter nil t)
       ;; Install completion-at-point in the SQLi buffer itself.
+      ;; Prepend so it runs before comint's default filename completion.
       (add-hook 'completion-at-point-functions
-                #'sql-datum-completion-at-point nil t)
+                #'sql-datum-completion-at-point -90 t)
       ;; Watch for the first prompt to confirm connection.
       (letrec ((watcher
                 (lambda (output)

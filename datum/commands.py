@@ -339,9 +339,38 @@ def schemas(args):
 
 
 def tables(args):
-    """Built-in :tables command."""
+    """Built-in :tables command.
+
+    The tables query returns (schema, table_name, table_type).  We send both
+    bare table names and schema-qualified names as completion candidates.
+    """
     global _driver
-    _run_introspect(_driver.sql_list_tables, "tables", "tables")
+    try:
+        cursor = connect.get_connection().cursor()
+        cursor.execute(_driver.sql_list_tables)
+        rows = cursor.fetchall()
+        if not rows:
+            print("(no tables found)")
+            return
+        headers = [col[0] for col in cursor.description]
+        col_widths = [max(len(str(h)), max((len(str(r[i])) for r in rows), default=0))
+                      for i, h in enumerate(headers)]
+        fmt = "  ".join(f"{{:<{w}}}" for w in col_widths)
+        print(fmt.format(*headers))
+        print("  ".join("-" * w for w in col_widths))
+        for row in rows:
+            print(fmt.format(*[str(v) for v in row]))
+        # Send both bare and qualified names for completion
+        items = []
+        for row in rows:
+            schema = str(row[0]) if len(row) > 2 else None
+            table_name = str(row[1]) if len(row) > 2 else str(row[0])
+            items.append(table_name)
+            if schema:
+                items.append(f"{schema}.{table_name}")
+        envelope.introspect("tables", sorted(set(items)))
+    except Exception as err:
+        print(f"Error running tables query: {err}")
 
 
 def columns(args):
