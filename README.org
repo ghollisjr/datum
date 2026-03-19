@@ -197,13 +197,18 @@ Import a file into a SQL table.  Schema is inferred automatically.
 
 Modes:
 
-| Syntax                            | Behavior                      |
-|-----------------------------------+-------------------------------|
-| =:in file table=                  | Error if table exists         |
-| =:in file table :insert=         | Append to existing table      |
-| =:in file table :replace=        | Drop, recreate, and insert    |
+| Syntax                                   | Behavior                      |
+|------------------------------------------+-------------------------------|
+| =:in file table=                         | Error if table exists         |
+| =:in file table :insert=                | Append to existing table      |
+| =:in file table :replace=               | Drop, recreate, and insert    |
+| =:in file table :batch 500=             | Custom batch size (default 1000) |
 
 Supported formats: =.csv=, =.parquet=, =.json=.
+
+The =:batch N= flag controls how many rows are sent per =executemany= call.
+Lower values use less memory (useful for wide tables); higher values are faster.
+The default is 1000.
 
 When Polars is installed, it handles file reading and type inference.
 Otherwise falls back to pyarrow (for parquet/json) or stdlib csv.
@@ -353,13 +358,14 @@ All keybindings are active in =sql-mode= buffers.
 
 | Key       | Command                  | Description                                  |
 |-----------+--------------------------+----------------------------------------------|
-| =C-c t e= | =sql-datum-export=       | Set =:out= target (=C-u= for =:force=)      |
-| =C-c t i= | =sql-datum-import=       | Import a file into a table                   |
+| =C-c t e= | =sql-datum-export=       | Export table to file (=C-u= to force overwrite) |
+| =C-c t i= | =sql-datum-import=       | Import file into table (=C-u= for batch size)   |
 | =C-c t t= | =sql-datum-top=          | Select top N rows (default 10, =C-u N=)      |
 | =C-c t c= | =sql-datum-count=        | Count rows in table                          |
 | =C-c t s= | =sql-datum-sample=       | Random sample of N rows (default 10, =C-u N=) |
 | =C-c t d= | =sql-datum-describe=     | Describe table columns (alias for =columns=) |
 | =C-c t x= | =sql-datum-table-exists= | Check if table exists                        |
+| =C-c t D= | =sql-datum-drop-table=   | Drop table (with confirmation)               |
 
 The quick-query commands (=top=, =sample=, =count=, =table-exists=) are
 dialect-aware: they use =TOP= / =NEWID()= / =OBJECT_ID()= on MSSQL and
@@ -434,7 +440,9 @@ The timer stops automatically when the buffer is no longer visible.
 | =sql-datum-program=                  | ="datum"=        | Path to the datum executable         |
 | =sql-datum-password-variable=        | ="SQLDATUMPASS"= | Env var for password passing         |
 | =sql-datum-populate-completion=      | =t=              | Enable completion from introspection |
-| =sql-datum-open-result-file=         | =t=              | Offer to open =:out= result files    |
+| =sql-datum-open-result-file=         | =nil=            | Offer to open =:out= result files    |
+| =sql-datum-import-batch-size=        | =1000=           | Rows per batch for =:in= imports     |
+| =sql-datum-confirm-drop=             | =t=              | Prompt before =C-c t D= drops table |
 | =sql-datum-running-refresh-interval= | =5=              | Auto-refresh interval (seconds)      |
 
 * Envelope protocol

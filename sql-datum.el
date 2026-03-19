@@ -57,10 +57,24 @@ the completion candidates available when editing SQL."
   :type 'boolean
   :group 'SQL)
 
-(defcustom sql-datum-open-result-file t
-  "When non-nil, offer to open the file after a successful :out export."
+(defcustom sql-datum-open-result-file nil
+  "When non-nil, offer to open the file after a successful :out export.
+By default, export completion is reported in the minibuffer only."
   :type 'boolean
   :group 'SQL)
+
+(defcustom sql-datum-import-batch-size 1000
+  "Number of rows per batch for :in imports.
+Lower values use less memory; higher values are faster.
+Override per-call with a prefix argument to `sql-datum-import'."
+  :type 'integer
+  :group 'SQL)
+
+(defcustom sql-datum-confirm-drop t
+  "When non-nil, prompt for confirmation before dropping a table."
+  :type 'boolean
+  :group 'SQL)
+
 
 ;;; ---------------------------------------------------------------------------
 ;;; Buffer-local state
@@ -182,10 +196,11 @@ Handles partial envelope lines split across multiple filter calls."
   (force-mode-line-update))
 
 (defun sql-datum--handle-result-file (path fmt)
-  "Act on a result-file envelope: show PATH and optionally open it."
-  (message "datum: result written to %s (%s)" path fmt)
+  "Act on a result-file envelope: report completion in the minibuffer.
+When `sql-datum-open-result-file' is non-nil, also offer to open the file."
+  (message "datum: export complete — %s (%s)" path fmt)
   (when sql-datum-open-result-file
-    (when (y-or-n-p (format "datum: open result file %s? " path))
+    (when (y-or-n-p (format "Open %s? " path))
       (find-file path))))
 
 (defun sql-datum--handle-introspect (kind json-str)
@@ -529,30 +544,40 @@ The buffer with name BUFFER will be used or created."
         (insert (completing-read "Table: " tables nil t))
       (user-error "datum: no tables cached — run :tables first"))))
 
-(defun sql-datum-export (path)
-  "Export the next query's results to PATH via :out.
-Prompts for a file path with completion.  Format is inferred from
-extension (.csv, .parquet, .json).  With prefix argument, overwrite
-existing files (:force)."
+(defun sql-datum-export (table path)
+  "Export TABLE to PATH via :out followed by SELECT *.
+Prompts for a table name (with completion) and a file path.
+Format is inferred from extension (.csv, .parquet, .json).
+If PATH already exists, asks for confirmation unless a prefix
+argument is given, in which case it force-overwrites."
   (interactive
-   (list (read-file-name "Export to: " nil nil nil nil
-                         (lambda (f)
-                           (or (file-directory-p f)
-                               (string-match-p "\\.\\(csv\\|parquet\\|json\\)\\'" f))))))
+   (let* ((tbl (sql-datum--read-table "Export table: "))
+          (file (read-file-name "Export to: " nil nil nil nil
+                                (lambda (f)
+                                  (or (file-directory-p f)
+                                      (string-match-p "\\.\\(csv\\|parquet\\|json\\)\\'" f))))))
+     (list tbl file)))
   (let* ((abs-path (expand-file-name path))
-         (force (if current-prefix-arg " :force" ""))
+         (force (or current-prefix-arg
+                    (and (file-exists-p abs-path)
+                         (y-or-n-p (format "%s exists. Overwrite? " abs-path)))))
+         (force-flag (if force " :force" ""))
          (buf (sql-find-sqli-buffer 'datum)))
     (unless buf
       (user-error "No active datum buffer found"))
-    (comint-send-string (get-buffer buf)
-                        (format ":out %s%s\n" abs-path force))
-    (message "datum: :out target set to %s — run your query now%s"
-             abs-path (if current-prefix-arg " (overwrite)" ""))))
+    (when (and (file-exists-p abs-path) (not force))
+      (user-error "Export cancelled"))
+    (let ((proc (get-buffer buf)))
+      (comint-send-string proc (format ":out %s%s\n" abs-path force-flag))
+      (comint-send-string proc (format "SELECT * FROM %s;;\n" table)))
+    (message "datum: exporting %s to %s%s"
+             table abs-path (if force " (overwrite)" ""))))
 
-(defun sql-datum-import (path table-name mode)
+(defun sql-datum-import (path table-name mode batch-size)
   "Import file at PATH into TABLE-NAME via :in.
 Prompts for a file path, table name (with completion from cache),
-and import mode."
+and import mode.  BATCH-SIZE controls rows per executemany call;
+defaults to `sql-datum-import-batch-size', overridden with \\[universal-argument]."
   (interactive
    (let* ((file (read-file-name "Import file: " nil nil t nil
                                 (lambda (f)
@@ -567,22 +592,28 @@ and import mode."
                                     ":insert (append)"
                                     ":replace (drop & recreate)")
                                   nil t nil nil
-                                  "default (error if exists)")))
+                                  "default (error if exists)"))
+          (batch (if current-prefix-arg
+                     (read-number "Batch size: " sql-datum-import-batch-size)
+                   sql-datum-import-batch-size)))
      (list file table
            (pcase mode
              ((pred (string-prefix-p ":insert"))  ":insert")
              ((pred (string-prefix-p ":replace")) ":replace")
-             (_ nil)))))
+             (_ nil))
+           batch)))
   (let* ((abs-path (expand-file-name path))
          (mode-flag (if mode (concat " " mode) ""))
+         (batch-flag (format " :batch %d" batch-size))
          (buf (sql-find-sqli-buffer 'datum)))
     (unless buf
       (user-error "No active datum buffer found"))
     (comint-send-string (get-buffer buf)
-                        (format ":in %s %s%s\n" abs-path table-name mode-flag))
-    (message "datum: importing %s into %s%s"
+                        (format ":in %s %s%s%s\n"
+                                abs-path table-name mode-flag batch-flag))
+    (message "datum: importing %s into %s%s (batch size %d)"
              (file-name-nondirectory abs-path) table-name
-             (or mode-flag " (default)"))))
+             (or mode-flag " (default)") batch-size)))
 
 (defun sql-datum--send-command (cmd)
   "Send CMD string to the active datum process."
@@ -648,6 +679,16 @@ Uses OBJECT_ID for MSSQL, to_regclass for others."
                  (format "SELECT OBJECT_ID('%s');;" table)
                (format "SELECT to_regclass('%s');;" table))))
     (sql-datum--send-command sql)))
+
+(defun sql-datum-drop-table (table)
+  "Drop TABLE after confirmation.
+Prompts for a table name with completion from the introspection cache,
+then asks for explicit confirmation before sending DROP TABLE."
+  (interactive (list (sql-datum--read-table "Drop table: ")))
+  (when (or (not sql-datum-confirm-drop)
+            (y-or-n-p (format "Drop table %s? " table)))
+    (sql-datum--send-command (format "DROP TABLE %s;;" table))
+    (message "datum: dropped %s" table)))
 
 (defun sql-datum-pwd ()
   "Show current user, server, database, and version via :pwd."
@@ -756,6 +797,7 @@ a numeric suffix, prompting to confirm the name."
   (define-key sql-mode-map (kbd "C-c t s") #'sql-datum-sample)
   (define-key sql-mode-map (kbd "C-c t d") #'sql-datum-describe)
   (define-key sql-mode-map (kbd "C-c t x") #'sql-datum-table-exists)
+  (define-key sql-mode-map (kbd "C-c t D") #'sql-datum-drop-table)
   ;; C-c s: session info
   (define-key sql-mode-map (kbd "C-c s p") #'sql-datum-pwd)
   (define-key sql-mode-map (kbd "C-c s t") #'sql-datum-tables)

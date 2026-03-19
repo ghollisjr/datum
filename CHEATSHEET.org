@@ -28,13 +28,14 @@ From the scratch buffer you have full completion (=TAB=), all the =C-c s= /
 
 | Key       | Action                                       |
 |-----------+----------------------------------------------|
-| =C-c t e= | Export next query results (=C-u= to force)   |
-| =C-c t i= | Import file into table                       |
+| =C-c t e= | Export table to file (=C-u= to force overwrite) |
+| =C-c t i= | Import file into table (=C-u= for batch size)   |
 | =C-c t t= | Select top N rows (=C-u N= for count)        |
 | =C-c t c= | Count rows in table                          |
 | =C-c t s= | Random sample of N rows (=C-u N= for count)  |
 | =C-c t d= | Describe table columns                       |
 | =C-c t x= | Check if table exists                        |
+| =C-c t D= | Drop table (with confirmation)               |
 
 ** Session Info (=C-c s=)
 
@@ -116,6 +117,7 @@ From the scratch buffer you have full completion (=TAB=), all the =C-c s= /
 | =:in <path> <table>=            | Import (error if exists)          |
 | =:in <path> <table> :insert=    | Import (append)                   |
 | =:in <path> <table> :replace=   | Import (drop & recreate)          |
+| =:in ... :batch N=              | Custom batch size (default 1000)  |
 | =:csv [path]=                    | Legacy session CSV export         |
 | =:script [path]=                 | Run SQL file                      |
 

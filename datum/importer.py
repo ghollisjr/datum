@@ -35,7 +35,7 @@ except ImportError:
     _HAVE_PYARROW = False
 
 
-def run(path, table_name, mode, connection, driver):
+def run(path, table_name, mode, connection, driver, batch_size=1000):
     """Entry point for :in command.
 
     path:       absolute path to the source file.
@@ -43,6 +43,7 @@ def run(path, table_name, mode, connection, driver):
     mode:       one of None (default, error if exists), ':insert', ':replace'.
     connection: live pyodbc connection.
     driver:     a BaseDriver instance for type mapping.
+    batch_size: number of rows per executemany call (default 1000).
     """
     if not os.path.exists(path):
         envelope.error(f":in - file not found: {path}")
@@ -79,13 +80,15 @@ def run(path, table_name, mode, connection, driver):
 
     if _HAVE_POLARS:
         rows_inserted = _import_polars(path, table_name, table_exists,
-                                       cursor, connection, driver, fmt)
+                                       cursor, connection, driver, fmt,
+                                       batch_size)
     elif fmt == "csv":
         rows_inserted = _import_csv(path, table_name, table_exists,
-                                    cursor, connection, driver)
+                                    cursor, connection, driver, batch_size)
     else:
         rows_inserted = _import_arrow(path, table_name, table_exists,
-                                      cursor, connection, driver, fmt)
+                                      cursor, connection, driver, fmt,
+                                      batch_size)
 
     elapsed = time.monotonic() - t_start
     envelope.info(f":in - {rows_inserted} rows inserted into '{table_name}' "
@@ -139,7 +142,8 @@ def _polars_type_str(dtype):
     return "string"  # safe fallback
 
 
-def _import_polars(path, table_name, table_exists, cursor, connection, driver, fmt):
+def _import_polars(path, table_name, table_exists, cursor, connection, driver, fmt,
+                   batch_size=1000):
     """Import a file via polars. Returns row count."""
     if fmt == "csv":
         df = pl.read_csv(path, infer_schema_length=1000)
@@ -167,7 +171,6 @@ def _import_polars(path, table_name, table_exists, cursor, connection, driver, f
 
     # Stream in batches
     rows_inserted = 0
-    batch_size = 1000
     total = df.height
 
     for offset in range(0, total, batch_size):
@@ -182,7 +185,8 @@ def _import_polars(path, table_name, table_exists, cursor, connection, driver, f
 
 # --- CSV import (stdlib, no extra deps) ---
 
-def _import_csv(path, table_name, table_exists, cursor, connection, driver):
+def _import_csv(path, table_name, table_exists, cursor, connection, driver,
+                batch_size=1000):
     with open(path, newline='', encoding='utf-8-sig') as f:
         reader = csv.reader(f)
         headers = next(reader)
@@ -213,7 +217,7 @@ def _import_csv(path, table_name, table_exists, cursor, connection, driver):
         batch = []
         for row in reader:
             batch.append(row)
-            if len(batch) >= 1000:
+            if len(batch) >= batch_size:
                 cursor.executemany(insert_sql, batch)
                 rows_inserted += len(batch)
                 batch = []
@@ -258,7 +262,8 @@ def _is_float(s):
 
 # --- Arrow import (parquet, json) ---
 
-def _import_arrow(path, table_name, table_exists, cursor, connection, driver, fmt):
+def _import_arrow(path, table_name, table_exists, cursor, connection, driver, fmt,
+                  batch_size=1000):
     if fmt == "parquet":
         table = pq.read_table(path)
     else:  # json
@@ -283,7 +288,7 @@ def _import_arrow(path, table_name, table_exists, cursor, connection, driver, fm
 
     # Stream in batches via record batches to avoid loading everything at once
     rows_inserted = 0
-    for batch in table.to_batches(max_chunksize=1000):
+    for batch in table.to_batches(max_chunksize=batch_size):
         rows = [tuple(batch.column(i)[j].as_py()
                       for i in range(batch.num_columns))
                 for j in range(batch.num_rows)]

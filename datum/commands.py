@@ -29,11 +29,12 @@ _help_text = """
                        Format is inferred from extension: .csv .parquet .json
                        Use :force to overwrite an existing file.
 
-:in <path> <table> [:insert|:replace]
+:in <path> <table> [:insert|:replace] [:batch N]
                        Import a file into a SQL table.
                        Default: error if table exists.
                        :insert — append to existing table.
                        :replace — drop, recreate, and insert.
+                       :batch N — rows per batch (default 1000).
 
 :type [dialect]        Show or set the SQL dialect (mssql, postgres, ansi).
 
@@ -265,8 +266,23 @@ def in_import(args):
         print(":in requires a file path and a table name. "
               "Example: :in /tmp/data.csv my_table")
         return
-    flags = [a for a in args if a.startswith(":")]
-    non_flags = [a for a in args if not a.startswith(":")]
+    # Extract :batch N before splitting flags/non-flags
+    batch_size = 1000
+    filtered_args = []
+    i = 0
+    while i < len(args):
+        if args[i] == ":batch" and i + 1 < len(args):
+            try:
+                batch_size = int(args[i + 1])
+            except ValueError:
+                print(f":in - invalid batch size: {args[i + 1]}")
+                return
+            i += 2
+            continue
+        filtered_args.append(args[i])
+        i += 1
+    flags = [a for a in filtered_args if a.startswith(":")]
+    non_flags = [a for a in filtered_args if not a.startswith(":")]
     if len(non_flags) < 2:
         print(":in requires a file path and a table name.")
         return
@@ -278,7 +294,8 @@ def in_import(args):
         mode = ":insert"
     elif ":replace" in flags or ":force" in flags:
         mode = ":replace"
-    importer.run(path, table_name, mode, connect.get_connection(), _driver)
+    importer.run(path, table_name, mode, connect.get_connection(), _driver,
+                 batch_size)
 
 
 # --- New :type command ---
