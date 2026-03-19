@@ -661,9 +661,11 @@ Uses TOP syntax for MSSQL, LIMIT for others."
     (sql-datum--send-command sql)))
 
 (defun sql-datum-count (table)
-  "Select COUNT(*) from TABLE."
+  "Select COUNT(*) from TABLE.
+Uses COUNT_BIG on MSSQL to handle tables with more than 2^31 rows."
   (interactive (list (sql-datum--read-table "Count rows in table: ")))
-  (sql-datum--send-command (format "SELECT COUNT(*) FROM %s;;" table)))
+  (let ((func (if (sql-datum--mssql-p) "COUNT_BIG" "COUNT")))
+    (sql-datum--send-command (format "SELECT %s(*) FROM %s;;" func table))))
 
 (defun sql-datum-sample (n)
   "Select a random sample of N rows from a table (default 10).
