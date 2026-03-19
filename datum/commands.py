@@ -7,6 +7,7 @@ from . import connect
 from . import envelope
 from . import exporter
 from . import importer
+from . import printer
 from string import Formatter as _Formatter
 import os
 
@@ -310,15 +311,12 @@ def _run_introspect(sql, kind, label):
         if not rows:
             print(f"(no {label} found)")
             return
-        # Print as a simple table
-        headers = [col[0] for col in cursor.description]
-        col_widths = [max(len(str(h)), max((len(str(r[i])) for r in rows), default=0))
-                      for i, h in enumerate(headers)]
-        fmt = "  ".join(f"{{:<{w}}}" for w in col_widths)
-        print(fmt.format(*headers))
-        print("  ".join("-" * w for w in col_widths))
-        for row in rows:
-            print(fmt.format(*[str(v) for v in row]))
+        # Use the standard printer for consistent formatting
+        column_names = [printer.text_formatter(col[0]) for col in cursor.description]
+        format_str, print_ready = printer.format_rows(column_names, rows)
+        print()
+        for row in print_ready:
+            print(format_str.format(*row))
         # Send envelope for Emacs-side state
         items = [str(row[0]) for row in rows]
         envelope.introspect(kind, items)
@@ -352,14 +350,12 @@ def tables(args):
         if not rows:
             print("(no tables found)")
             return
-        headers = [col[0] for col in cursor.description]
-        col_widths = [max(len(str(h)), max((len(str(r[i])) for r in rows), default=0))
-                      for i, h in enumerate(headers)]
-        fmt = "  ".join(f"{{:<{w}}}" for w in col_widths)
-        print(fmt.format(*headers))
-        print("  ".join("-" * w for w in col_widths))
-        for row in rows:
-            print(fmt.format(*[str(v) for v in row]))
+        # Use the standard printer for consistent formatting
+        column_names = [printer.text_formatter(col[0]) for col in cursor.description]
+        format_str, print_ready = printer.format_rows(column_names, rows)
+        print()
+        for row in print_ready:
+            print(format_str.format(*row))
         # Send both bare and qualified names for completion
         items = []
         for row in rows:

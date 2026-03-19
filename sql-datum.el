@@ -93,12 +93,34 @@ the completion candidates available when editing SQL."
   "Regexp matching a datum envelope line.
 Group 1 is the message type, group 2 is the payload.")
 
+(defvar-local sql-datum--partial-line nil
+  "Buffered partial line from a previous filter call.
+When comint splits a long output across multiple filter invocations,
+an envelope line may arrive in fragments.  We hold the incomplete
+fragment here until the next call completes it.")
+
 (defun sql-datum--preoutput-filter (output)
   "Strip envelope lines from OUTPUT and act on them.
 Installed as a `comint-preoutput-filter-functions' hook.
-Returns OUTPUT with all ##DATUM:...## lines removed."
+Returns OUTPUT with all ##DATUM:...## lines removed.
+Handles partial envelope lines split across multiple filter calls."
   (let ((lines (split-string output "\n"))
         (clean-lines nil))
+    ;; Prepend any buffered partial line to the first line
+    (when (and sql-datum--partial-line lines)
+      (setcar lines (concat sql-datum--partial-line (car lines)))
+      (setq sql-datum--partial-line nil))
+    ;; Check if the last line is partial (output didn't end with newline).
+    ;; A partial line is one that looks like it could be the start of an
+    ;; envelope but doesn't have the closing ##.
+    (let ((last-line (car (last lines))))
+      (when (and last-line
+                 (not (string-empty-p last-line))
+                 (string-match-p "##DATUM:" last-line)
+                 (not (string-match-p "##DATUM:[^:]+:.*?##" last-line)))
+        ;; Incomplete envelope — buffer it for next call
+        (setq sql-datum--partial-line last-line)
+        (setq lines (butlast lines))))
     (dolist (line lines)
       (if (string-match sql-datum--envelope-re line)
           (sql-datum--handle-envelope (match-string 1 line)
@@ -135,7 +157,12 @@ Returns OUTPUT with all ##DATUM:...## lines removed."
      (when (string-match "\\([^:]+\\):\\(.*\\)" payload)
        (let ((kind (match-string 1 payload))
              (json (match-string 2 payload)))
-         (sql-datum--handle-introspect kind json))))))
+         (sql-datum--handle-introspect kind json))))
+    ("introspect+"
+     (when (string-match "\\([^:]+\\):\\(.*\\)" payload)
+       (let ((kind (match-string 1 payload))
+             (json (match-string 2 payload)))
+         (sql-datum--handle-introspect-append kind json))))))
 
 (defun sql-datum--set-dialect (name)
   "Set the buffer-local dialect to NAME and refresh the mode line."
@@ -181,6 +208,23 @@ Returns OUTPUT with all ##DATUM:...## lines removed."
            (unless sql-datum--running-timer
              (sql-datum--running-start-timer)))))
     (error (message "datum: failed to parse introspect payload: %s" err))))
+
+(defun sql-datum--handle-introspect-append (kind json-str)
+  "Append to completion state from a continuation introspect+ envelope."
+  (condition-case err
+      (let ((items (json-parse-string json-str :array-type 'list)))
+        (pcase kind
+          ("databases"
+           (setq sql-datum--databases (append sql-datum--databases items)))
+          ("schemas"
+           (setq sql-datum--schemas (append sql-datum--schemas items)))
+          ("tables"
+           (setq sql-datum--tables (append sql-datum--tables items)))
+          ((pred (string-prefix-p "columns:"))
+           (let* ((table (substring kind (length "columns:")))
+                  (existing (gethash table sql-datum--columns)))
+             (puthash table (append existing items) sql-datum--columns)))))
+    (error (message "datum: failed to parse introspect+ payload: %s" err))))
 
 (defvar sql-datum--running-timer nil
   "Timer for auto-refreshing the running queries buffer.")
@@ -601,6 +645,20 @@ Prompts with completion from the cached database list."
      (list (completing-read "Switch to database: " databases nil nil))))
   (sql-datum--send-command (format ":use %s" db)))
 
+;;;###autoload
+(defun sql-datum-scratch ()
+  "Open a scratch SQL buffer associated with the active datum connection.
+If a *datum-scratch* buffer already exists, just switch to it."
+  (interactive)
+  (let ((buf (get-buffer-create "*datum-scratch*"))
+        (sqli (sql-find-sqli-buffer 'datum)))
+    (switch-to-buffer buf)
+    (unless (derived-mode-p 'sql-mode)
+      (sql-mode))
+    (when sqli
+      (setq-local sql-buffer sqli))
+    (message "datum: scratch buffer ready — C-c C-r to send region, C-c C-b to send buffer")))
+
 ;;; ---------------------------------------------------------------------------
 ;;; Keybindings
 ;;; ---------------------------------------------------------------------------
@@ -619,20 +677,22 @@ Prompts with completion from the cached database list."
   (define-key sql-mode-map (kbd "C-c s v") #'sql-datum-version)
   (define-key sql-mode-map (kbd "C-c s u") #'sql-datum-user)
   ;; C-c u: switch database
-  (define-key sql-mode-map (kbd "C-c u")   #'sql-datum-use-database))
+  (define-key sql-mode-map (kbd "C-c u")   #'sql-datum-use-database)
+)
 
 ;;; ---------------------------------------------------------------------------
 ;;; Product registration
 ;;; ---------------------------------------------------------------------------
 
-(sql-add-product 'datum "Datum - ODBC Client"
-                 :free-software t
-                 :prompt-regexp "^.*>"
-                 :prompt-cont-regexp "^.*>"
-                 :sqli-comint-func 'sql-comint-datum
-                 :sqli-login 'sql-datum-login-params
-                 :sqli-program 'sql-datum-program
-                 :sqli-options 'sql-datum-options)
+(unless (assoc 'datum sql-product-alist)
+  (sql-add-product 'datum "Datum - ODBC Client"
+                   :free-software t
+                   :prompt-regexp "^.*>"
+                   :prompt-cont-regexp "^.*>"
+                   :sqli-comint-func 'sql-comint-datum
+                   :sqli-login 'sql-datum-login-params
+                   :sqli-program 'sql-datum-program
+                   :sqli-options 'sql-datum-options))
 
 (provide 'sql-datum)
 ;;; sql-datum.el ends here

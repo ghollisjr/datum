@@ -55,13 +55,49 @@ def result_file(path, fmt):
     _send("result-file", f"{path}:{fmt}")
 
 
+_CHUNK_MAX = 4000  # max chars per envelope line (conservative for comint)
+
+
 def introspect(kind, items):
     """Send structured introspection data to Emacs.
 
     kind is one of: databases, schemas, tables, columns, running, user, version.
     items is a list of strings (or dicts for columns/running).
+
+    Large payloads are automatically chunked into multiple envelope lines
+    to avoid exceeding comint's per-line processing limits.  The first
+    chunk uses "introspect" (which replaces) and subsequent chunks use
+    "introspect+" (which appends on the Emacs side).
     """
-    _send("introspect", f"{kind}:{json.dumps(items)}")
+    payload = json.dumps(items)
+    if len(payload) <= _CHUNK_MAX:
+        _send("introspect", f"{kind}:{payload}")
+        return
+
+    # Chunk items into batches that fit within _CHUNK_MAX
+    batch = []
+    first = True
+    for item in items:
+        batch.append(item)
+        # Check if this batch is getting large enough
+        if len(json.dumps(batch)) > _CHUNK_MAX:
+            if len(batch) > 1:
+                # Send all but the last (which pushed us over)
+                overflow = batch.pop()
+                msg_type = "introspect" if first else "introspect+"
+                _send(msg_type, f"{kind}:{json.dumps(batch)}")
+                first = False
+                batch = [overflow]
+            else:
+                # Single item exceeds limit — send it alone
+                msg_type = "introspect" if first else "introspect+"
+                _send(msg_type, f"{kind}:{json.dumps(batch)}")
+                first = False
+                batch = []
+    # Send remaining items
+    if batch:
+        msg_type = "introspect" if first else "introspect+"
+        _send(msg_type, f"{kind}:{json.dumps(batch)}")
 
 
 def dialect(name):

@@ -1,6 +1,27 @@
 #+TITLE: Datum Cheatsheet
 #+OPTIONS: toc:nil num:nil
 
+* Quick Start
+
+With the recommended setup, getting from zero to a SQL editing buffer takes
+two steps:
+
+1. =M-x sql-connect= (or =M-x sql-datum=) — connect to a database
+2. =C-c q= — open a scratch SQL buffer, ready to query
+
+From the scratch buffer you have full completion (=TAB=), all the =C-c s= /
+=C-c t= keybindings, and =C-c C-r= / =C-c C-b= to send SQL to the server.
+
+** Recommended init file settings
+
+#+begin_src emacs-lisp
+(require 'sql-datum)
+(autoload 'sql-datum-scratch "sql-datum" nil t)
+(global-set-key (kbd "C-c q") #'sql-datum-scratch)
+(add-hook 'sql-mode-hook
+          (lambda () (setq-local tab-always-indent 'complete)))
+#+end_src
+
 * Emacs Keybindings
 
 ** Table Operations (=C-c t=)
@@ -25,9 +46,10 @@
 
 ** Other
 
-| Key     | Action            |
-|---------+-------------------|
-| =C-c u= | Switch database   |
+| Key     | Action                            |
+|---------+-----------------------------------|
+| =C-c q= | Open scratch SQL buffer (global)  |
+| =C-c u= | Switch database                   |
 
 * Running Queries Buffer
 

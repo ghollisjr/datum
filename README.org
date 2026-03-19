@@ -369,6 +369,17 @@ All keybindings are active in =sql-mode= buffers.
 | =C-c s v= | =sql-datum-version=  | Show server version                      |
 | =C-c s u= | =sql-datum-user=     | Show current user                        |
 
+** Scratch buffer
+
+=sql-datum-scratch= opens (or switches to) a =*datum-scratch*= buffer in
+=sql-mode=, wired to the active datum connection.  From there you can write
+SQL and use all the datum keybindings.  Bind it globally for quick access:
+
+#+begin_src emacs-lisp
+(autoload 'sql-datum-scratch "sql-datum" nil t)
+(global-set-key (kbd "C-c q") #'sql-datum-scratch)
+#+end_src
+
 ** Completion at point
 
 After running =:tables= or =:columns=, table, schema, and column names are
