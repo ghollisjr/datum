@@ -375,6 +375,14 @@ After running =:tables= or =:columns=, table, schema, and column names are
 available for completion in both the SQLi buffer and =sql-mode= editing
 buffers.  Works with =completion-at-point= (=C-M-i=), Company, Corfu, etc.
 
+By default, =TAB= in =sql-mode= is bound to indentation, not completion.
+To make =TAB= complete when point is mid-word (and indent otherwise), add:
+
+#+begin_src emacs-lisp
+(add-hook 'sql-mode-hook
+          (lambda () (setq-local tab-always-indent 'complete)))
+#+end_src
+
 ** Mode line
 
 The mode line shows connection status:
