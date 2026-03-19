@@ -73,7 +73,7 @@ def show_connection_banner_and_get_prompt_header():
     if _database:
         print('database', _database)
     print(_header_message)
-    return print_server + ("@" + _database if _database else "")
+    return print_server + ("/" + _database if _database else "")
 
 
 def get_conn_string():
@@ -83,18 +83,17 @@ def get_conn_string():
 
 def get_server_or_dsn():
     """Return the server name or DSN for mode line display.
-    Falls back to querying the ODBC driver if no explicit server/DSN."""
+    Falls back to parsing the connection string if no explicit server/DSN."""
     if _server:
         return _server
     if _dsn:
         return _dsn
-    # Try to extract server name from the live connection
-    try:
-        import pyodbc
-        conn = get_connection()
-        return conn.getinfo(pyodbc.SQL_SERVER_NAME) or "-"
-    except Exception:
-        return "-"
+    # Try to extract from the connection string
+    if _conn_string:
+        for piece in _conn_string.split(";"):
+            if "=" in piece and "server" in piece.lower():
+                return piece.split("=", 1)[1]
+    return "-"
 
 
 def get_connection(force_new=False):

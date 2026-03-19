@@ -49,13 +49,12 @@ def query_loop():
         print(f"---CONNECTION ERROR---\n{err}\n---CONNECTION ERROR---", flush=True)
         return
 
-    prompt_header = connect.show_connection_banner_and_get_prompt_header()
+    connect.show_connection_banner_and_get_prompt_header()
 
     # Emit metadata Emacs can use to populate the mode line.
     envelope.meta("server", connect.get_server_or_dsn())
     _emit_current_db_and_user()
 
-    print(prompt_header)
     query = prompt_for_query_or_command()
     row_count = 0
 
@@ -86,7 +85,6 @@ def query_loop():
                   "Code:", code, "\n"
                   "Message:", message, "\n"
                   "---ERROR---", flush=True)
-        print("\n", prompt_header, sep="")
         query = prompt_for_query_or_command()
 
 
@@ -116,7 +114,7 @@ def prompt_for_query_or_command():
     global config
     lines = []
     prompt = "csv>" if config["csv_path"] else ">"
-    print(prompt, flush=True, end="")
+    print(f"\n{prompt}", flush=True, end="")
     lines.append(input())
     while True:
         last = lines[-1]
