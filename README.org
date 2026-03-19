@@ -158,9 +158,9 @@ All commands start with =:= and are entered at the prompt.
 
 | Command             | Description                                    |
 |---------------------+------------------------------------------------|
-| =:databases=        | List all databases on the server               |
-| =:schemas=          | List all schemas in the current database        |
-| =:tables=           | List all tables and views                      |
+| =:databases [pattern]= | List databases (filter with SQL LIKE wildcards) |
+| =:schemas [pattern]=  | List schemas (filter with SQL LIKE wildcards)   |
+| =:tables [pattern]=   | List tables and views (filter with SQL LIKE wildcards) |
 | =:columns <table>=  | List columns (supports =schema.table=)         |
 | =:running=          | List currently running queries                 |
 | =:use <database>=   | Switch to a different database                 |
@@ -361,7 +361,7 @@ All keybindings are active in =sql-mode= buffers.
 | =C-c t e= | =sql-datum-export=       | Export table to file (=C-u= to force overwrite) |
 | =C-c t i= | =sql-datum-import=       | Import file into table (=C-u= for batch size)   |
 | =C-c t t= | =sql-datum-top=          | Select top N rows (default 10, =C-u N=)      |
-| =C-c t c= | =sql-datum-count=        | Count rows in table                          |
+| =C-c t c= | =sql-datum-count=        | Count rows (=COUNT_BIG= on MSSQL)            |
 | =C-c t s= | =sql-datum-sample=       | Random sample of N rows (default 10, =C-u N=) |
 | =C-c t d= | =sql-datum-describe=     | Describe table columns (alias for =columns=) |
 | =C-c t x= | =sql-datum-table-exists= | Check if table exists                        |
@@ -375,11 +375,11 @@ dialect-aware: they use =TOP= / =NEWID()= / =OBJECT_ID()= on MSSQL and
 
 | Key       | Command              | Description                              |
 |-----------+----------------------+------------------------------------------|
-| =C-c s p= | =sql-datum-pwd=      | Show user, server, database, version     |
-| =C-c s t= | =sql-datum-tables=   | List tables                              |
-| =C-c s c= | =sql-datum-columns=  | List columns (prompts for table)         |
-| =C-c s d= | =sql-datum-databases= | List databases                          |
-| =C-c s s= | =sql-datum-schemas=  | List schemas                             |
+| =C-c s p= | =sql-datum-pwd=      | Show user, server, database, version       |
+| =C-c s t= | =sql-datum-tables=   | List tables (=C-u= to filter with LIKE)    |
+| =C-c s c= | =sql-datum-columns=  | List columns (prompts for table)           |
+| =C-c s d= | =sql-datum-databases= | List databases (=C-u= to filter with LIKE) |
+| =C-c s s= | =sql-datum-schemas=  | List schemas (=C-u= to filter with LIKE)   |
 | =C-c s r= | =sql-datum-running=  | Show running queries                     |
 | =C-c s v= | =sql-datum-version=  | Show server version                      |
 | =C-c s u= | =sql-datum-user=     | Show current user                        |

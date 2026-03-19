@@ -31,7 +31,7 @@ From the scratch buffer you have full completion (=TAB=), all the =C-c s= /
 | =C-c t e= | Export table to file (=C-u= to force overwrite) |
 | =C-c t i= | Import file into table (=C-u= for batch size)   |
 | =C-c t t= | Select top N rows (=C-u N= for count)        |
-| =C-c t c= | Count rows in table                          |
+| =C-c t c= | Count rows (=COUNT_BIG= on MSSQL)            |
 | =C-c t s= | Random sample of N rows (=C-u N= for count)  |
 | =C-c t d= | Describe table columns                       |
 | =C-c t x= | Check if table exists                        |
@@ -41,14 +41,14 @@ From the scratch buffer you have full completion (=TAB=), all the =C-c s= /
 
 | Key       | Action                   |
 |-----------+--------------------------|
-| =C-c s p= | Show user/server/db/ver  |
-| =C-c s t= | List tables              |
-| =C-c s c= | List columns for table   |
-| =C-c s d= | List databases           |
-| =C-c s s= | List schemas             |
-| =C-c s r= | Running queries          |
-| =C-c s v= | Server version           |
-| =C-c s u= | Current user             |
+| =C-c s p= | Show user/server/db/ver                  |
+| =C-c s t= | List tables (=C-u= to filter with LIKE)  |
+| =C-c s c= | List columns for table                   |
+| =C-c s d= | List databases (=C-u= to filter with LIKE) |
+| =C-c s s= | List schemas (=C-u= to filter with LIKE) |
+| =C-c s r= | Running queries                          |
+| =C-c s v= | Server version                           |
+| =C-c s u= | Current user                             |
 
 ** Other
 
@@ -106,9 +106,9 @@ Respects =:chars= for column width. Timestamp shows last refresh.
 
 | Command          | Description              |
 |------------------+--------------------------|
-| =:databases=     | List databases           |
-| =:schemas=       | List schemas             |
-| =:tables=        | List tables and views    |
+| =:databases [pattern]= | List databases (LIKE filter)  |
+| =:schemas [pattern]=  | List schemas (LIKE filter)    |
+| =:tables [pattern]=   | List tables/views (LIKE filter) |
 | =:columns <tbl>= | Columns (=schema.table=) |
 | =:running=       | Running queries          |
 

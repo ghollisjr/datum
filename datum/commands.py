@@ -38,9 +38,9 @@ _help_text = """
 
 :type [dialect]        Show or set the SQL dialect (mssql, postgres, ansi).
 
-:databases             List all databases on the server.
-:schemas               List all schemas in the current database.
-:tables                List all tables and views.
+:databases [pattern]   List databases. Filter with SQL LIKE wildcards.
+:schemas [pattern]     List schemas. Filter with SQL LIKE wildcards.
+:tables [pattern]      List tables/views. Filter with SQL LIKE wildcards.
 :columns <table>       List columns for a table (schema.table or table).
 :running               List currently running queries.
 :user                  Show the current database user.
