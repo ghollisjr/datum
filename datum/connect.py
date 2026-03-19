@@ -74,6 +74,16 @@ def show_connection_banner_and_get_prompt_header():
     return print_server + ("@" + _database if _database else "")
 
 
+def get_conn_string():
+    """Return the current connection string (for dialect detection)."""
+    return _conn_string
+
+
+def get_server_or_dsn():
+    """Return the server name or DSN for mode line display."""
+    return _server or _dsn or "-"
+
+
 def get_connection(force_new=False):
     """Use the module's information to return a live connection to the DB.
 

@@ -5,7 +5,7 @@
 ;; Author: Sebastian Monia <smonia@outlook.com>
 ;; URL: https://github.com/sebasmonia/datum
 ;; Package-Requires: ((emacs "27.1"))
-;; Version: 1.1
+;; Version: 2.0
 ;; Keywords: languages processes tools
 
 ;; This file is not part of GNU Emacs.
@@ -22,7 +22,7 @@
 ;;   3. M-x sql-datum will prompt for parameters to create a connection
 ;; - OR -
 ;;   3. Add to sql-connection-alist an item that uses Datum to connect,
-;;      it will show up in the candidates in when calling sql-connect.
+;;      it will show up in the candidates when calling sql-connect.
 ;;
 ;; For a detailed Datum user manual, and additional Emacs setup examples, see:
 ;; https://github.com/sebasmonia/datum/blob/main/README.md
@@ -30,98 +30,277 @@
 ;;; Code:
 
 (require 'sql)
+(require 'cl-lib)
+
+;;; ---------------------------------------------------------------------------
+;;; Customization
+;;; ---------------------------------------------------------------------------
 
 (defcustom sql-datum-program "datum"
   "Command to start Datum.
-See https://github.com/sebasmonia/datum for instructions on how
-to install."
+See https://github.com/sebasmonia/datum for instructions on how to install."
   :type 'file
   :group 'SQL)
 
 (defcustom sql-datum-password-variable "SQLDATUMPASS"
   "Environment variable to store the connection password.
-When a name is provided, it is used as a temporary storage right before
-starting datum, and cleared right after. If nil, use the \"--pass\"
+When a name is provided, it is used as temporary storage right before
+starting datum, and cleared right after.  If nil, use the \"--pass\"
 flag, but then the password is visible for example in `list-processes'."
   :type 'string
   :group 'SQL)
 
+(defcustom sql-datum-populate-completion t
+  "When non-nil, introspection results populate `completion-at-point'.
+Introspection commands (:tables, :schemas, etc.) automatically update
+the completion candidates available when editing SQL."
+  :type 'boolean
+  :group 'SQL)
+
+(defcustom sql-datum-open-result-file t
+  "When non-nil, offer to open the file after a successful :out export."
+  :type 'boolean
+  :group 'SQL)
+
+;;; ---------------------------------------------------------------------------
+;;; Buffer-local state
+;;; ---------------------------------------------------------------------------
+
+(defvar-local sql-datum--dialect nil
+  "Detected SQL dialect for this datum buffer (e.g. \"mssql\", \"postgres\").")
+
+(defvar-local sql-datum--meta (make-hash-table :test #'equal)
+  "Metadata for this datum buffer: server, database, user, version.")
+
+(defvar-local sql-datum--tables nil
+  "List of table names populated by :tables introspection.")
+
+(defvar-local sql-datum--schemas nil
+  "List of schema names populated by :schemas introspection.")
+
+(defvar-local sql-datum--databases nil
+  "List of database names populated by :databases introspection.")
+
+(defvar-local sql-datum--columns (make-hash-table :test #'equal)
+  "Hash table mapping \"schema.table\" to list of column name strings.")
+
+;;; ---------------------------------------------------------------------------
+;;; Envelope protocol
+;;; ---------------------------------------------------------------------------
+
+(defconst sql-datum--envelope-re
+  "##DATUM:\\([^:]+\\):\\(.*?\\)##"
+  "Regexp matching a datum envelope line.
+Group 1 is the message type, group 2 is the payload.")
+
+(defun sql-datum--preoutput-filter (output)
+  "Strip envelope lines from OUTPUT and act on them.
+Installed as a `comint-preoutput-filter-functions' hook.
+Returns OUTPUT with all ##DATUM:...## lines removed."
+  (let ((lines (split-string output "\n"))
+        (clean-lines nil))
+    (dolist (line lines)
+      (if (string-match sql-datum--envelope-re line)
+          (sql-datum--handle-envelope (match-string 1 line)
+                                      (match-string 2 line))
+        (push line clean-lines)))
+    (string-join (nreverse clean-lines) "\n")))
+
+(defun sql-datum--handle-envelope (type payload)
+  "Dispatch on envelope TYPE with PAYLOAD."
+  (pcase type
+    ("info"
+     (message "datum: %s" payload))
+    ("warn"
+     (message "datum warning: %s" payload)
+     ;; Persist dialect-unknown warning in mode line via dialect handler
+     (when (string-match-p "ANSI SQL" payload)
+       (sql-datum--set-dialect "ansi")))
+    ("error"
+     (message "datum error: %s" payload))
+    ("dialect"
+     (sql-datum--set-dialect payload))
+    ("meta"
+     (when (string-match "\\([^:]+\\):\\(.*\\)" payload)
+       (let ((key (match-string 1 payload))
+             (val (match-string 2 payload)))
+         (puthash key val sql-datum--meta)
+         (sql-datum--update-mode-line))))
+    ("result-file"
+     (when (string-match "\\(.*\\):\\([^:]+\\)$" payload)
+       (let ((path (match-string 1 payload))
+             (fmt  (match-string 2 payload)))
+         (sql-datum--handle-result-file path fmt))))
+    ("introspect"
+     (when (string-match "\\([^:]+\\):\\(.*\\)" payload)
+       (let ((kind (match-string 1 payload))
+             (json (match-string 2 payload)))
+         (sql-datum--handle-introspect kind json))))))
+
+(defun sql-datum--set-dialect (name)
+  "Set the buffer-local dialect to NAME and refresh the mode line."
+  (setq sql-datum--dialect name)
+  (sql-datum--update-mode-line))
+
+(defun sql-datum--update-mode-line ()
+  "Update the mode line to reflect current dialect and metadata."
+  (let* ((dialect  (or sql-datum--dialect "?"))
+         (server   (gethash "server"   sql-datum--meta ""))
+         (database (gethash "database" sql-datum--meta ""))
+         (user     (gethash "user"     sql-datum--meta ""))
+         (parts    (cl-remove-if #'string-empty-p
+                                 (list dialect database server user)))
+         (label    (concat "[datum:" (string-join parts ":") "]")))
+    (setq mode-name label))
+  (force-mode-line-update))
+
+(defun sql-datum--handle-result-file (path fmt)
+  "Act on a result-file envelope: show PATH and optionally open it."
+  (message "datum: result written to %s (%s)" path fmt)
+  (when sql-datum-open-result-file
+    (when (y-or-n-p (format "datum: open result file %s? " path))
+      (find-file path))))
+
+(defun sql-datum--handle-introspect (kind json-str)
+  "Update completion state from an introspect envelope."
+  (condition-case err
+      (let ((items (json-parse-string json-str :array-type 'list)))
+        (pcase kind
+          ("databases"
+           (setq sql-datum--databases items))
+          ("schemas"
+           (setq sql-datum--schemas items))
+          ("tables"
+           (setq sql-datum--tables items))
+          ((pred (string-prefix-p "columns:"))
+           (let ((table (substring kind (length "columns:"))))
+             (puthash table items sql-datum--columns)))
+          ("running"
+           ;; Running queries: open a dedicated buffer
+           (sql-datum--show-running-queries items))))
+    (error (message "datum: failed to parse introspect payload: %s" err))))
+
+(defun sql-datum--show-running-queries (items)
+  "Display ITEMS (list of strings) in a dedicated running-queries buffer."
+  (let ((buf (get-buffer-create "*datum-running-queries*")))
+    (with-current-buffer buf
+      (read-only-mode -1)
+      (erase-buffer)
+      (insert "datum: Running Queries\n")
+      (insert (make-string 40 ?-) "\n")
+      (if items
+          (dolist (item items) (insert item "\n"))
+        (insert "(none)\n"))
+      (read-only-mode 1)
+      (goto-char (point-min)))
+    (display-buffer buf)))
+
+;;; ---------------------------------------------------------------------------
+;;; Completion at point
+;;; ---------------------------------------------------------------------------
+
+(defun sql-datum-completion-at-point ()
+  "Provide SQL identifier completion using datum introspection data.
+Add to `completion-at-point-functions' in sql-mode buffers that use datum."
+  (when sql-datum-populate-completion
+    (let* ((buf (sql-find-sqli-buffer 'datum))
+           (tables  (and buf (buffer-local-value 'sql-datum--tables  buf)))
+           (schemas (and buf (buffer-local-value 'sql-datum--schemas buf)))
+           (bounds  (bounds-of-thing-at-point 'symbol))
+           (start   (or (car bounds) (point)))
+           (end     (or (cdr bounds) (point)))
+           (candidates (append tables schemas)))
+      (when candidates
+        (list start end candidates
+              :exclusive 'no
+              :annotation-function
+              (lambda (cand)
+                (cond ((member cand tables)  " [table]")
+                      ((member cand schemas) " [schema]")
+                      (t ""))))))))
+
+;;; ---------------------------------------------------------------------------
+;;; Connection setup
+;;; ---------------------------------------------------------------------------
+
 (defvar sql-datum-login-params nil
-  "This value is provided for compatiblity with sql.el, do not change.")
+  "This value is provided for compatibility with sql.el, do not change.")
 
 (defvar sql-datum-options nil
-  "This value is provided for compatiblity with sql.el, do not change.")
+  "This value is provided for compatibility with sql.el, do not change.")
 
 (defun sql-comint-datum (product options &optional buf-name)
   "Create a comint buffer and connect to database using Datum.
-PRODUCT is the sql product (datum). OPTIONS are additional
-parameters not defined in the customization. BUF-NAME is the name
+PRODUCT is the sql product (datum).  OPTIONS are additional
+parameters not defined in the customization.  BUF-NAME is the name
 for the `comint' buffer."
-  ;; Support for "standard" parameter types that might be let-bound
-  (let ((parameters (append options
-                            (unless (string-empty-p sql-server)
-                              (list "--server" sql-server))
-                            (unless (string-empty-p sql-database)
-                              (list "--database" sql-database))
-                            (sql-datum--comint-username)))
-        (pass (sql-datum--comint-get-password)))
-    ;; always prompt, unless the connection was started from
-    ;; `sql-connection-alist' and already had parameters defined
-    (unless (and sql-connection parameters)
-      (let ((conn-pair (sql-datum--prompt-connection)))
-        (setf parameters (car conn-pair))
-        (setf pass (cdr conn-pair))))
-    ;; If there's a password, use an environment variable when defined. It's
-    ;; the default, but can be disabled in case the user wants clear text pass
-    ;; (nice for debugging) or if there's another mechanism for auth.
-    (unless (or (null pass) (string-empty-p pass))
-      (setf parameters
-            (append parameters
-                    (if sql-datum-password-variable
-                        (progn
-                          (setenv sql-datum-password-variable pass)
-                          (list "--pass"
-                                (format "ENV=%s" sql-datum-password-variable)))
-                      (list "--pass" pass)))))
-    (sql-comint product parameters buf-name)
-    ;; clear this if it was used
-    (when sql-datum-password-variable
-      (setenv sql-datum-password-variable))
-    ;; Wire up an async sentinel so Emacs does not block waiting for the
-    ;; connection banner.  The sentinel fires when the datum subprocess
-    ;; produces output; once we see the prompt we notify the user and remove
-    ;; the sentinel so it does not interfere with normal comint operation.
-    (sql-datum--watch-for-connection-banner (get-buffer (or buf-name "*SQL*")))))
+  ;; Datum connects asynchronously via a background pyodbc call, so
+  ;; sql.el's login delay is unnecessary and causes a visible freeze.
+  ;; Bind it to 0 here so other SQL products are unaffected.
+  (let ((sql-login-delay 0))
+    (let ((parameters (append options
+                              (unless (string-empty-p sql-server)
+                                (list "--server" sql-server))
+                              (unless (string-empty-p sql-database)
+                                (list "--database" sql-database))
+                              (sql-datum--comint-username)))
+          (pass (sql-datum--comint-get-password)))
+      (unless (and sql-connection parameters)
+        (let ((conn-pair (sql-datum--prompt-connection)))
+          (setf parameters (car conn-pair))
+          (setf pass (cdr conn-pair))))
+      (unless (or (null pass) (string-empty-p pass))
+        (setf parameters
+              (append parameters
+                      (if sql-datum-password-variable
+                          (progn
+                            (setenv sql-datum-password-variable pass)
+                            (list "--pass"
+                                  (format "ENV=%s" sql-datum-password-variable)))
+                        (list "--pass" pass)))))
+      (sql-comint product parameters buf-name)
+      (when sql-datum-password-variable
+        (setenv sql-datum-password-variable))
+      (sql-datum--setup-buffer (get-buffer (or buf-name "*SQL*"))))))
+
+(defun sql-datum--setup-buffer (buf)
+  "Set up BUF with the envelope filter and connection watcher."
+  (when (buffer-live-p buf)
+    (with-current-buffer buf
+      ;; Install the envelope filter — runs before output hits the buffer.
+      (add-hook 'comint-preoutput-filter-functions
+                #'sql-datum--preoutput-filter nil t)
+      ;; Watch for the first prompt to confirm connection.
+      (letrec ((watcher
+                (lambda (output)
+                  (when (string-match-p (rx bol (* nonl) ">") output)
+                    (message "datum: connected.")
+                    (remove-hook 'comint-output-filter-functions watcher t)))))
+        (add-hook 'comint-output-filter-functions watcher nil t))
+      (message "datum: connecting in background..."))))
+
+;;; ---------------------------------------------------------------------------
+;;; Credential helpers (unchanged from original)
+;;; ---------------------------------------------------------------------------
 
 (defun sql-datum--comint-username ()
-  "Determine the username for the connection.
-When `sql-user' is a string, use as-is. If it's the symbol
-auth-source, use said package to find the credentials.
-Return a list with login values, or nil if the login can't be
-determined/found."
+  "Determine the username for the connection."
   (if (eq 'auth-source sql-user)
       (list "--user" (plist-get (sql-datum--get-auth-source) :user))
-    ;; else:  when it's non-empty string, use as-is
     (unless (string-empty-p sql-user)
       (list "--user" sql-user))))
 
 (defun sql-datum--comint-get-password ()
-  "Determine the password for the connection.
-When `sql-password' is a string, use as-is. If it's the symbol
-auth-source, use said package to find the credentials.
-Return the password value, or nil if can't be determined/found."
+  "Determine the password for the connection."
   (if (eq 'auth-source sql-password)
       (auth-info-password (sql-datum--get-auth-source))
-    ;; else: read from minibuffer if 'ask
     (if (eq 'ask sql-password)
         (read-passwd "Password (empty to skip): ")
-      ;; finally, if it's non-empty string, use as-is
       (unless (string-empty-p sql-password)
         sql-password))))
 
 (defun sql-datum--get-auth-source ()
-  "Return the `auth-source' token for the current server@database pair.
-Raise an error if no entry is found."
+  "Return the `auth-source' token for the current server@database pair."
   (require 'auth-source)
   (if-let ((auth-info (car (auth-source-search :host sql-connection
                                                :require '(:secret)))))
@@ -130,9 +309,7 @@ Raise an error if no entry is found."
            sql-connection)))
 
 (defun sql-datum--prompt-connection ()
-  "Prompt for datum connection parameters interactively.
-This function will \"smartly\" ask for parameters.
-Return a cons with the parameters and the password prompted."
+  "Prompt for datum connection parameters interactively."
   (let ((parameters (if (y-or-n-p "Do you have a DSN? ")
                         (list "--dsn"
                               (read-string "DSN: "))
@@ -148,11 +325,7 @@ Return a cons with the parameters and the password prompted."
     (setf user (read-string "Username (empty to skip): "))
     (unless (string-empty-p user)
       (setf parameters (append parameters (list "--user" user))))
-    ;; will be returned, it might never be added to the list,
-    ;; depends on the value of `sql-datum-password-variable'
     (setf pass (read-passwd "Password (empty to skip): "))
-    ;; if user and pass are empty ask about integrated security, but
-    ;; it is valid that the user says no to all (SQLite)
     (when (and (string-empty-p user) (string-empty-p pass))
       (when (y-or-n-p "No user nor password provided.  Use Integrated security? ")
         (setf parameters (append parameters (list "--integrated")))))
@@ -161,40 +334,53 @@ Return a cons with the parameters and the password prompted."
                                                 (read-file-name "Config file path: ")))))
     (cons parameters pass)))
 
-(defun sql-datum--watch-for-connection-banner (buf)
-  "Watch BUF's process output for the datum connection banner.
-Installs a temporary `comint-output-filter-functions' hook that fires once
-when datum emits its prompt, displays a message, then removes itself.
-This prevents Emacs from blocking on `accept-process-output' while pyodbc
-is establishing the ODBC connection."
-  (when (buffer-live-p buf)
-    (with-current-buffer buf
-      (letrec ((watcher
-                (lambda (output)
-                  (when (string-match-p (rx bol (* nonl) ">") output)
-                    ;; Prompt appeared — connection is live.
-                    (message "datum: connected.")
-                    ;; Remove ourselves so normal comint takes over.
-                    (remove-hook 'comint-output-filter-functions watcher t)))))
-        (add-hook 'comint-output-filter-functions watcher nil t))
-      (message "datum: connecting in background..."))))
+;;; ---------------------------------------------------------------------------
+;;; Interactive commands
+;;; ---------------------------------------------------------------------------
 
 ;;;###autoload
 (defun sql-datum (&optional buffer)
   "Run Datum as an inferior process.
 The buffer with name BUFFER will be used or created."
   (interactive "P")
-  ;; when the call is interactive, the sql.el machinery will trip on the
-  ;; special symbol values 'auth-source and 'ask, which isn't surprising.
-  ;; Usually there's history for these, but that makes 0 sense in the context
-  ;; of the symbols, let's clear the values
-  (when (or (symbolp sql-user)
-            (null sql-user))
+  (when (or (symbolp sql-user) (null sql-user))
     (setf sql-user ""))
-  (when (or (symbolp sql-password)
-            (null sql-password))
+  (when (or (symbolp sql-password) (null sql-password))
     (setf sql-password ""))
   (sql-product-interactive 'datum buffer))
+
+(defun sql-datum-copy-last-result ()
+  "Copy the last query result block from the datum buffer to the kill ring."
+  (interactive)
+  (let ((buf (sql-find-sqli-buffer 'datum)))
+    (unless buf
+      (user-error "No active datum buffer found"))
+    (with-current-buffer buf
+      (save-excursion
+        (goto-char (point-max))
+        ;; Search back for the separator line (dashes) that precedes result rows
+        (if (re-search-backward "^-[-\s]+" nil t)
+            (let* ((result-start (line-beginning-position))
+                   (result-end   (progn
+                                   (re-search-forward "^Rows affected:" nil t)
+                                   (line-end-position))))
+              (kill-ring-save result-start result-end)
+              (message "datum: last result copied to kill ring (%d chars)"
+                       (- result-end result-start)))
+          (user-error "datum: no result found in buffer"))))))
+
+(defun sql-datum-complete-table ()
+  "Insert a table name from the introspection cache using `completing-read'."
+  (interactive)
+  (let* ((buf     (sql-find-sqli-buffer 'datum))
+         (tables  (and buf (buffer-local-value 'sql-datum--tables buf))))
+    (if tables
+        (insert (completing-read "Table: " tables nil t))
+      (user-error "datum: no tables cached — run :tables first"))))
+
+;;; ---------------------------------------------------------------------------
+;;; Product registration
+;;; ---------------------------------------------------------------------------
 
 (sql-add-product 'datum "Datum - ODBC Client"
                  :free-software t

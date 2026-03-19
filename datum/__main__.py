@@ -3,11 +3,12 @@
 Usage:
     datum (-h | --help)
     datum --list-drivers
-    datum --conn-string=<connection_string> [--config=<path>]
+    datum --conn-string=<connection_string> [--sql-type=<type>] [--config=<path>]
     datum (--driver=<odbc_driver> | --dsn=<dsn>)
           [--server=<server> --database=<database>]
           [--user=<username> --pass=<password> --integrated]
           [--param <name=value>]...
+          [--sql-type=<type>]
           [--config=<path>]
 
 Options:
@@ -41,7 +42,14 @@ can be added in pairs using:
 
   --param <name=value>   You can add as many as needed.
 
-Last optional parameter:
+Optional parameters:
+
+  --sql-type=<type>      SQL dialect to use for introspection commands.
+                         Supported values: mssql, postgres, ansi.
+                         If omitted, datum will attempt to detect the dialect
+                         from the connection string or DSN. Supply this for
+                         best results when auto-detection may be ambiguous.
+
   --config=<path>        Path to the INI file that declares config values and
                          custom commands. Can be a full path, or just a name,
                          in which case it is assumed the file is in the dir
@@ -63,9 +71,7 @@ def main():
     args = docopt(__doc__)
     if args["--list-drivers"]:
         drivers.print_list()
-        # will exit with code 0
         return
-    # We have lots of work to do :)
     datum.initialize(args)
     datum.query_loop()
 
@@ -73,7 +79,6 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-        # on unhandled exception the exit code will be non-zero
         sys.exit(0)
     except Exception as e:
         print("Error: ", e, "\n")
