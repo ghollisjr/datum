@@ -1,7 +1,9 @@
 """datum importer: load tabular files into a SQL table.
 
-Supports CSV (stdlib) and Parquet/JSON (pyarrow, optional).
+Supports CSV (stdlib) and Parquet/JSON (polars or pyarrow, optional).
 Uses pyodbc's fast_executemany for efficient bulk insertion.
+
+Backend priority: polars > pyarrow > stdlib csv.
 
 The :in command syntax:
     :in /path/to/file.csv  target_table            # error if table exists
@@ -15,7 +17,14 @@ import time
 
 from . import envelope
 
-# pyarrow is optional
+# polars is optional (preferred)
+try:
+    import polars as pl
+    _HAVE_POLARS = True
+except ImportError:
+    _HAVE_POLARS = False
+
+# pyarrow is optional (fallback)
 try:
     import pyarrow as pa
     import pyarrow.parquet as pq
@@ -44,9 +53,9 @@ def run(path, table_name, mode, connection, driver):
         envelope.error(f":in - unsupported file format: {path}")
         return
 
-    if fmt in ("parquet", "json") and not _HAVE_PYARROW:
-        envelope.error(f":in - pyarrow is required for {fmt} import. "
-                       f"Install it with: pip install pyarrow")
+    if fmt in ("parquet", "json") and not _HAVE_POLARS and not _HAVE_PYARROW:
+        envelope.error(f":in - polars or pyarrow is required for {fmt} import. "
+                       f"Install with: pip install polars")
         return
 
     cursor = connection.cursor()
@@ -68,7 +77,10 @@ def run(path, table_name, mode, connection, driver):
 
     t_start = time.monotonic()
 
-    if fmt == "csv":
+    if _HAVE_POLARS:
+        rows_inserted = _import_polars(path, table_name, table_exists,
+                                       cursor, connection, driver, fmt)
+    elif fmt == "csv":
         rows_inserted = _import_csv(path, table_name, table_exists,
                                     cursor, connection, driver)
     else:
@@ -87,6 +99,87 @@ def _infer_format(path):
     return {".csv": "csv", ".parquet": "parquet", ".json": "json"}.get(ext)
 
 
+# --- Polars import (preferred when available) ---
+
+# Map polars base type names to the type keys used in driver type maps.
+_POLARS_TYPE_MAP = {
+    "Int8":     "int8",
+    "Int16":    "int16",
+    "Int32":    "int32",
+    "Int64":    "int64",
+    "UInt8":    "uint8",
+    "UInt16":   "uint16",
+    "UInt32":   "uint32",
+    "UInt64":   "uint64",
+    "Float32":  "float32",
+    "Float64":  "float64",
+    "Boolean":  "bool",
+    "String":   "string",
+    "Utf8":     "string",
+    "Date":     "date32",
+    "Time":     "time64[us]",
+    "Binary":   "binary",
+    "LargeBinary": "large_binary",
+    "Null":     "string",
+}
+
+
+def _polars_type_str(dtype):
+    """Convert a polars DataType to the string key used in driver type maps."""
+    name = str(dtype.base_type())
+    if name in _POLARS_TYPE_MAP:
+        return _POLARS_TYPE_MAP[name]
+    s = str(dtype)
+    if s.startswith("Datetime"):
+        return "timestamp[us]"
+    if s.startswith("Duration"):
+        return "timestamp[us]"
+    if s.startswith("Decimal"):
+        return "decimal128"
+    return "string"  # safe fallback
+
+
+def _import_polars(path, table_name, table_exists, cursor, connection, driver, fmt):
+    """Import a file via polars. Returns row count."""
+    if fmt == "csv":
+        df = pl.read_csv(path, infer_schema_length=1000)
+    elif fmt == "parquet":
+        df = pl.read_parquet(path)
+    elif fmt == "json":
+        df = pl.read_ndjson(path)
+
+    headers = df.columns
+
+    if not table_exists:
+        col_types = []
+        for name in headers:
+            py_type = _polars_type_str(df[name].dtype)
+            sql_type = driver.python_type_to_sql(py_type)
+            col_types.append((name, sql_type))
+        ddl = _build_ddl(table_name, col_types, driver)
+        cursor.execute(ddl)
+        connection.commit()
+        envelope.info(f"Created table '{table_name}'.")
+
+    placeholders = ", ".join(["?"] * len(headers))
+    insert_sql = f"INSERT INTO {table_name} VALUES ({placeholders})"
+    cursor.fast_executemany = True
+
+    # Stream in batches
+    rows_inserted = 0
+    batch_size = 1000
+    total = df.height
+
+    for offset in range(0, total, batch_size):
+        chunk = df.slice(offset, batch_size)
+        rows = chunk.rows()
+        cursor.executemany(insert_sql, rows)
+        rows_inserted += len(rows)
+
+    connection.commit()
+    return rows_inserted
+
+
 # --- CSV import (stdlib, no extra deps) ---
 
 def _import_csv(path, table_name, table_exists, cursor, connection, driver):
@@ -102,7 +195,7 @@ def _import_csv(path, table_name, table_exists, cursor, connection, driver):
     if not table_exists:
         # Infer types from sample: try int, then float, then string.
         col_types = _infer_csv_types(headers, sample_rows, driver)
-        ddl = _build_ddl(table_name, col_types)
+        ddl = _build_ddl(table_name, col_types, driver)
         cursor.execute(ddl)
         connection.commit()
         envelope.info(f"Created table '{table_name}'.")
@@ -179,7 +272,7 @@ def _import_arrow(path, table_name, table_exists, cursor, connection, driver, fm
             py_type = _arrow_type_str(field.type)
             sql_type = driver.python_type_to_sql(py_type)
             col_types.append((field.name, sql_type))
-        ddl = _build_ddl(table_name, col_types)
+        ddl = _build_ddl(table_name, col_types, driver)
         cursor.execute(ddl)
         connection.commit()
         envelope.info(f"Created table '{table_name}'.")
@@ -239,9 +332,12 @@ def _arrow_type_str(arrow_type):
 
 # --- DDL helpers ---
 
-def _build_ddl(table_name, col_types):
+def _build_ddl(table_name, col_types, driver=None):
     """Build a CREATE TABLE statement from (name, sql_type) pairs."""
-    cols = ",\n    ".join(f"[{name}] {sql_type}" for name, sql_type in col_types)
+    if driver and driver.dialect_name == "postgres":
+        cols = ",\n    ".join(f'"{name}" {sql_type}' for name, sql_type in col_types)
+    else:
+        cols = ",\n    ".join(f"[{name}] {sql_type}" for name, sql_type in col_types)
     return f"CREATE TABLE {table_name} (\n    {cols}\n)"
 
 

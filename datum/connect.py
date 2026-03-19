@@ -65,7 +65,7 @@ def show_connection_banner_and_get_prompt_header():
     """
     global _server, _database, _dsn, _header_message
     # If the server name isn't explicit, then use the DSN name. Even then,
-    # something like SQLite might now have server nor DSN, so show "-"
+    # something like SQLite might not have server nor DSN, so show "-"
     print_server = _server or _dsn or "-"
     print('Connected to server', print_server, end=" ")
     if _database:

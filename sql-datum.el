@@ -176,24 +176,106 @@ Returns OUTPUT with all ##DATUM:...## lines removed."
            (let ((table (substring kind (length "columns:"))))
              (puthash table items sql-datum--columns)))
           ("running"
-           ;; Running queries: open a dedicated buffer
-           (sql-datum--show-running-queries items))))
+           ;; Running queries: open a dedicated buffer and start auto-refresh.
+           (sql-datum--show-running-queries items)
+           (unless sql-datum--running-timer
+             (sql-datum--running-start-timer)))))
     (error (message "datum: failed to parse introspect payload: %s" err))))
+
+(defvar sql-datum--running-timer nil
+  "Timer for auto-refreshing the running queries buffer.")
+
+(defvar sql-datum--running-sqli-buf nil
+  "The SQLi buffer used for running-queries auto-refresh.")
+
+(defcustom sql-datum-running-refresh-interval 5
+  "Seconds between auto-refresh of the running queries buffer.
+Set to nil to disable auto-refresh."
+  :type '(choice (const :tag "Disabled" nil) integer)
+  :group 'SQL)
 
 (defun sql-datum--show-running-queries (items)
   "Display ITEMS (list of strings) in a dedicated running-queries buffer."
   (let ((buf (get-buffer-create "*datum-running-queries*")))
     (with-current-buffer buf
-      (read-only-mode -1)
-      (erase-buffer)
-      (insert "datum: Running Queries\n")
-      (insert (make-string 40 ?-) "\n")
-      (if items
-          (dolist (item items) (insert item "\n"))
-        (insert "(none)\n"))
-      (read-only-mode 1)
-      (goto-char (point-min)))
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert "datum: Running Queries")
+        (when sql-datum--running-timer
+          (insert (format "  [auto-refresh %ds]"
+                          sql-datum-running-refresh-interval)))
+        (insert "\n")
+        (insert (make-string 40 ?-) "\n")
+        (if items
+            (dolist (item items) (insert item "\n"))
+          (insert "(none)\n"))
+        (insert "\n")
+        (insert "Press 'g' to refresh, 'a' to toggle auto-refresh, 'q' to quit.\n"))
+      (sql-datum--running-mode))
     (display-buffer buf)))
+
+(defvar sql-datum--running-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map "q" #'sql-datum-running-quit)
+    (define-key map "g" #'sql-datum-running-refresh)
+    (define-key map "a" #'sql-datum-running-toggle-auto-refresh)
+    map)
+  "Keymap for the datum running queries buffer.")
+
+(define-derived-mode sql-datum--running-mode special-mode "datum-running"
+  "Major mode for the datum running queries buffer."
+  (setq buffer-read-only t))
+
+(defun sql-datum-running-refresh ()
+  "Manually refresh the running queries display."
+  (interactive)
+  (sql-datum--send-running))
+
+(defun sql-datum-running-toggle-auto-refresh ()
+  "Toggle auto-refresh of the running queries buffer."
+  (interactive)
+  (if sql-datum--running-timer
+      (progn
+        (sql-datum--running-stop-timer)
+        (message "datum: auto-refresh disabled"))
+    (sql-datum--running-start-timer)
+    (message "datum: auto-refresh enabled (%ds interval)"
+             sql-datum-running-refresh-interval)))
+
+(defun sql-datum-running-quit ()
+  "Stop auto-refresh and close the running queries buffer."
+  (interactive)
+  (sql-datum--running-stop-timer)
+  (quit-window t))
+
+(defun sql-datum--send-running ()
+  "Send :running to the datum process to trigger a refresh."
+  (let ((buf (or sql-datum--running-sqli-buf
+                 (sql-find-sqli-buffer 'datum))))
+    (when (and buf (buffer-live-p buf))
+      (comint-send-string buf ":running\n"))))
+
+(defun sql-datum--running-start-timer ()
+  "Start the auto-refresh timer for running queries."
+  (sql-datum--running-stop-timer)
+  (when sql-datum-running-refresh-interval
+    (setq sql-datum--running-sqli-buf (sql-find-sqli-buffer 'datum))
+    (setq sql-datum--running-timer
+          (run-with-timer sql-datum-running-refresh-interval
+                          sql-datum-running-refresh-interval
+                          #'sql-datum--running-tick))))
+
+(defun sql-datum--running-stop-timer ()
+  "Stop the auto-refresh timer."
+  (when sql-datum--running-timer
+    (cancel-timer sql-datum--running-timer)
+    (setq sql-datum--running-timer nil)))
+
+(defun sql-datum--running-tick ()
+  "Timer callback: refresh if the buffer is still visible, else stop."
+  (if (get-buffer-window "*datum-running-queries*" t)
+      (sql-datum--send-running)
+    (sql-datum--running-stop-timer)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Completion at point
@@ -201,15 +283,24 @@ Returns OUTPUT with all ##DATUM:...## lines removed."
 
 (defun sql-datum-completion-at-point ()
   "Provide SQL identifier completion using datum introspection data.
-Add to `completion-at-point-functions' in sql-mode buffers that use datum."
+Automatically added to `completion-at-point-functions' in sql-mode
+and sql-interactive-mode buffers that use datum."
   (when sql-datum-populate-completion
-    (let* ((buf (sql-find-sqli-buffer 'datum))
-           (tables  (and buf (buffer-local-value 'sql-datum--tables  buf)))
-           (schemas (and buf (buffer-local-value 'sql-datum--schemas buf)))
+    (let* ((buf (or (and (derived-mode-p 'sql-interactive-mode) (current-buffer))
+                    (sql-find-sqli-buffer 'datum)))
+           (tables   (and buf (buffer-local-value 'sql-datum--tables   buf)))
+           (schemas  (and buf (buffer-local-value 'sql-datum--schemas  buf)))
+           (col-hash (and buf (buffer-local-value 'sql-datum--columns  buf)))
+           (columns  (when col-hash
+                       (let (all)
+                         (maphash (lambda (_k v)
+                                    (setq all (append v all)))
+                                  col-hash)
+                         (delete-dups all))))
            (bounds  (bounds-of-thing-at-point 'symbol))
            (start   (or (car bounds) (point)))
            (end     (or (cdr bounds) (point)))
-           (candidates (append tables schemas)))
+           (candidates (append tables schemas columns)))
       (when candidates
         (list start end candidates
               :exclusive 'no
@@ -217,7 +308,17 @@ Add to `completion-at-point-functions' in sql-mode buffers that use datum."
               (lambda (cand)
                 (cond ((member cand tables)  " [table]")
                       ((member cand schemas) " [schema]")
+                      ((member cand columns) " [column]")
                       (t ""))))))))
+
+(defun sql-datum--sql-mode-hook ()
+  "Hook for `sql-mode' to enable datum completion in editing buffers.
+The capf function itself checks for an active datum connection and
+returns nil if none is found, so this is safe for non-datum buffers."
+  (add-hook 'completion-at-point-functions
+            #'sql-datum-completion-at-point nil t))
+
+(add-hook 'sql-mode-hook #'sql-datum--sql-mode-hook)
 
 ;;; ---------------------------------------------------------------------------
 ;;; Connection setup
@@ -270,6 +371,9 @@ for the `comint' buffer."
       ;; Install the envelope filter — runs before output hits the buffer.
       (add-hook 'comint-preoutput-filter-functions
                 #'sql-datum--preoutput-filter nil t)
+      ;; Install completion-at-point in the SQLi buffer itself.
+      (add-hook 'completion-at-point-functions
+                #'sql-datum-completion-at-point nil t)
       ;; Watch for the first prompt to confirm connection.
       (letrec ((watcher
                 (lambda (output)
@@ -325,14 +429,14 @@ for the `comint' buffer."
     (setf user (read-string "Username (empty to skip): "))
     (unless (string-empty-p user)
       (setf parameters (append parameters (list "--user" user))))
-    (setf pass (read-passwd "Password (empty to skip): "))
-    (when (and (string-empty-p user) (string-empty-p pass))
+    (setf password (read-passwd "Password (empty to skip): "))
+    (when (and (string-empty-p user) (string-empty-p password))
       (when (y-or-n-p "No user nor password provided.  Use Integrated security? ")
         (setf parameters (append parameters (list "--integrated")))))
     (when (y-or-n-p "Specify a config file? ")
       (setf parameters (append parameters (list "--config"
                                                 (read-file-name "Config file path: ")))))
-    (cons parameters pass)))
+    (cons parameters password)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Interactive commands

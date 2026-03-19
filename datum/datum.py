@@ -76,7 +76,7 @@ def query_loop():
                     printer.print_cursor_results(cursor)
                 print("\nRows affected:", row_count)
         except Exception as err:
-            code = err.args[0]
+            code = err.args[0] if err.args else ""
             message = traceback.format_exc()
             if len(err.args) > 1:
                 code, message, *_ = err.args

@@ -8,6 +8,10 @@ import operator as op
 
 _config = {}
 
+# Cached translation table for text_formatter; rebuilt when config changes.
+_trans_table = None
+_trans_config_key = None
+
 
 def initialize_module(config):
     """Initialize this module with a reference to the global config."""
@@ -15,6 +19,16 @@ def initialize_module(config):
     # As of this writing the printer needs _all_ the config parameters to work
     # so let's just keep the whole dict referenced
     _config = config
+
+
+def _get_trans_table():
+    """Return (and cache) the str.maketrans table for the current config."""
+    global _trans_table, _trans_config_key
+    key = (_config["newline_replacement"], _config["tab_replacement"])
+    if _trans_config_key != key:
+        _trans_table = str.maketrans({"\n": key[0], "\r": "", "\t": key[1]})
+        _trans_config_key = key
+    return _trans_table
 
 
 def print_cursor_results(a_cursor):
@@ -42,14 +56,7 @@ def print_cursor_results(a_cursor):
 
 
 def print_resultset(a_cursor):
-    """Print the results of cursor (the "current" resultset).
-
-    This function is a performance disgrace waiting to happen. It might (when
-    :rows 0) fetch ALL THE ROWS of the cursor, and then there is always a full
-    iteration to determine the printing width.
-    I would argue though, that no one would use datum to print millions of
-    rows at a time.
-    """
+    """Print the results of cursor (the "current" resultset)."""
     global _config
     rows_to_print = _config["rows_to_print"]
     if rows_to_print:
@@ -64,7 +71,10 @@ def print_resultset(a_cursor):
                     a_cursor.description]
     format_str, print_ready = format_rows(column_names, odbc_rows)
     print()  # blank line
-    print("\n".join(format_str.format(*row) for row in print_ready))
+    _write = print
+    fmt_format = format_str.format
+    for row in print_ready:
+        _write(fmt_format(*row))
     # Try to determine if all rows returned were printed
     # MS SQL Server doesn't report the total rows SELECTed,
     # but for example MySql does.
@@ -86,16 +96,8 @@ def text_formatter(value):
     This function will replace newlines and tabs with the currently configured
     values, and do char width truncation if needed.
     """
-    global _config
-    chars_to_replace = str.maketrans({"\n": _config["newline_replacement"],
-                                      # TODO: experimental, completely remove
-                                      # \r, since \n is treated as newline
-                                      # already
-                                      "\r": "",
-                                      "\t": _config["tab_replacement"]})
     col_width = _config["column_display_length"]
-    value = str(value)
-    value = str.translate(value, chars_to_replace)
+    value = str(value).translate(_get_trans_table())
     if col_width and len(value) > col_width:
         value = value[:col_width-5] + "[...]"
     return value
@@ -104,70 +106,122 @@ def text_formatter(value):
 def format_rows(column_names, raw_rows):
     """Go over all the rows in the results and format them for printing.
 
-    This depends on both the data type and the configuration of this session.
+    Uses per-column formatter functions built from the first row's types
+    to avoid repeated isinstance checks on every cell.
     """
     global _config
     null_string = _config["null_string"]
-    # lengths will match columns by position
-    column_widths = defaultdict(lambda: 0)
+    null_len = len(null_string)
+    num_cols = len(column_names)
+    column_widths = [0] * num_cols
+
+    if not raw_rows:
+        for i, name in enumerate(column_names):
+            column_widths[i] = len(name)
+        format_str = "|".join(f"{{{i}:{column_widths[i]}}}"
+                              for i in range(num_cols))
+        separator = ["-" * w for w in column_widths]
+        return format_str, [column_names, separator]
+
+    # Build per-column formatters from the first non-None value in each column.
+    # This eliminates the isinstance chain for every cell.
+    col_formatters = [None] * num_cols
+    _text_formatter = text_formatter
+    _int_len = int_len
+    _decimal_len = decimal_len
+    _Decimal = decimal.Decimal
+
+    # Scan for representative types (first non-None value per column)
+    type_samples = [None] * num_cols
+    found = 0
+    for row in raw_rows:
+        for i in range(num_cols):
+            if type_samples[i] is None and row[i] is not None:
+                type_samples[i] = type(row[i])
+                found += 1
+        if found == num_cols:
+            break
+
+    for i in range(num_cols):
+        sample_type = type_samples[i]
+        if sample_type is bool:
+            col_formatters[i] = _fmt_bool
+        elif sample_type is time:
+            col_formatters[i] = _fmt_isoformat
+        elif sample_type is datetime:
+            col_formatters[i] = _fmt_isoformat
+        elif sample_type is date:
+            col_formatters[i] = _fmt_date
+        elif sample_type is int:
+            col_formatters[i] = _fmt_int
+        elif sample_type is float or sample_type is _Decimal:
+            col_formatters[i] = _fmt_decimal
+        elif sample_type is str:
+            col_formatters[i] = _fmt_str
+        elif sample_type is bytes:
+            col_formatters[i] = _fmt_bytes
+        else:
+            col_formatters[i] = _fmt_fallback
+
+    # Format all rows
     formatted = []
     for row in raw_rows:
-        new_row = []
-        new_len = 0
-        for index, value in enumerate(row):
-            # This will be printed whenever there isn't a proper conversion for
-            # a value. It used to print 'unknown', which made me think I was
-            # dealing with a real SQL value when it happened. So let's make
-            # SUPER EXPLICIT that the printer tripped.
-            # Also, setup a proper length so the output still looks nice :)
-            new_value = "#DatumPrinterBroke#"
-            new_len = 19
+        new_row = [None] * num_cols
+        for i in range(num_cols):
+            value = row[i]
             if value is None:
-                new_len = 6
-                new_value = null_string
-            if isinstance(value, bool):
-                new_len = 6
-                new_value = value
-            elif isinstance(value, time):
-                new_value = value.isoformat()
-                new_len = len(new_value)
-            elif isinstance(value, datetime):
-                new_value = value.isoformat()
-                new_len = len(new_value)
-            elif isinstance(value, date):
-                new_len = 10
-                new_value = value.isoformat()
-            elif isinstance(value, int):
-                new_len = int_len(value)
-                new_value = value
-            elif isinstance(value, (float, decimal.Decimal)):
-                new_len = decimal_len(decimal.Decimal(value))
-                new_value = value
-            elif isinstance(value, str):
-                new_value = text_formatter(value)
-                new_len = len(new_value)
-            elif isinstance(value, bytes):
-                # Bytes are converted to string, and it is important to
-                # truncate them too. Imagine printing a whole file as binary!
-                # The 0x prefix was inspired by SSMS :)
-                new_value = text_formatter('0x' + value.hex())
-                new_len = len(new_value)
-            if new_len > column_widths[index]:
-                column_widths[index] = new_len
-            new_row.append(new_value)
+                new_row[i] = null_string
+                if null_len > column_widths[i]:
+                    column_widths[i] = null_len
+            else:
+                new_value, new_len = col_formatters[i](value)
+                new_row[i] = new_value
+                if new_len > column_widths[i]:
+                    column_widths[i] = new_len
         formatted.append(tuple(new_row))
 
-    for index, col_name in enumerate(column_names):
-        column_widths[index] = max((column_widths[index], len(col_name)))
+    for i, name in enumerate(column_names):
+        name_len = len(name)
+        if name_len > column_widths[i]:
+            column_widths[i] = name_len
 
-    format_str = "|".join(["{{{ndx}:{len}}}".format(ndx=ndx, len=len)
-                           for ndx, len in column_widths.items()])
+    format_str = "|".join(f"{{{i}:{column_widths[i]}}}"
+                          for i in range(num_cols))
+    separator = ["-" * w for w in column_widths]
     formatted.insert(0, column_names)
-    # IIRC now dicts are ordered but just in case/for other implementations
-    formatted.insert(1, ["-"*width for index, width in
-                         sorted(column_widths.items(),
-                                key=op.itemgetter(0))])
+    formatted.insert(1, separator)
     return format_str, formatted
+
+
+# --- Per-type formatter functions ---
+# Each returns (display_value, display_length).
+
+def _fmt_bool(value):
+    return value, 6
+
+def _fmt_isoformat(value):
+    s = value.isoformat()
+    return s, len(s)
+
+def _fmt_date(value):
+    return value.isoformat(), 10
+
+def _fmt_int(value):
+    return value, int_len(value)
+
+def _fmt_decimal(value):
+    return value, decimal_len(decimal.Decimal(value))
+
+def _fmt_str(value):
+    v = text_formatter(value)
+    return v, len(v)
+
+def _fmt_bytes(value):
+    v = text_formatter('0x' + value.hex())
+    return v, len(v)
+
+def _fmt_fallback(value):
+    return "#DatumPrinterBroke#", 19
 
 
 def int_len(number):

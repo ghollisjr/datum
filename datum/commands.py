@@ -109,7 +109,7 @@ def rows(args):
             pass
     display_value = ("ALL" if not _config["rows_to_print"] else
                      _config["rows_to_print"])
-    print('Printing', display_value, 'rows of each resulset.')
+    print('Printing', display_value, 'rows of each resultset.')
 
 
 def chars(args):
@@ -351,7 +351,10 @@ def columns(args):
         return
     table_name = args[0]
     parts = table_name.split(".")
-    schema = parts[0] if len(parts) > 1 else "dbo"
+    if len(parts) > 1:
+        schema = parts[0]
+    else:
+        schema = "dbo" if _driver.dialect_name == "mssql" else "public"
     table = parts[-1]
     sql = _driver.sql_list_columns(schema, table)
     _run_introspect(sql, f"columns:{table_name}", f"columns for {table_name}")

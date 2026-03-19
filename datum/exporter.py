@@ -12,8 +12,10 @@ Supports two export paths:
 
 Supported :out formats (by file extension):
     .csv      stdlib csv — no extra dependencies
-    .parquet  pyarrow required
-    .json     pyarrow required
+    .parquet  polars or pyarrow required
+    .json     polars or pyarrow required
+
+Backend priority: polars > pyarrow > stdlib csv.
 """
 
 import csv
@@ -24,7 +26,14 @@ from pyodbc import ProgrammingError
 
 from . import envelope
 
-# pyarrow is optional
+# polars is optional (preferred)
+try:
+    import polars as pl
+    _HAVE_POLARS = True
+except ImportError:
+    _HAVE_POLARS = False
+
+# pyarrow is optional (fallback)
 try:
     import pyarrow as pa
     import pyarrow.parquet as pq
@@ -91,14 +100,16 @@ def export_out_target(cursor):
         envelope.error(f":out - unsupported format for path: {path}")
         return
 
-    if fmt in ("parquet", "json") and not _HAVE_PYARROW:
-        envelope.error(f":out - pyarrow is required for {fmt} export. "
-                       f"Install it with: pip install pyarrow")
+    if fmt in ("parquet", "json") and not _HAVE_POLARS and not _HAVE_PYARROW:
+        envelope.error(f":out - polars or pyarrow is required for {fmt} export. "
+                       f"Install with: pip install polars")
         return
 
     t_start = time.monotonic()
     try:
-        if fmt == "csv":
+        if _HAVE_POLARS:
+            rows_written = _export_polars(path, cursor, fmt)
+        elif fmt == "csv":
             rows_written = _export_csv(path, cursor)
         else:
             rows_written = _export_arrow(path, cursor, fmt)
@@ -116,6 +127,40 @@ def _infer_format(path):
     return {".csv": "csv", ".parquet": "parquet", ".json": "json"}.get(ext)
 
 
+# --- Polars export (preferred when available) ---
+
+def _export_polars(path, cursor, fmt):
+    """Export cursor results via polars. Returns row count."""
+    headers = [col[0] for col in cursor.description]
+    batch_size = 50_000
+    all_rows = []
+
+    rows = cursor.fetchmany(batch_size)
+    while rows:
+        all_rows.extend(rows)
+        rows = cursor.fetchmany(batch_size)
+
+    if not all_rows:
+        # Write an empty file with headers
+        df = pl.DataFrame({h: [] for h in headers})
+    else:
+        # Build column-oriented data for polars
+        columns = {headers[i]: [row[i] for row in all_rows]
+                   for i in range(len(headers))}
+        df = pl.DataFrame(columns)
+
+    if fmt == "csv":
+        df.write_csv(path)
+    elif fmt == "parquet":
+        df.write_parquet(path)
+    elif fmt == "json":
+        df.write_ndjson(path)
+
+    return len(all_rows)
+
+
+# --- CSV export (stdlib fallback) ---
+
 def _export_csv(path, cursor):
     """Stream cursor results to a CSV file. Returns row count."""
     headers = [col[0] for col in cursor.description]
@@ -131,6 +176,8 @@ def _export_csv(path, cursor):
             rows = cursor.fetchmany(batch_size)
     return rows_written
 
+
+# --- Arrow export (fallback for parquet/json when no polars) ---
 
 def _export_arrow(path, cursor, fmt):
     """Stream cursor results to a Parquet or JSON file via pyarrow.
