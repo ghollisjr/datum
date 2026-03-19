@@ -154,12 +154,12 @@ Handles partial envelope lines split across multiple filter calls."
              (fmt  (match-string 2 payload)))
          (sql-datum--handle-result-file path fmt))))
     ("introspect"
-     (when (string-match "\\([^:]+\\):\\(.*\\)" payload)
+     (when (string-match "\\(.*\\):\\(\\[.*\\)" payload)
        (let ((kind (match-string 1 payload))
              (json (match-string 2 payload)))
          (sql-datum--handle-introspect kind json))))
     ("introspect+"
-     (when (string-match "\\([^:]+\\):\\(.*\\)" payload)
+     (when (string-match "\\(.*\\):\\(\\[.*\\)" payload)
        (let ((kind (match-string 1 payload))
              (json (match-string 2 payload)))
          (sql-datum--handle-introspect-append kind json))))))
@@ -591,6 +591,64 @@ and import mode."
       (user-error "No active datum buffer found"))
     (comint-send-string (get-buffer buf) (concat cmd "\n"))))
 
+(defun sql-datum--get-dialect ()
+  "Return the SQL dialect string from the active datum SQLi buffer."
+  (let* ((buf (or (and (derived-mode-p 'sql-interactive-mode) (current-buffer))
+                  (let ((b (sql-find-sqli-buffer 'datum)))
+                    (and b (get-buffer b))))))
+    (and buf (buffer-local-value 'sql-datum--dialect buf))))
+
+(defun sql-datum--read-table (prompt)
+  "Read a table name with completion from the introspection cache.
+PROMPT is displayed to the user."
+  (let* ((buf (sql-find-sqli-buffer 'datum))
+         (tables (and buf (buffer-local-value 'sql-datum--tables
+                                              (get-buffer buf)))))
+    (completing-read prompt tables nil nil)))
+
+(defun sql-datum--mssql-p ()
+  "Return non-nil if the current dialect is MSSQL."
+  (string= (sql-datum--get-dialect) "mssql"))
+
+(defun sql-datum-top (n)
+  "Select the top N rows from a table (default 10).
+Uses TOP syntax for MSSQL, LIMIT for others."
+  (interactive "P")
+  (let* ((count (or (and n (prefix-numeric-value n)) 10))
+         (table (sql-datum--read-table "Top rows from table: "))
+         (sql (if (sql-datum--mssql-p)
+                  (format "SELECT TOP %d * FROM %s;;" count table)
+                (format "SELECT * FROM %s LIMIT %d;;" table count))))
+    (sql-datum--send-command sql)))
+
+(defun sql-datum-count (table)
+  "Select COUNT(*) from TABLE."
+  (interactive (list (sql-datum--read-table "Count rows in table: ")))
+  (sql-datum--send-command (format "SELECT COUNT(*) FROM %s;;" table)))
+
+(defun sql-datum-sample (n)
+  "Select a random sample of N rows from a table (default 10).
+Uses NEWID() for MSSQL, RANDOM() for others."
+  (interactive "P")
+  (let* ((count (or (and n (prefix-numeric-value n)) 10))
+         (table (sql-datum--read-table "Sample rows from table: "))
+         (sql (if (sql-datum--mssql-p)
+                  (format "SELECT TOP %d * FROM %s ORDER BY NEWID();;" count table)
+                (format "SELECT * FROM %s ORDER BY RANDOM() LIMIT %d;;" table count))))
+    (sql-datum--send-command sql)))
+
+(defalias 'sql-datum-describe #'sql-datum-columns
+  "Alias for `sql-datum-columns'.")
+
+(defun sql-datum-table-exists (table)
+  "Check if TABLE exists in the database.
+Uses OBJECT_ID for MSSQL, to_regclass for others."
+  (interactive (list (sql-datum--read-table "Check existence of table: ")))
+  (let ((sql (if (sql-datum--mssql-p)
+                 (format "SELECT OBJECT_ID('%s');;" table)
+               (format "SELECT to_regclass('%s');;" table))))
+    (sql-datum--send-command sql)))
+
 (defun sql-datum-pwd ()
   "Show current user, server, database, and version via :pwd."
   (interactive)
@@ -603,12 +661,17 @@ and import mode."
 
 (defun sql-datum-columns (table)
   "List columns for TABLE via :columns."
-  (interactive
-   (let* ((buf (sql-find-sqli-buffer 'datum))
-          (tables (and buf (buffer-local-value 'sql-datum--tables
-                                               (get-buffer buf)))))
-     (list (completing-read "Table: " tables nil nil))))
-  (sql-datum--send-command (format ":columns %s" table)))
+  (interactive (list (sql-datum--read-table "Columns for table: ")))
+  (let* ((buf (sql-find-sqli-buffer 'datum))
+         (database (and buf (gethash "database"
+                                     (buffer-local-value 'sql-datum--meta
+                                                         (get-buffer buf))
+                                     ""))))
+    (sql-datum--send-command (format ":columns %s" table))
+    (message "datum: columns for %s%s"
+             table
+             (if (string-empty-p database) ""
+               (format " (database: %s)" database)))))
 
 (defun sql-datum-databases ()
   "List all databases via :databases."
@@ -643,7 +706,17 @@ Prompts with completion from the cached database list."
           (databases (and buf (buffer-local-value 'sql-datum--databases
                                                   (get-buffer buf)))))
      (list (completing-read "Switch to database: " databases nil nil))))
-  (sql-datum--send-command (format ":use %s" db)))
+  (let ((buf (sql-find-sqli-buffer 'datum)))
+    (when buf
+      (with-current-buffer (get-buffer buf)
+        (letrec ((watcher
+                  (lambda (output)
+                    (when (string-match-p (rx bol (* nonl) ">") output)
+                      (message "datum: connected to %s." db)
+                      (remove-hook 'comint-output-filter-functions watcher t)))))
+          (add-hook 'comint-output-filter-functions watcher nil t)))))
+  (sql-datum--send-command (format ":use %s" db))
+  (message "datum: switching to database %s (reconnecting...)" db))
 
 ;;;###autoload
 (defun sql-datum-scratch (&optional new)
@@ -675,9 +748,14 @@ a numeric suffix, prompting to confirm the name."
 ;;; ---------------------------------------------------------------------------
 
 (with-eval-after-load 'sql
-  ;; C-c t: table import/export
+  ;; C-c t: table operations
   (define-key sql-mode-map (kbd "C-c t e") #'sql-datum-export)
   (define-key sql-mode-map (kbd "C-c t i") #'sql-datum-import)
+  (define-key sql-mode-map (kbd "C-c t t") #'sql-datum-top)
+  (define-key sql-mode-map (kbd "C-c t c") #'sql-datum-count)
+  (define-key sql-mode-map (kbd "C-c t s") #'sql-datum-sample)
+  (define-key sql-mode-map (kbd "C-c t d") #'sql-datum-describe)
+  (define-key sql-mode-map (kbd "C-c t x") #'sql-datum-table-exists)
   ;; C-c s: session info
   (define-key sql-mode-map (kbd "C-c s p") #'sql-datum-pwd)
   (define-key sql-mode-map (kbd "C-c s t") #'sql-datum-tables)

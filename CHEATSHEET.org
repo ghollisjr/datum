@@ -26,10 +26,15 @@ From the scratch buffer you have full completion (=TAB=), all the =C-c s= /
 
 ** Table Operations (=C-c t=)
 
-| Key       | Action                                      |
-|-----------+---------------------------------------------|
-| =C-c t e= | Export next query results (=C-u= to force)  |
-| =C-c t i= | Import file into table                      |
+| Key       | Action                                       |
+|-----------+----------------------------------------------|
+| =C-c t e= | Export next query results (=C-u= to force)   |
+| =C-c t i= | Import file into table                       |
+| =C-c t t= | Select top N rows (=C-u N= for count)        |
+| =C-c t c= | Count rows in table                          |
+| =C-c t s= | Random sample of N rows (=C-u N= for count)  |
+| =C-c t d= | Describe table columns                       |
+| =C-c t x= | Check if table exists                        |
 
 ** Session Info (=C-c s=)
 

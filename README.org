@@ -351,10 +351,19 @@ All keybindings are active in =sql-mode= buffers.
 
 *** Table operations (=C-c t=)
 
-| Key       | Command              | Description                              |
-|-----------+----------------------+------------------------------------------|
-| =C-c t e= | =sql-datum-export=   | Set =:out= target (=C-u= for =:force=)  |
-| =C-c t i= | =sql-datum-import=   | Import a file into a table               |
+| Key       | Command                  | Description                                  |
+|-----------+--------------------------+----------------------------------------------|
+| =C-c t e= | =sql-datum-export=       | Set =:out= target (=C-u= for =:force=)      |
+| =C-c t i= | =sql-datum-import=       | Import a file into a table                   |
+| =C-c t t= | =sql-datum-top=          | Select top N rows (default 10, =C-u N=)      |
+| =C-c t c= | =sql-datum-count=        | Count rows in table                          |
+| =C-c t s= | =sql-datum-sample=       | Random sample of N rows (default 10, =C-u N=) |
+| =C-c t d= | =sql-datum-describe=     | Describe table columns (alias for =columns=) |
+| =C-c t x= | =sql-datum-table-exists= | Check if table exists                        |
+
+The quick-query commands (=top=, =sample=, =count=, =table-exists=) are
+dialect-aware: they use =TOP= / =NEWID()= / =OBJECT_ID()= on MSSQL and
+=LIMIT= / =RANDOM()= / =to_regclass()= on PostgreSQL and other dialects.
 
 *** Session info (=C-c s=)
 
