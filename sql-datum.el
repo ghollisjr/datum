@@ -705,10 +705,14 @@ then asks for explicit confirmation before sending DROP TABLE."
   (interactive)
   (sql-datum--send-command ":pwd"))
 
-(defun sql-datum-tables ()
-  "List all tables and views via :tables."
-  (interactive)
-  (sql-datum--send-command ":tables"))
+(defun sql-datum-tables (filter)
+  "List all tables and views via :tables.
+With a prefix argument, prompt for a filter pattern."
+  (interactive (list (when current-prefix-arg
+                       (read-string "Filter tables: "))))
+  (sql-datum--send-command (if filter
+                               (format ":tables %s" filter)
+                             ":tables")))
 
 (defun sql-datum-columns (table)
   "List columns for TABLE via :columns."
@@ -724,15 +728,23 @@ then asks for explicit confirmation before sending DROP TABLE."
              (if (string-empty-p database) ""
                (format " (database: %s)" database)))))
 
-(defun sql-datum-databases ()
-  "List all databases via :databases."
-  (interactive)
-  (sql-datum--send-command ":databases"))
+(defun sql-datum-databases (filter)
+  "List all databases via :databases.
+With a prefix argument, prompt for a filter pattern."
+  (interactive (list (when current-prefix-arg
+                       (read-string "Filter databases: "))))
+  (sql-datum--send-command (if filter
+                               (format ":databases %s" filter)
+                             ":databases")))
 
-(defun sql-datum-schemas ()
-  "List all schemas via :schemas."
-  (interactive)
-  (sql-datum--send-command ":schemas"))
+(defun sql-datum-schemas (filter)
+  "List all schemas via :schemas.
+With a prefix argument, prompt for a filter pattern."
+  (interactive (list (when current-prefix-arg
+                       (read-string "Filter schemas: "))))
+  (sql-datum--send-command (if filter
+                               (format ":schemas %s" filter)
+                             ":schemas")))
 
 (defun sql-datum-running ()
   "List currently running queries via :running."

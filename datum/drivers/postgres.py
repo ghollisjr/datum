@@ -63,6 +63,33 @@ class PostgreSQLDriver(BaseDriver):
             ORDER BY query_start
         """
 
+    def sql_list_databases_like(self, pattern):
+        return ("SELECT datname FROM pg_database "
+                "WHERE datistemplate = false AND datname ILIKE ? "
+                "ORDER BY datname", [pattern])
+
+    def sql_list_schemas_like(self, pattern):
+        return ("""
+            SELECT schema_name
+            FROM information_schema.schemata
+            WHERE schema_name NOT IN ('pg_catalog', 'information_schema')
+              AND schema_name NOT LIKE 'pg_toast%%'
+              AND schema_name NOT LIKE 'pg_temp%%'
+              AND schema_name ILIKE ?
+            ORDER BY schema_name
+        """, [pattern])
+
+    def sql_list_tables_like(self, pattern):
+        return ("""
+            SELECT table_schema,
+                   table_name,
+                   table_type
+            FROM information_schema.tables
+            WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
+              AND table_name ILIKE ?
+            ORDER BY table_schema, table_name
+        """, [pattern])
+
     def python_type_to_sql(self, python_type):
         return _POSTGRES_TYPE_MAP.get(python_type, "TEXT")
 

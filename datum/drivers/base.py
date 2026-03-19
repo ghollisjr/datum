@@ -69,6 +69,18 @@ class BaseDriver(ABC):
         Returns: [(session_id, user, status, duration, sql_text)]
         """
 
+    def sql_list_databases_like(self, pattern):
+        """Return (sql, params) for a filtered database list using LIKE."""
+        raise NotImplementedError
+
+    def sql_list_schemas_like(self, pattern):
+        """Return (sql, params) for a filtered schema list using LIKE."""
+        raise NotImplementedError
+
+    def sql_list_tables_like(self, pattern):
+        """Return (sql, params) for a filtered table list using LIKE."""
+        raise NotImplementedError
+
     def sql_list_columns(self, schema, table):
         """SQL to list columns for a given table.
         Returns: [(column_name, data_type, is_nullable, column_default)]
@@ -178,3 +190,19 @@ class AnsiDriver(BaseDriver):
     def sql_running_queries(self):
         # No ANSI standard for this — subclasses override.
         return "SELECT 'not supported' AS note"
+
+    def sql_list_databases_like(self, pattern):
+        return ("SELECT CATALOG_NAME FROM INFORMATION_SCHEMA.SCHEMATA "
+                "WHERE CATALOG_NAME LIKE ? "
+                "ORDER BY CATALOG_NAME", [pattern])
+
+    def sql_list_schemas_like(self, pattern):
+        return ("SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA "
+                "WHERE SCHEMA_NAME LIKE ? "
+                "ORDER BY SCHEMA_NAME", [pattern])
+
+    def sql_list_tables_like(self, pattern):
+        return ("SELECT TABLE_SCHEMA, TABLE_NAME, TABLE_TYPE "
+                "FROM INFORMATION_SCHEMA.TABLES "
+                "WHERE TABLE_NAME LIKE ? "
+                "ORDER BY TABLE_SCHEMA, TABLE_NAME", [pattern])

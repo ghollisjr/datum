@@ -62,6 +62,30 @@ class MSSQLDriver(BaseDriver):
             ORDER BY r.start_time
         """
 
+    def sql_list_databases_like(self, pattern):
+        return ("SELECT name FROM sys.databases WHERE name LIKE ? ORDER BY name",
+                [pattern])
+
+    def sql_list_schemas_like(self, pattern):
+        return ("SELECT name FROM sys.schemas WHERE name LIKE ? ORDER BY name",
+                [pattern])
+
+    def sql_list_tables_like(self, pattern):
+        return ("""
+            SELECT s.name AS table_schema,
+                   t.name AS table_name,
+                   CASE t.type
+                       WHEN 'U' THEN 'TABLE'
+                       WHEN 'V' THEN 'VIEW'
+                       ELSE t.type
+                   END AS table_type
+            FROM sys.objects t
+            JOIN sys.schemas s ON t.schema_id = s.schema_id
+            WHERE t.type IN ('U', 'V')
+              AND t.name LIKE ?
+            ORDER BY s.name, t.name
+        """, [pattern])
+
     def python_type_to_sql(self, python_type):
         return _MSSQL_TYPE_MAP.get(python_type, "NVARCHAR(MAX)")
 

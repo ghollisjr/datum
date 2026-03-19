@@ -319,11 +319,18 @@ def sql_type(args):
 
 # --- Introspection commands ---
 
-def _run_introspect(sql, kind, label):
-    """Run an introspection query, print results, and send an envelope."""
+def _run_introspect(sql, kind, label, params=None):
+    """Run an introspection query, print results, and send an envelope.
+
+    sql can be a plain SQL string, or when params is given, a parameterized
+    query string with ? placeholders (executed with params via ODBC).
+    """
     try:
         cursor = connect.get_connection().cursor()
-        cursor.execute(sql)
+        if params:
+            cursor.execute(sql, params)
+        else:
+            cursor.execute(sql)
         rows = cursor.fetchall()
         if not rows:
             print(f"(no {label} found)")
@@ -344,13 +351,21 @@ def _run_introspect(sql, kind, label):
 def databases(args):
     """Built-in :databases command."""
     global _driver
-    _run_introspect(_driver.sql_list_databases, "databases", "databases")
+    if args:
+        sql, params = _driver.sql_list_databases_like(args[0])
+        _run_introspect(sql, "databases", "databases", params)
+    else:
+        _run_introspect(_driver.sql_list_databases, "databases", "databases")
 
 
 def schemas(args):
     """Built-in :schemas command."""
     global _driver
-    _run_introspect(_driver.sql_list_schemas, "schemas", "schemas")
+    if args:
+        sql, params = _driver.sql_list_schemas_like(args[0])
+        _run_introspect(sql, "schemas", "schemas", params)
+    else:
+        _run_introspect(_driver.sql_list_schemas, "schemas", "schemas")
 
 
 def tables(args):
@@ -362,7 +377,11 @@ def tables(args):
     global _driver
     try:
         cursor = connect.get_connection().cursor()
-        cursor.execute(_driver.sql_list_tables)
+        if args:
+            sql, params = _driver.sql_list_tables_like(args[0])
+            cursor.execute(sql, params)
+        else:
+            cursor.execute(_driver.sql_list_tables)
         rows = cursor.fetchall()
         if not rows:
             print("(no tables found)")
