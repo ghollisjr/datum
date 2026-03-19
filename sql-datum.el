@@ -176,7 +176,15 @@ Handles partial envelope lines split across multiple filter calls."
      (when (string-match "\\(.*\\):\\(\\[.*\\)" payload)
        (let ((kind (match-string 1 payload))
              (json (match-string 2 payload)))
-         (sql-datum--handle-introspect-append kind json))))))
+         (sql-datum--handle-introspect-append kind json))))
+    ("running-text"
+     (let ((text (replace-regexp-in-string "\\\\n" "\n" payload)))
+       ;; Remember which SQLi buffer sent this, for refresh later
+       (setq sql-datum--running-sqli-buf (current-buffer))
+       (sql-datum--show-running-queries text)
+       (unless sql-datum--running-timer
+         (sql-datum--running-start-timer))))
+))
 
 (defun sql-datum--set-dialect (name)
   "Set the buffer-local dialect to NAME and refresh the mode line."
@@ -216,12 +224,7 @@ When `sql-datum-open-result-file' is non-nil, also offer to open the file."
            (setq sql-datum--tables items))
           ((pred (string-prefix-p "columns:"))
            (let ((table (substring kind (length "columns:"))))
-             (puthash table items sql-datum--columns)))
-          ("running"
-           ;; Running queries: open a dedicated buffer and start auto-refresh.
-           (sql-datum--show-running-queries items)
-           (unless sql-datum--running-timer
-             (sql-datum--running-start-timer)))))
+             (puthash table items sql-datum--columns)))))
     (error (message "datum: failed to parse introspect payload: %s" err))))
 
 (defun sql-datum--handle-introspect-append (kind json-str)
@@ -253,23 +256,24 @@ Set to nil to disable auto-refresh."
   :type '(choice (const :tag "Disabled" nil) integer)
   :group 'SQL)
 
-(defun sql-datum--show-running-queries (items)
-  "Display ITEMS (list of strings) in a dedicated running-queries buffer."
+(defun sql-datum--show-running-queries (text)
+  "Display TEXT in a dedicated running-queries buffer.
+TEXT is pre-formatted tabular output from the Python printer."
   (let ((buf (get-buffer-create "*datum-running-queries*")))
     (with-current-buffer buf
       (let ((inhibit-read-only t))
         (erase-buffer)
-        (insert "datum: Running Queries")
-        (when sql-datum--running-timer
-          (insert (format "  [auto-refresh %ds]"
-                          sql-datum-running-refresh-interval)))
-        (insert "\n")
-        (insert (make-string 40 ?-) "\n")
-        (if items
-            (dolist (item items) (insert item "\n"))
-          (insert "(none)\n"))
-        (insert "\n")
+        (insert (format "datum: Running Queries  (last refresh: %s)"
+                        (format-time-string "%H:%M:%S")))
+        (if sql-datum-running-refresh-interval
+            (insert (format "  [auto-refresh %ds]"
+                            sql-datum-running-refresh-interval))
+          (insert "  [auto-refresh off]"))
+        (insert "\n\n")
+        (insert text)
+        (insert "\n\n")
         (insert "Press 'g' to refresh, 'a' to toggle auto-refresh, 'q' to quit.\n"))
+      (setq truncate-lines t)
       (sql-datum--running-mode))
     (display-buffer buf)))
 
@@ -309,10 +313,14 @@ Set to nil to disable auto-refresh."
 
 (defun sql-datum--send-running ()
   "Send :running to the datum process to trigger a refresh."
-  (let ((buf (or sql-datum--running-sqli-buf
-                 (sql-find-sqli-buffer 'datum))))
-    (when (and buf (buffer-live-p buf))
-      (comint-send-string buf ":running\n"))))
+  (let ((buf (or (and sql-datum--running-sqli-buf
+                      (buffer-live-p sql-datum--running-sqli-buf)
+                      sql-datum--running-sqli-buf)
+                 (let ((b (sql-find-sqli-buffer 'datum)))
+                   (and b (get-buffer b))))))
+    (if (and buf (get-buffer-process buf))
+        (comint-send-string (get-buffer-process buf) ":running\n")
+      (message "datum: no active connection for refresh"))))
 
 (defun sql-datum--running-start-timer ()
   "Start the auto-refresh timer for running queries."

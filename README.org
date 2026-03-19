@@ -422,8 +422,9 @@ Format: =[datum:dialect:database:server:user]=
 ** Running queries auto-refresh
 
 When you run =:running= (or =C-c s r=), the results open in a dedicated
-buffer that auto-refreshes every 5 seconds (customizable via
-=sql-datum-running-refresh-interval=).
+buffer showing session ID, user, status, duration, and SQL text for each
+running query. The output uses the same tabular format as regular query
+results and respects =:chars= for column width.
 
 | Key | Action               |
 |-----+----------------------|
@@ -431,7 +432,9 @@ buffer that auto-refreshes every 5 seconds (customizable via
 | =a= | Toggle auto-refresh  |
 | =q= | Quit and stop timer  |
 
-The timer stops automatically when the buffer is no longer visible.
+The buffer auto-refreshes every 5 seconds by default (customizable via
+=sql-datum-running-refresh-interval=). A timestamp shows the last refresh
+time. The timer stops automatically when the buffer is no longer visible.
 
 ** Customization
 
@@ -463,8 +466,9 @@ acted on silently.
 | =error=       | message              | Error in minibuffer               |
 | =dialect=     | mssql/postgres/ansi  | Set SQL dialect                   |
 | =meta=        | key:value            | Metadata (server, database, etc.) |
-| =result-file= | path:format          | Exported file notification        |
-| =introspect=  | kind:json-array      | Introspection data for completion |
+| =result-file=  | path:format          | Exported file notification        |
+| =introspect=   | kind:json-array      | Introspection data for completion |
+| =running-text= | formatted-text       | Running queries display           |
 
 * License
 

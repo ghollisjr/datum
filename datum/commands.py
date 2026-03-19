@@ -406,7 +406,34 @@ def columns(args):
 def running(args):
     """Built-in :running command."""
     global _driver
-    _run_introspect(_driver.sql_running_queries, "running", "running queries")
+    try:
+        cursor = connect.get_connection().cursor()
+        cursor.execute(_driver.sql_running_queries)
+        rows = cursor.fetchall()
+        if not rows:
+            print("(no running queries found)")
+            envelope.running_text("(none)")
+            return
+        # Collapse whitespace in sql_text (last column) so newlines
+        # don't break tabular output in either terminal or Emacs buffer.
+        import re
+        clean_rows = []
+        for row in rows:
+            row = list(row)
+            if row[-1] and isinstance(row[-1], str):
+                row[-1] = re.sub(r'\s+', ' ', row[-1]).strip()
+            clean_rows.append(tuple(row))
+        column_names = [printer.text_formatter(col[0]) for col in cursor.description]
+        format_str, print_ready = printer.format_rows(column_names, clean_rows)
+        # Build the formatted text (includes header + separator + data rows)
+        lines = [format_str.format(*row) for row in print_ready]
+        text = "\n".join(lines)
+        print()
+        print(text)
+        # Send the same formatted text to Emacs
+        envelope.running_text(text)
+    except Exception as err:
+        print(f"Error running running queries query: {err}")
 
 
 def current_user(args):

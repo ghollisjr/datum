@@ -100,6 +100,16 @@ def introspect(kind, items):
         _send(msg_type, f"{kind}:{json.dumps(batch)}")
 
 
+def running_text(text):
+    """Send pre-formatted running-queries output to Emacs.
+
+    The text is the same tabular output printed to the terminal, so it
+    respects :chars and :rows settings.  Newlines are escaped as \\n
+    so the envelope fits on a single line.
+    """
+    _send("running-text", text.replace("\n", "\\n"))
+
+
 def dialect(name):
     """Notify Emacs of the detected or declared SQL dialect."""
     _send("dialect", name)

@@ -59,6 +59,9 @@ From the scratch buffer you have full completion (=TAB=), all the =C-c s= /
 
 * Running Queries Buffer
 
+Shows session ID, user, status, duration, and SQL text.
+Respects =:chars= for column width. Timestamp shows last refresh.
+
 | Key | Action               |
 |-----+----------------------|
 | =g= | Refresh              |

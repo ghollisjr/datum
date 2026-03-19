@@ -142,10 +142,11 @@ wide tables with many columns don't blow the ODBC parameter limit.
 
 ** Running queries with auto-refresh
 
-=C-c s r= opens a dedicated buffer showing what's currently executing on the
-server. It auto-refreshes every 5 seconds and stops the timer automatically
-when you close the buffer. No polling loop left running in the background, no
-resource leak.
+=C-c s r= opens a dedicated buffer showing who's running what, for how long,
+and the actual SQL text -- same tabular format as regular query output,
+respecting your =:chars= display settings. It auto-refreshes every 5 seconds
+with a visible timestamp, and stops the timer automatically when you close the
+buffer. No polling loop left running in the background, no resource leak.
 
 ** Multiple scratch buffers
 
