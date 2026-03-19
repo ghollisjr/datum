@@ -646,12 +646,23 @@ Prompts with completion from the cached database list."
   (sql-datum--send-command (format ":use %s" db)))
 
 ;;;###autoload
-(defun sql-datum-scratch ()
+(defun sql-datum-scratch (&optional new)
   "Open a scratch SQL buffer associated with the active datum connection.
-If a *datum-scratch* buffer already exists, just switch to it."
-  (interactive)
-  (let ((buf (get-buffer-create "*datum-scratch*"))
-        (sqli (sql-find-sqli-buffer 'datum)))
+If a *datum-scratch* buffer already exists, just switch to it.
+With prefix argument NEW, create an additional scratch buffer with
+a numeric suffix, prompting to confirm the name."
+  (interactive "P")
+  (let* ((base "*datum-scratch*")
+         (name (if new
+                   (let* ((n 2)
+                          (candidate (format "*datum-scratch-%d*" n)))
+                     (while (get-buffer candidate)
+                       (setq n (1+ n))
+                       (setq candidate (format "*datum-scratch-%d*" n)))
+                     (read-string "Buffer name: " candidate))
+                 base))
+         (buf (get-buffer-create name))
+         (sqli (sql-find-sqli-buffer 'datum)))
     (switch-to-buffer buf)
     (unless (derived-mode-p 'sql-mode)
       (sql-mode))
