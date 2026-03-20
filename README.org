@@ -377,18 +377,18 @@ dialect-aware: they use =TOP= / =NEWID()= / =OBJECT_ID()= on MSSQL and
 
 *** Session info (=C-c s=)
 
-| Key       | Command              | Description                              |
-|-----------+----------------------+------------------------------------------|
-| =C-c s p= | =sql-datum-pwd=      | Show user, server, database, version       |
-| =C-c s t= | =sql-datum-tables=   | List tables (=C-u= to filter with LIKE)    |
-| =C-c s c= | =sql-datum-columns=  | List columns (prompts for table)           |
-| =C-c s d= | =sql-datum-databases= | List databases (=C-u= to filter with LIKE) |
-| =C-c s s= | =sql-datum-schemas=  | List schemas (=C-u= to filter with LIKE)   |
-| =C-c s r= | =sql-datum-running=  | Show running queries                     |
-| =C-c s R= | =sql-datum-routines= | List routines (=C-u= to filter with LIKE)  |
-| =C-c s v= | =sql-datum-version=  | Show server version                      |
-| =C-c s u= | =sql-datum-user=     | Show current user                        |
-| =C-c u=   | =sql-datum-use-database= | Switch to a different database         |
+| Key       | Command                  | Description                                                |
+|-----------+--------------------------+------------------------------------------------------------|
+| =C-c s p= | =sql-datum-pwd=          | Show user, server, database, version                       |
+| =C-c s t= | =sql-datum-tables=       | List tables (=C-u= to filter with LIKE)                    |
+| =C-c s c= | =sql-datum-columns=      | List columns (prompts for table)                           |
+| =C-c s d= | =sql-datum-databases=    | List databases (=C-u= to filter with LIKE)                 |
+| =C-c s s= | =sql-datum-schemas=      | List schemas (=C-u= to filter with LIKE)                   |
+| =C-c s r= | =sql-datum-running=      | Show running queries                                       |
+| =C-c s R= | =sql-datum-routines=     | List routines (=C-u= to filter with LIKE)                  |
+| =C-c s v= | =sql-datum-version=      | Show server version                                        |
+| =C-c s u= | =sql-datum-user=         | Show current user                                          |
+| =C-c u=   | =sql-datum-use-database= | Switch to a different database (reconnects for PostgreSQL) |
 
 ** Scratch buffer
 
