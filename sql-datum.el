@@ -383,18 +383,19 @@ Strips bracket quoting from each part."
 
 (defvar sql-datum--definition-mode-map
   (let ((map (make-sparse-keymap)))
-    (define-key map "q" #'quit-window)
+    (define-key map "q" #'xref-go-back)
     map)
   "Keymap active in datum definition buffers.")
 
 (define-minor-mode sql-datum--definition-mode
   "Minor mode for datum definition buffers.
-Provides `q' to quit the window."
+Provides `q' to go back and `M-.' to dig deeper into definitions."
   :lighter " def"
   :keymap sql-datum--definition-mode-map)
 
 (defun sql-datum--show-definition (object-name text &optional sqli-buf)
-  "Display TEXT (DDL/source) for OBJECT-NAME in a dedicated buffer.
+  "Display TEXT (DDL/source) for OBJECT-NAME in the current window.
+Uses the xref marker stack so M-, navigates back.
 SQLI-BUF, if given, is wired as the sql-buffer for send-region etc."
   (let* ((buf-name (format "*datum-def: %s*" object-name))
          (buf (get-buffer-create buf-name))
@@ -411,10 +412,11 @@ SQLI-BUF, if given, is wired as the sql-buffer for send-region etc."
         (setq-local sql-buffer sqli))
       (setq buffer-read-only t)
       (goto-char (point-min)))
-    (pop-to-buffer buf)))
+    (switch-to-buffer buf)))
 
 (defun sql-datum-goto-definition (name)
   "Look up the DDL/source of the SQL object NAME.
+Pushes to the xref marker stack so M-, returns to the previous location.
 With no identifier at point, prompts for a name."
   (interactive
    (let ((ident (sql-datum--identifier-at-point)))
@@ -423,11 +425,51 @@ With no identifier at point, prompts for a name."
              (read-string "Definition of: ")))))
   (when (or (null name) (string-empty-p name))
     (user-error "No identifier provided"))
+  (xref-push-marker-stack)
   (sql-datum--send-command (format ":definition %s" name)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Completion at point
 ;;; ---------------------------------------------------------------------------
+
+(defun sql-datum--completion-match-p (prefix candidate)
+  "Return non-nil if PREFIX matches CANDIDATE.
+Matches against the full name, or if PREFIX has no dot, also against
+the portion after the last dot (so \"Pat\" matches \"dbo.PatientDim\")."
+  (or (string-prefix-p prefix candidate t)
+      (and (not (string-match-p "\\." prefix))
+           (string-match-p "\\." candidate)
+           (string-prefix-p
+            prefix
+            (car (last (split-string candidate "\\.")))
+            t))))
+
+(defun sql-datum--make-completion-table (candidates _tables)
+  "Build a completion table that also matches bare table name portions.
+For a prefix without a dot, a candidate like \"rempat.fmreport\" matches
+if the prefix matches either \"rempat.fmreport\" or \"fmreport\".
+CANDIDATES is the full list."
+  (lambda (string pred action)
+    (pcase action
+      ('metadata nil)
+      ('t  ;; all-completions
+       (let (result)
+         (dolist (c candidates)
+           (when (and (sql-datum--completion-match-p string c)
+                      (or (null pred) (funcall pred c)))
+             (push c result)))
+         (nreverse result)))
+      ('nil  ;; try-completion
+       (let ((matches (funcall (sql-datum--make-completion-table
+                                candidates nil)
+                               string pred 't)))
+         (cond ((null matches) nil)
+               ((= (length matches) 1)
+                (if (string= string (car matches)) t (car matches)))
+               (t (try-completion "" matches)))))
+      ('lambda  ;; test-completion
+       (member string candidates))
+      (_ nil))))
 
 (defun sql-datum-completion-at-point ()
   "Provide SQL identifier completion using datum introspection data.
@@ -452,7 +494,8 @@ and sql-interactive-mode buffers that use datum."
                       (point)))
            (candidates (append tables schemas columns)))
       (when candidates
-        (list start end candidates
+        (list start end
+              (sql-datum--make-completion-table candidates tables)
               :exclusive 'no
               :annotation-function
               (lambda (cand)

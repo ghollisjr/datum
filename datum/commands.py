@@ -395,14 +395,17 @@ def tables(args):
         print()
         for row in print_ready:
             print(format_str.format(*row))
-        # Send both bare and qualified names for completion
+        # Send bare names for tables in the default schema,
+        # schema-qualified names for all others.
+        default_schema = "dbo" if _driver.dialect_name == "mssql" else "public"
         items = []
         for row in rows:
             schema = str(row[0]) if len(row) > 2 else None
             table_name = str(row[1]) if len(row) > 2 else str(row[0])
-            items.append(table_name)
-            if schema:
+            if schema and schema != default_schema:
                 items.append(f"{schema}.{table_name}")
+            else:
+                items.append(table_name)
         envelope.introspect("tables", sorted(set(items)))
     except Exception as err:
         print(f"Error running tables query: {err}")
@@ -693,7 +696,7 @@ def definition(args):
             if not row or not row[0]:
                 print(f":definition — no source found for {display_name}")
                 return
-            text = str(row[0])
+            text = str(row[0]).rstrip().rstrip(";\r\n \t").rstrip() + ";"
 
         envelope.definition(display_name, text)
 
