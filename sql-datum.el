@@ -1450,10 +1450,33 @@ Automatically ensures a live database connection first."
 
 (defun sql-datum-refresh ()
   "Refresh all introspection data (autocomplete candidates).
-Sends :refresh to the active datum process."
+Sends :refresh to the active datum process.  Also re-fetches any
+cross-database caches built during this session."
   (interactive)
   (sql-datum--send-command ":refresh")
-  (message "datum: refreshing introspection..."))
+  ;; Re-fetch any previously introspected cross-databases
+  (let* ((buf (or (and (derived-mode-p 'sql-interactive-mode)
+                       (current-buffer))
+                  (let ((b (sql-find-sqli-buffer 'datum)))
+                    (and b (get-buffer b)))))
+         (xdb-cache (and buf (buffer-local-value
+                              'sql-datum--xdb-cache buf)))
+         (dialect (and buf (buffer-local-value
+                            'sql-datum--dialect buf))))
+    (when (and xdb-cache (equal dialect "mssql"))
+      (let ((dbs-to-refresh nil))
+        (maphash (lambda (db _entry) (push db dbs-to-refresh))
+                 xdb-cache)
+        (when dbs-to-refresh
+          ;; Clear old entries so fetch-sync re-populates them
+          (with-current-buffer buf
+            (clrhash sql-datum--xdb-cache))
+          (dolist (db dbs-to-refresh)
+            (sql-datum--send-command (format ":refresh-db %s" db)))
+          (message "datum: refreshing introspection + %d cross-db cache(s)..."
+                   (length dbs-to-refresh))))))
+  (unless (derived-mode-p 'sql-interactive-mode)
+    (message "datum: refreshing introspection...")))
 
 (defun sql-datum-toggle-auto-refresh (interval)
   "Toggle periodic introspection refresh.
