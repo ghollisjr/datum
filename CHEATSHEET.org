@@ -28,7 +28,7 @@ From the scratch buffer you have full completion (=TAB=), all the =C-c s= /
 
 | Key       | Action                                       |
 |-----------+----------------------------------------------|
-| =C-c t e= | Export table to file (=C-u= to force overwrite) |
+| =C-c t e= | Export table to file (=C-u= for custom query)   |
 | =C-c t i= | Import file into table (=C-u= for batch size)   |
 | =C-c t t= | Select top N rows (=C-u N= for count)        |
 | =C-c t c= | Count rows (=COUNT_BIG= on MSSQL)            |

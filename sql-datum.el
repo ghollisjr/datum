@@ -552,34 +552,42 @@ The buffer with name BUFFER will be used or created."
         (insert (completing-read "Table: " tables nil t))
       (user-error "datum: no tables cached — run :tables first"))))
 
-(defun sql-datum-export (table path)
-  "Export TABLE to PATH via :out followed by SELECT *.
-Prompts for a table name (with completion) and a file path.
-Format is inferred from extension (.csv, .parquet, .json).
-If PATH already exists, asks for confirmation unless a prefix
-argument is given, in which case it force-overwrites."
-  (interactive
-   (let* ((tbl (sql-datum--read-table "Export table: "))
-          (file (read-file-name "Export to: " nil nil nil nil
-                                (lambda (f)
-                                  (or (file-directory-p f)
-                                      (string-match-p "\\.\\(csv\\|parquet\\|json\\)\\'" f))))))
-     (list tbl file)))
-  (let* ((abs-path (expand-file-name path))
-         (force (or current-prefix-arg
-                    (and (file-exists-p abs-path)
-                         (y-or-n-p (format "%s exists. Overwrite? " abs-path)))))
+(defun sql-datum-export ()
+  "Export query results to a file via :out.
+
+Without a prefix argument, prompts for a table name and exports
+the entire table (SELECT * FROM table).
+
+With a prefix argument (\\[universal-argument]), prompts for a SQL query
+instead, allowing arbitrary queries to be exported.
+
+In both cases, prompts for a file path (format inferred from
+extension: .csv, .parquet, .json).  If the file exists, asks for
+confirmation before overwriting."
+  (interactive)
+  (let* ((use-query current-prefix-arg)
+         (query (if use-query
+                    (read-string "SQL query: " "SELECT * FROM ")
+                  (let ((tbl (sql-datum--read-table "Export table: ")))
+                    (format "SELECT * FROM %s" tbl))))
+         (file (read-file-name "Export to: " nil nil nil nil
+                               (lambda (f)
+                                 (or (file-directory-p f)
+                                     (string-match-p "\\.\\(csv\\|parquet\\|json\\)\\'" f)))))
+         (abs-path (expand-file-name file))
+         (force (when (file-exists-p abs-path)
+                  (y-or-n-p (format "%s exists. Overwrite? " abs-path))))
          (force-flag (if force " :force" ""))
          (buf (sql-find-sqli-buffer 'datum)))
-    (unless buf
-      (user-error "No active datum buffer found"))
     (when (and (file-exists-p abs-path) (not force))
       (user-error "Export cancelled"))
+    (unless buf
+      (user-error "No active datum buffer found"))
     (let ((proc (get-buffer buf)))
       (comint-send-string proc (format ":out %s%s\n" abs-path force-flag))
-      (comint-send-string proc (format "SELECT * FROM %s;;\n" table)))
-    (message "datum: exporting %s to %s%s"
-             table abs-path (if force " (overwrite)" ""))))
+      (comint-send-string proc (format "%s;;\n" query)))
+    (message "datum: exporting to %s%s"
+             abs-path (if force " (overwrite)" ""))))
 
 (defun sql-datum-import (path table-name mode batch-size)
   "Import file at PATH into TABLE-NAME via :in.

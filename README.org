@@ -358,7 +358,7 @@ All keybindings are active in =sql-mode= buffers.
 
 | Key       | Command                  | Description                                  |
 |-----------+--------------------------+----------------------------------------------|
-| =C-c t e= | =sql-datum-export=       | Export table to file (=C-u= to force overwrite) |
+| =C-c t e= | =sql-datum-export=       | Export table to file (=C-u= for custom query)   |
 | =C-c t i= | =sql-datum-import=       | Import file into table (=C-u= for batch size)   |
 | =C-c t t= | =sql-datum-top=          | Select top N rows (default 10, =C-u N=)      |
 | =C-c t c= | =sql-datum-count=        | Count rows (=COUNT_BIG= on MSSQL)            |
