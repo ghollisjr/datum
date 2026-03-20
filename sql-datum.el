@@ -76,6 +76,13 @@ Override per-call with a prefix argument to `sql-datum-import'."
   :type 'boolean
   :group 'SQL)
 
+(defcustom sql-datum-auto-introspect t
+  "When non-nil, automatically run :refresh after connecting.
+This populates autocomplete for tables, schemas, databases, and
+routines without needing to manually run introspection commands."
+  :type 'boolean
+  :group 'SQL)
+
 
 ;;; ---------------------------------------------------------------------------
 ;;; Buffer-local state
@@ -105,6 +112,10 @@ Override per-call with a prefix argument to `sql-datum-import'."
 (defvar-local sql-datum--routine-signatures (make-hash-table :test #'equal)
   "Hash table mapping routine name to parameter signature string.
 Populated by the routine-sigs introspect envelope.")
+
+(defvar-local sql-datum--routine-types (make-hash-table :test #'equal)
+  "Hash table mapping routine name to type string (\"FUNCTION\" or \"PROCEDURE\").
+Populated by the routine-types introspect envelope.")
 
 ;;; ---------------------------------------------------------------------------
 ;;; Envelope protocol
@@ -243,9 +254,15 @@ When `sql-datum-open-result-file' is non-nil, also offer to open the file."
           ("routine-sigs"
            (clrhash sql-datum--routine-signatures)
            (dolist (pair items)
-             (when (and (vectorp pair) (>= (length pair) 2))
-               (puthash (aref pair 0) (aref pair 1)
+             (when (and (consp pair) (>= (length pair) 2))
+               (puthash (nth 0 pair) (nth 1 pair)
                         sql-datum--routine-signatures))))
+          ("routine-types"
+           (clrhash sql-datum--routine-types)
+           (dolist (pair items)
+             (when (and (consp pair) (>= (length pair) 2))
+               (puthash (nth 0 pair) (nth 1 pair)
+                        sql-datum--routine-types))))
           ((pred (string-prefix-p "columns:"))
            (let ((table (substring kind (length "columns:"))))
              (puthash table items sql-datum--columns)))))
@@ -266,9 +283,14 @@ When `sql-datum-open-result-file' is non-nil, also offer to open the file."
            (setq sql-datum--routines (append sql-datum--routines items)))
           ("routine-sigs"
            (dolist (pair items)
-             (when (and (vectorp pair) (>= (length pair) 2))
-               (puthash (aref pair 0) (aref pair 1)
+             (when (and (consp pair) (>= (length pair) 2))
+               (puthash (nth 0 pair) (nth 1 pair)
                         sql-datum--routine-signatures))))
+          ("routine-types"
+           (dolist (pair items)
+             (when (and (consp pair) (>= (length pair) 2))
+               (puthash (nth 0 pair) (nth 1 pair)
+                        sql-datum--routine-types))))
           ((pred (string-prefix-p "columns:"))
            (let* ((table (substring kind (length "columns:")))
                   (existing (gethash table sql-datum--columns)))
@@ -494,10 +516,121 @@ CANDIDATES is the full list."
        (member string candidates))
       (_ nil))))
 
+(defun sql-datum--parse-param-names (sig)
+  "Extract parameter names from a signature string.
+E.g. \"@Table_name varchar(128), @Other int\" → (\"@Table_name\" \"@Other\")."
+  (when (and sig (not (string-empty-p sig)))
+    (let (names (parts (split-string sig ",")))
+      (dolist (part parts)
+        (let* ((trimmed (string-trim part))
+               (name (car (split-string trimmed "[ \t]+"))))
+          (when (and name (not (string-empty-p name)))
+            (push name names))))
+      (nreverse names))))
+
+(defun sql-datum--sigs-canonical-key (name sigs)
+  "Return the canonical key in SIGS that matches NAME, or nil.
+Tries exact match first, then bare name against qualified keys,
+then strips the schema prefix from a qualified NAME to match a bare key."
+  (cond
+   ((gethash name sigs) name)
+   ;; Bare name → check if any schema.name key matches
+   ((not (string-match-p "\\." name))
+    (let (found)
+      (maphash (lambda (k _v)
+                 (when (and (not found)
+                            (string-match-p "\\." k)
+                            (string= name
+                                     (car (last (split-string k "\\.")))))
+                   (setq found k)))
+               sigs)
+      found))
+   ;; Qualified name → try just the bare part
+   (t
+    (let ((bare (car (last (split-string name "\\.")))))
+      (when (gethash bare sigs) bare)))))
+
+(defun sql-datum--at-new-param-p (routine-name sigs)
+  "Return non-nil if point is where a new @parameter name is expected.
+ROUTINE-NAME is the canonical sigs key.  SIGS is the signatures hash.
+Checks that we are not inside a string literal, not in a value position
+\(after =), and are either right after the routine name, after a comma,
+or typing an @-prefixed word."
+  (and
+   ;; Not inside a string literal
+   (not (nth 3 (syntax-ppss)))
+   (let* ((prefix-start (save-excursion
+                           (skip-chars-backward "a-zA-Z0-9_.@#")
+                           (point)))
+          (prefix (buffer-substring-no-properties prefix-start (point))))
+     (or
+      ;; Already typing an @param
+      (string-prefix-p "@" prefix)
+      ;; Empty prefix — check what's before us
+      (and (string-empty-p prefix)
+           (save-excursion
+             (skip-chars-backward " \t")
+             (let ((ch (char-before)))
+               (or
+                ;; After a comma → next param position
+                (eq ch ?,)
+                ;; Right after the routine name itself (flexible match)
+                (let ((ident (sql-datum--identifier-at-point)))
+                  (and ident
+                       (string= (or (sql-datum--sigs-canonical-key ident sigs) "")
+                                routine-name)))))))))))
+
+(defun sql-datum--find-param-routine (sigs)
+  "Find the enclosing routine for parameter completion context.
+Returns the routine name string if point is in a parameter position,
+or nil otherwise.  Checks three cases:
+  1. Inside parentheses of a function call.
+  2. Right after a routine name with only whitespace between.
+  3. On the same statement line as a procedure call (routine at start)."
+  (when (and sigs (> (hash-table-count sigs) 0))
+    (or
+     ;; Case 1: inside parentheses — look before the open paren
+     (save-excursion
+       (let ((paren-pos (nth 1 (syntax-ppss))))
+         (when paren-pos
+           (goto-char paren-pos)
+           (skip-chars-backward " \t")
+           (let ((name (sql-datum--identifier-at-point)))
+             (sql-datum--sigs-canonical-key name sigs)))))
+     ;; Case 2: right after routine name + whitespace
+     (save-excursion
+       (skip-chars-backward " \t")
+       (let ((name (sql-datum--identifier-at-point)))
+         (sql-datum--sigs-canonical-key name sigs)))
+     ;; Case 3: further along on same statement — routine must be
+     ;; the first identifier (after optional EXEC/EXECUTE)
+     (save-excursion
+       (let* ((stmt-start (save-excursion
+                            (or (and (search-backward ";"
+                                                      (line-beginning-position) t)
+                                     (1+ (point)))
+                                (if (derived-mode-p 'sql-interactive-mode)
+                                    (comint-line-beginning-position)
+                                  (line-beginning-position)))))
+              name)
+         (goto-char stmt-start)
+         (skip-chars-forward " \t")
+         ;; Skip EXEC/EXECUTE keyword if present
+         (when (looking-at "\\(?:EXEC\\(?:UTE\\)?\\)\\b[ \t]*")
+           (goto-char (match-end 0)))
+         ;; The next identifier should be the routine name
+         (setq name (sql-datum--identifier-at-point))
+         (sql-datum--sigs-canonical-key name sigs))))))
+
 (defun sql-datum-completion-at-point ()
   "Provide SQL identifier completion using datum introspection data.
 Automatically added to `completion-at-point-functions' in sql-mode
-and sql-interactive-mode buffers that use datum."
+and sql-interactive-mode buffers that use datum.
+
+When point is in a parameter context (inside function parens, right
+after a routine name, or on the same line as a procedure call),
+offers parameter name completion instead of normal identifiers.
+Completing a FUNCTION name auto-inserts parentheses."
   (when sql-datum-populate-completion
     (let* ((buf (or (and (derived-mode-p 'sql-interactive-mode) (current-buffer))
                     (let ((b (sql-find-sqli-buffer 'datum)))
@@ -505,6 +638,8 @@ and sql-interactive-mode buffers that use datum."
            (tables   (and buf (buffer-local-value 'sql-datum--tables   buf)))
            (schemas  (and buf (buffer-local-value 'sql-datum--schemas  buf)))
            (routines (and buf (buffer-local-value 'sql-datum--routines buf)))
+           (sigs     (and buf (buffer-local-value 'sql-datum--routine-signatures buf)))
+           (rtypes   (and buf (buffer-local-value 'sql-datum--routine-types buf)))
            (col-hash (and buf (buffer-local-value 'sql-datum--columns  buf)))
            (columns  (when col-hash
                        (let (all)
@@ -512,45 +647,87 @@ and sql-interactive-mode buffers that use datum."
                                     (setq all (append v all)))
                                   col-hash)
                          (delete-dups all))))
-           (end     (point))
-           (start   (save-excursion
-                      (skip-chars-backward "a-zA-Z0-9_.#")
-                      (point)))
-           (candidates (append tables schemas routines columns)))
-      (when candidates
-        (list start end
-              (sql-datum--make-completion-table candidates tables)
-              :exclusive 'no
-              :annotation-function
-              (lambda (cand)
-                (cond ((member cand tables)   " [table]")
-                      ((member cand schemas)  " [schema]")
-                      ((member cand routines) " [routine]")
-                      ((member cand columns)  " [column]")
-                      (t ""))))))))
+           (routine-ctx (sql-datum--find-param-routine sigs))
+           (in-parens (nth 1 (syntax-ppss))))
+      (cond
+       ;; --- Parameter context: right after a FUNCTION name (not in parens) ---
+       ;; Insert () and place cursor inside.
+       ((and routine-ctx (not in-parens)
+             (save-excursion
+               (skip-chars-backward " \t")
+               (let ((ident (sql-datum--identifier-at-point)))
+                 (and ident
+                      (string= (or (sql-datum--sigs-canonical-key ident sigs) "")
+                               routine-ctx))))
+             rtypes (equal (gethash routine-ctx rtypes) "FUNCTION"))
+        (let ((start (save-excursion
+                       (skip-chars-backward " \t")
+                       (point)))
+              (end (point)))
+          (list start end '("()")
+                :exclusive 'no
+                :exit-function (lambda (_cand _status)
+                                 (backward-char)
+                                 (when-let ((msg (sql-datum-eldoc-function)))
+                                   (message "%s" msg))))))
+       ;; --- Parameter context: procedure params (not inside function parens) ---
+       ;; Functions take positional args, so param name completion would be
+       ;; misleading (e.g. MSSQL doesn't allow @name=val in function calls).
+       ;; Eldoc already shows the signature inside function parens.
+       ((and routine-ctx
+             (not (and in-parens rtypes
+                       (equal (gethash routine-ctx rtypes) "FUNCTION")))
+             (sql-datum--at-new-param-p routine-ctx sigs))
+        (let* ((sig (gethash routine-ctx sigs))
+               (params (sql-datum--parse-param-names sig))
+               (end (point))
+               (start (save-excursion
+                        (skip-chars-backward "a-zA-Z0-9_.@#")
+                        (point))))
+          (when params
+            (list start end params
+                  :exclusive 'no
+                  :annotation-function
+                  (lambda (_) (format " [param of %s]" routine-ctx))))))
+       ;; --- Normal identifier completion ---
+       (t
+        (let* ((end (point))
+               (start (save-excursion
+                        (skip-chars-backward "a-zA-Z0-9_.#")
+                        (point)))
+               (candidates (append tables schemas routines columns)))
+          (when candidates
+            (list start end
+                  (sql-datum--make-completion-table candidates tables)
+                  :exclusive 'no
+                  :annotation-function
+                  (lambda (cand)
+                    (cond ((member cand tables)   " [table]")
+                          ((member cand schemas)  " [schema]")
+                          ((member cand routines) " [routine]")
+                          ((member cand columns)  " [column]")
+                          (t "")))
+                  :exit-function
+                  (lambda (cand status)
+                    (when (and (eq status 'finished) rtypes
+                               (equal (gethash cand rtypes) "FUNCTION"))
+                      (insert "()")
+                      (backward-char)
+                      (when-let ((msg (sql-datum-eldoc-function)))
+                        (message "%s" msg))))))))))))
+
 
 ;;; ---------------------------------------------------------------------------
 ;;; Eldoc — routine parameter signatures
 ;;; ---------------------------------------------------------------------------
 
 (defun sql-datum--lookup-signature (ident sigs)
-  "Look up IDENT in SIGS hash table, trying exact and bare-name match.
+  "Look up IDENT in SIGS hash table with flexible schema matching.
 Returns a formatted \"name(params)\" string or nil."
   (when (and ident (not (string-empty-p ident)))
-    (let ((sig (or (gethash ident sigs)
-                   ;; Try bare name against qualified keys
-                   (and (not (string-match-p "\\." ident))
-                        (let (found)
-                          (maphash (lambda (k v)
-                                     (when (and (not found)
-                                                (string-match-p "\\." k)
-                                                (string= ident
-                                                         (car (last (split-string k "\\.")))))
-                                       (setq found v)))
-                                   sigs)
-                          found)))))
-      (when sig
-        (format "%s(%s)" ident sig)))))
+    (let ((key (sql-datum--sigs-canonical-key ident sigs)))
+      (when key
+        (format "%s(%s)" ident (gethash key sigs))))))
 
 (defun sql-datum--eldoc-search-backward (sigs)
   "Search backward from point for a routine name in SIGS.
@@ -569,7 +746,15 @@ cursor inside parentheses of a function call."
        (when paren-pos
          (goto-char paren-pos)
          (skip-chars-backward " \t")
-         (sql-datum--lookup-signature (sql-datum--identifier-at-point) sigs))))))
+         (sql-datum--lookup-signature (sql-datum--identifier-at-point) sigs))))
+   ;; Case 3: right after ( or after (, without relying on syntax-ppss
+   ;; e.g. \"my_func(|\" or typing inside parens with partial content
+   (save-excursion
+     (skip-chars-backward " \t,a-zA-Z0-9_.@#='\"")
+     (when (eq (char-before) ?\()
+       (backward-char)
+       (skip-chars-backward " \t")
+       (sql-datum--lookup-signature (sql-datum--identifier-at-point) sigs)))))
 
 (defun sql-datum-eldoc-function ()
   "Return the parameter signature for the SQL routine at or before point.
@@ -656,13 +841,19 @@ for the `comint' buffer."
       ;; Enable eldoc for routine parameter signatures.
       (when sql-datum-populate-completion
         (setq-local eldoc-documentation-function #'sql-datum-eldoc-function)
-        (eldoc-mode 1))
+        (eldoc-mode 1)
+        (eldoc-add-command 'delete-backward-char
+                           'backward-delete-char-untabify
+                           'delete-char
+                           'completion-at-point))
       ;; Watch for the first prompt to confirm connection.
       (letrec ((watcher
                 (lambda (output)
                   (when (string-match-p (rx bol (* nonl) ">") output)
                     (message "datum: connected.")
-                    (remove-hook 'comint-output-filter-functions watcher t)))))
+                    (remove-hook 'comint-output-filter-functions watcher t)
+                    (when sql-datum-auto-introspect
+                      (comint-send-string (current-buffer) ":refresh\n"))))))
         (add-hook 'comint-output-filter-functions watcher nil t))
       (message "datum: connecting in background..."))))
 
@@ -1010,7 +1201,9 @@ Prompts with completion from the cached database list."
                   (lambda (output)
                     (when (string-match-p (rx bol (* nonl) ">") output)
                       (message "datum: connected to %s." db)
-                      (remove-hook 'comint-output-filter-functions watcher t)))))
+                      (remove-hook 'comint-output-filter-functions watcher t)
+                      (when sql-datum-auto-introspect
+                        (comint-send-string (current-buffer) ":refresh\n"))))))
           (add-hook 'comint-output-filter-functions watcher nil t)))))
   (sql-datum--send-command (format ":use %s" db))
   (message "datum: switching to database %s (reconnecting...)" db))

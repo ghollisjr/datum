@@ -52,6 +52,7 @@ _help_text = """
 :definition <name>     Show DDL/source for a table, view, proc, function,
                        database, or schema. Supports dotted names.
 
+:refresh               Silently refresh all introspection (autocomplete).
 :reconnect             Force a new connection, discarding the old one.
 :csv [path]            Legacy: export all output to CSV. No arg to disable.
 :script [path]         Read and run a SQL script file.
@@ -445,6 +446,17 @@ def routines(args):
             else:
                 items.append(routine_name)
         envelope.introspect("routines", sorted(set(items)))
+        # Send routine types (FUNCTION vs PROCEDURE) for completion behavior
+        type_pairs = []
+        for row in rows:
+            schema = str(row[0]) if len(row) > 2 else None
+            routine_name = str(row[1]) if len(row) > 2 else str(row[0])
+            routine_type = str(row[2]) if len(row) > 2 else "PROCEDURE"
+            if schema and schema != default_schema:
+                type_pairs.append([f"{schema}.{routine_name}", routine_type])
+            else:
+                type_pairs.append([routine_name, routine_type])
+        envelope.introspect("routine-types", type_pairs)
         # Fetch routine parameter signatures for eldoc display
         try:
             sig_cursor = connect.get_connection().cursor()
@@ -654,6 +666,104 @@ def _synthesize_create_table(schema, name, column_rows):
     return f"CREATE TABLE [{schema}].[{name}] (\n{cols}\n);"
 
 
+def refresh(args):
+    """Built-in :refresh command — silently re-run all introspection queries.
+
+    Sends envelope updates for databases, schemas, tables, routines, and
+    routine signatures without printing any output to the SQLi buffer.
+    Each query is independent — one failure won't block the rest.
+    """
+    global _driver
+    conn = connect.get_connection()
+
+    # Databases
+    try:
+        cursor = conn.cursor()
+        cursor.execute(_driver.sql_list_databases)
+        rows = cursor.fetchall()
+        if rows:
+            envelope.introspect("databases", [str(r[0]) for r in rows])
+    except Exception:
+        pass
+
+    # Schemas
+    try:
+        cursor = conn.cursor()
+        cursor.execute(_driver.sql_list_schemas)
+        rows = cursor.fetchall()
+        if rows:
+            envelope.introspect("schemas", [str(r[0]) for r in rows])
+    except Exception:
+        pass
+
+    # Tables (same logic as tables() for schema-qualified names)
+    try:
+        cursor = conn.cursor()
+        cursor.execute(_driver.sql_list_tables)
+        rows = cursor.fetchall()
+        if rows:
+            default_schema = "dbo" if _driver.dialect_name == "mssql" else "public"
+            items = []
+            for row in rows:
+                schema = str(row[0]) if len(row) > 2 else None
+                table_name = str(row[1]) if len(row) > 2 else str(row[0])
+                if schema and schema != default_schema:
+                    items.append(f"{schema}.{table_name}")
+                else:
+                    items.append(table_name)
+            envelope.introspect("tables", sorted(set(items)))
+    except Exception:
+        pass
+
+    # Routines + signatures (same logic as routines())
+    try:
+        cursor = conn.cursor()
+        cursor.execute(_driver.sql_list_routines)
+        rows = cursor.fetchall()
+        if rows:
+            default_schema = "dbo" if _driver.dialect_name == "mssql" else "public"
+            items = []
+            for row in rows:
+                schema = str(row[0]) if len(row) > 2 else None
+                routine_name = str(row[1]) if len(row) > 2 else str(row[0])
+                if schema and schema != default_schema:
+                    items.append(f"{schema}.{routine_name}")
+                else:
+                    items.append(routine_name)
+            envelope.introspect("routines", sorted(set(items)))
+            # Routine types (best-effort)
+            type_pairs = []
+            for row in rows:
+                schema = str(row[0]) if len(row) > 2 else None
+                routine_name = str(row[1]) if len(row) > 2 else str(row[0])
+                routine_type = str(row[2]) if len(row) > 2 else "PROCEDURE"
+                if schema and schema != default_schema:
+                    type_pairs.append([f"{schema}.{routine_name}", routine_type])
+                else:
+                    type_pairs.append([routine_name, routine_type])
+            envelope.introspect("routine-types", type_pairs)
+            # Routine signatures (best-effort)
+            try:
+                sig_cursor = conn.cursor()
+                sig_cursor.execute(_driver.sql_routine_signatures)
+                sig_rows = sig_cursor.fetchall()
+                if sig_rows:
+                    pairs = []
+                    for sig_row in sig_rows:
+                        schema = str(sig_row[0])
+                        rname = str(sig_row[1])
+                        sig = str(sig_row[2]) if sig_row[2] is not None else ""
+                        if schema and schema != default_schema:
+                            pairs.append([f"{schema}.{rname}", sig])
+                        else:
+                            pairs.append([rname, sig])
+                    envelope.introspect("routine-sigs", pairs)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
 def definition(args):
     """Built-in :definition command — show DDL/source for a SQL object."""
     global _driver
@@ -785,4 +895,5 @@ _builtins = {
     ":use":        use_database,
     ":pwd":        pwd,
     ":definition": definition,
+    ":refresh":    refresh,
 }
