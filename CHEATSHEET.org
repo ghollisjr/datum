@@ -50,6 +50,8 @@ From the scratch buffer you have full completion (=TAB=), all the =C-c s= /
 | =C-c s R= | List routines (=C-u= to filter with LIKE)  |
 | =C-c s v= | Server version                           |
 | =C-c s u= | Current user                             |
+| =C-c s f= | Refresh all introspection data           |
+| =C-c s F= | Toggle periodic auto-refresh (=C-u N= for interval) |
 
 ** Goto Definition
 
@@ -127,6 +129,7 @@ Respects =:chars= for column width. Timestamp shows last refresh.
 | =:running=       | Running queries          |
 | =:definition <name>= | Show DDL/source for object  |
 | =:refresh=       | Silently re-run all introspection |
+| =:refresh-db <name>= | Introspect another database (MSSQL) |
 
 ** Export / Import
 

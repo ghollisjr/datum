@@ -171,6 +171,7 @@ All commands start with =:= and are entered at the prompt.
 | =:type [dialect]=   | Show or set the SQL dialect                    |
 | =:definition <name>= | Show DDL/source for a table, view, proc, or function    |
 | =:refresh=          | Silently re-run all introspection (updates autocomplete) |
+| =:refresh-db <name>= | Introspect another database for cross-db completion (MSSQL) |
 
 ** Export (=:out=)
 
@@ -390,6 +391,8 @@ dialect-aware: they use =TOP= / =NEWID()= / =OBJECT_ID()= on MSSQL and
 | =C-c s R= | =sql-datum-routines=     | List routines (=C-u= to filter with LIKE)                  |
 | =C-c s v= | =sql-datum-version=      | Show server version                                        |
 | =C-c s u= | =sql-datum-user=         | Show current user                                          |
+| =C-c s f= | =sql-datum-refresh=      | Refresh all introspection data                             |
+| =C-c s F= | =sql-datum-toggle-auto-refresh= | Toggle periodic introspection refresh (=C-u N= for interval) |
 | =C-c u=   | =sql-datum-use-database= | Switch to a different database (reconnects for PostgreSQL) |
 | =C-c C-c= | =sql-datum-send-smart=   | Send region or paragraph (auto-connects if needed)         |
 
@@ -437,6 +440,26 @@ When =sql-datum-auto-introspect= is non-nil (the default), completion data
 is populated automatically on connect — no need to run =:tables= or
 =:routines= manually.  You can also run =:refresh= at any time to silently
 update the completion data.
+
+*** Cross-database completion (MSSQL)
+
+On MSSQL, completion supports three-part names (=other_db.schema.table=).
+Type a database name, complete it with =TAB=, type =.=, and hit =TAB=
+again -- Datum fetches that database's tables, routines, and schemas on
+demand and offers them as completions.  The results are cached per-session
+so subsequent completions are instant.
+
+This works because MSSQL supports cross-database queries via three-part
+catalog references.  PostgreSQL cannot query across databases without
+reconnecting, so this feature is MSSQL-only.
+
+You can also introspect a remote database manually with =:refresh-db <name>=.
+
+*** Schema-qualified completion
+
+Completion supports schema-qualified names.  Both bare names (=users=) and
+schema-qualified names (=dbo.users=) are available as candidates.  Typing
+=dbo.= and pressing =TAB= shows all tables and routines in the =dbo= schema.
 
 *** Routine parameter completion
 
@@ -516,6 +539,7 @@ time. The timer stops automatically when the buffer is no longer visible.
 | =sql-datum-confirm-drop=             | =t=              | Prompt before =C-c t D= drops table |
 | =sql-datum-running-refresh-interval= | =5=              | Auto-refresh interval (seconds)      |
 | =sql-datum-auto-introspect=          | =t=              | Auto-run =:refresh= on connect       |
+| =sql-datum-refresh-interval=         | =nil=            | Periodic refresh interval (seconds)  |
 
 * Envelope protocol
 

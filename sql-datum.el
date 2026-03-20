@@ -89,6 +89,16 @@ routines without needing to manually run introspection commands."
   :type 'boolean
   :group 'SQL)
 
+(defcustom sql-datum-refresh-interval nil
+  "Seconds between automatic introspection refreshes.
+When non-nil, a timer periodically sends :refresh to keep
+completion candidates up to date.  Set to nil to disable."
+  :type '(choice (const :tag "Disabled" nil) integer)
+  :group 'SQL)
+
+(defvar sql-datum--refresh-timer nil
+  "Timer for periodic introspection refresh.")
+
 
 ;;; ---------------------------------------------------------------------------
 ;;; Buffer-local state
@@ -978,7 +988,13 @@ for the `comint' buffer."
                     (message "datum: connected.")
                     (remove-hook 'comint-output-filter-functions watcher t)
                     (when sql-datum-auto-introspect
-                      (comint-send-string (current-buffer) ":refresh\n"))))))
+                      (comint-send-string (current-buffer) ":refresh\n"))
+                    (when (and sql-datum-refresh-interval
+                               (not sql-datum--refresh-timer))
+                      (setq sql-datum--refresh-timer
+                            (run-with-timer sql-datum-refresh-interval
+                                            sql-datum-refresh-interval
+                                            #'sql-datum--refresh-tick)))))))
         (add-hook 'comint-output-filter-functions watcher nil t))
       (message "datum: connecting in background..."))))
 
@@ -1399,6 +1415,49 @@ Automatically ensures a live database connection first."
         (sql-send-paragraph)))))
 
 ;;; ---------------------------------------------------------------------------
+;;; Introspection refresh
+;;; ---------------------------------------------------------------------------
+
+(defun sql-datum-refresh ()
+  "Refresh all introspection data (autocomplete candidates).
+Sends :refresh to the active datum process."
+  (interactive)
+  (sql-datum--send-command ":refresh")
+  (message "datum: refreshing introspection..."))
+
+(defun sql-datum-toggle-auto-refresh (interval)
+  "Toggle periodic introspection refresh.
+With a prefix argument, set the INTERVAL in seconds.
+Without, toggle on/off using `sql-datum-refresh-interval'
+\(default 60 seconds)."
+  (interactive "P")
+  (if sql-datum--refresh-timer
+      (progn
+        (cancel-timer sql-datum--refresh-timer)
+        (setq sql-datum--refresh-timer nil)
+        (message "datum: auto-refresh disabled"))
+    (let ((secs (cond ((numberp interval) interval)
+                      ((and interval (listp interval))
+                       (prefix-numeric-value interval))
+                      (sql-datum-refresh-interval
+                       sql-datum-refresh-interval)
+                      (t 60))))
+      (setq sql-datum--refresh-timer
+            (run-with-timer secs secs #'sql-datum--refresh-tick))
+      (message "datum: auto-refresh every %ds" secs))))
+
+(defun sql-datum--refresh-tick ()
+  "Timer callback: send :refresh if a datum process is alive."
+  (let ((buf (sql-find-sqli-buffer 'datum)))
+    (if (and buf (get-buffer-process (get-buffer buf)))
+        (comint-send-string (get-buffer-process (get-buffer buf))
+                            ":refresh\n")
+      ;; No live process — stop the timer
+      (when sql-datum--refresh-timer
+        (cancel-timer sql-datum--refresh-timer)
+        (setq sql-datum--refresh-timer nil)))))
+
+;;; ---------------------------------------------------------------------------
 ;;; Keybindings
 ;;; ---------------------------------------------------------------------------
 
@@ -1422,6 +1481,9 @@ Automatically ensures a live database connection first."
   (define-key sql-mode-map (kbd "C-c s r") #'sql-datum-running)
   (define-key sql-mode-map (kbd "C-c s v") #'sql-datum-version)
   (define-key sql-mode-map (kbd "C-c s u") #'sql-datum-user)
+  ;; C-c s f: refresh introspection
+  (define-key sql-mode-map (kbd "C-c s f") #'sql-datum-refresh)
+  (define-key sql-mode-map (kbd "C-c s F") #'sql-datum-toggle-auto-refresh)
   ;; C-c u: switch database
   (define-key sql-mode-map (kbd "C-c u")   #'sql-datum-use-database)
   ;; C-c C-c: smart send (region or paragraph, auto-connect)
