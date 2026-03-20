@@ -394,22 +394,24 @@ dialect-aware: they use =TOP= / =NEWID()= / =OBJECT_ID()= on MSSQL and
 
 ** Scratch buffer
 
-The scratch buffer is the main way to write and send SQL interactively.
-=sql-datum-scratch= opens (or switches to) a =*datum-scratch*= buffer in
-=sql-mode=, wired to the active datum connection.  Unlike the SQLi REPL,
-a scratch buffer gives you a full editing environment: multi-line queries,
-undo history, =M-.= goto-definition, completion, and all the =C-c t= /
-=C-c s= keybindings.  Use =C-c C-r= to send a region or =C-c C-b= to
-send the whole buffer.
+The scratch buffer is a convenient, fast way to write and send SQL
+interactively.  =sql-datum-scratch= opens (or switches to) a
+=*datum-scratch*= buffer in =sql-mode=, wired to the active datum
+connection.  Unlike the SQLi REPL, a scratch buffer gives you a full
+editing environment: multi-line queries, undo history, =M-.=
+goto-definition, completion, and all the =C-c t= / =C-c s=
+keybindings.  Use =C-c C-r= to send a region or =C-c C-b= to send the
+whole buffer.
 
 With a prefix argument (=C-u=), it creates an additional scratch buffer
 with a numeric suffix -- useful for keeping separate workspaces (one for
 exploration, one for DDL, one for a long analysis).
 
-All datum features -- completion, =M-.= goto-definition, eldoc, keybindings
--- work in any =sql-mode= buffer associated with a datum connection, not
-just scratch buffers.  So =.sql= files work just as well; the scratch
-buffer is simply a fast way to start writing SQL without creating a file.
+Note that all datum features -- completion, =M-.= goto-definition,
+eldoc, keybindings -- work in any =sql-mode= buffer associated with a
+datum connection, not just scratch buffers.  So =.sql= files work just
+as well; the scratch buffer is simply a fast way to start writing SQL
+without creating a file.
 
 A typical workflow:
 
