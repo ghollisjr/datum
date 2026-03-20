@@ -2,13 +2,15 @@
 #+AUTHOR: Sebastian Monia & Gary Hollis
 #+OPTIONS: toc:3 num:nil
 
-A command-line tool to query databases via ODBC, with a first-class Emacs
-frontend.
+An Emacs SQL IDE backed by a Python CLI.  Connect to any ODBC database,
+get instant completion, goto-definition, parameter signatures, one-keystroke
+table operations, and import/export -- all without leaving your editor.
 
 Datum keeps all compute in Python and uses Emacs as a smart terminal.
-Structured data flows between them via an envelope protocol that is invisible
-to the user but keeps the Emacs side informed about dialect, metadata, and
-introspection results.
+Structured data flows between them via an envelope protocol that is
+invisible to the user but keeps the Emacs side informed about dialect,
+metadata, and introspection results.  The Python CLI is also usable
+standalone from any terminal.
 
 * Features
 
@@ -392,11 +394,25 @@ dialect-aware: they use =TOP= / =NEWID()= / =OBJECT_ID()= on MSSQL and
 
 ** Scratch buffer
 
+The scratch buffer is the main way to write and send SQL interactively.
 =sql-datum-scratch= opens (or switches to) a =*datum-scratch*= buffer in
-=sql-mode=, wired to the active datum connection.  From there you can write
-SQL and use all the datum keybindings.  With a prefix argument (=C-u=), it
-creates an additional scratch buffer with a numeric suffix.  Bind it
-globally for quick access:
+=sql-mode=, wired to the active datum connection.  Unlike the SQLi REPL,
+a scratch buffer gives you a full editing environment: multi-line queries,
+undo history, =M-.= goto-definition, completion, and all the =C-c t= /
+=C-c s= keybindings.  Use =C-c C-r= to send a region or =C-c C-b= to
+send the whole buffer.
+
+With a prefix argument (=C-u=), it creates an additional scratch buffer
+with a numeric suffix -- useful for keeping separate workspaces (one for
+exploration, one for DDL, one for a long analysis).
+
+A typical workflow:
+
+1. =M-x sql-connect= -- connect to a database
+2. =C-c q= -- open the scratch buffer (completion is already populated)
+3. Write SQL, =C-c C-r= to run it, =M-.= to inspect objects, iterate
+
+Bind it globally for quick access:
 
 #+begin_src emacs-lisp
 (autoload 'sql-datum-scratch "sql-datum" nil t)

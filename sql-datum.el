@@ -1,9 +1,11 @@
-;;; sql-datum.el --- Adds Datum as a SQL Product   -*- lexical-binding: t; -*-
+;;; sql-datum.el --- Emacs SQL IDE via Datum and ODBC   -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2021-2024 Sebastian Monia
+;; Copyright (C) 2026 Gary Hollis
 ;;
 ;; Author: Sebastian Monia <smonia@outlook.com>
-;; URL: https://github.com/sebasmonia/datum
+;; Author: Gary Hollis <ghollisjr@gmail.com>
+;; URL: https://github.com/ghollisjr/datum
 ;; Package-Requires: ((emacs "27.1"))
 ;; Version: 2.0
 ;; Keywords: languages processes tools
@@ -14,8 +16,12 @@
 
 ;;; Commentary:
 
-;; Pre-packaged setup to use Datum as an interface for SQLi buffers.
-;; Steps to setup:
+;; Emacs SQL IDE built on sql.el and the Datum Python CLI.  Provides
+;; completion-at-point for tables, columns, schemas, and routines (with
+;; parameter signatures), M-. goto-definition with xref stack navigation,
+;; eldoc, one-keystroke table operations, import/export, and more.
+;;
+;; Setup:
 ;;   1. Place sql-datum.el in your load-path.
 ;;   2. (require 'sql-datum)
 ;; Then...
@@ -24,8 +30,8 @@
 ;;   3. Add to sql-connection-alist an item that uses Datum to connect,
 ;;      it will show up in the candidates when calling sql-connect.
 ;;
-;; For a detailed Datum user manual, and additional Emacs setup examples, see:
-;; https://github.com/sebasmonia/datum/blob/main/README.md
+;; For a detailed user manual and additional setup examples, see:
+;; https://github.com/ghollisjr/datum
 
 ;;; Code:
 
