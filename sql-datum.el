@@ -532,8 +532,9 @@ E.g. \"@Table_name varchar(128), @Other int\" → (\"@Table_name\" \"@Other\")."
   "Return the canonical key in SIGS that matches NAME, or nil.
 Tries exact match first, then bare name against qualified keys,
 then strips the schema prefix from a qualified NAME to match a bare key."
-  (cond
-   ((gethash name sigs) name)
+  (when (and name (stringp name))
+    (cond
+     ((gethash name sigs) name)
    ;; Bare name → check if any schema.name key matches
    ((not (string-match-p "\\." name))
     (let (found)
@@ -548,7 +549,7 @@ then strips the schema prefix from a qualified NAME to match a bare key."
    ;; Qualified name → try just the bare part
    (t
     (let ((bare (car (last (split-string name "\\.")))))
-      (when (gethash bare sigs) bare)))))
+      (when (gethash bare sigs) bare))))))
 
 (defun sql-datum--at-new-param-p (routine-name sigs)
   "Return non-nil if point is where a new @parameter name is expected.
