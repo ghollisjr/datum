@@ -696,11 +696,15 @@ defaults to `sql-datum-import-batch-size', overridden with \\[universal-argument
              (or mode-flag " (default)") batch-size)))
 
 (defun sql-datum--send-command (cmd)
-  "Send CMD string to the active datum process."
+  "Send CMD string to the active datum process.
+If the SQLi buffer is not currently visible, display it."
   (let ((buf (sql-find-sqli-buffer 'datum)))
     (unless buf
       (user-error "No active datum buffer found"))
-    (comint-send-string (get-buffer buf) (concat cmd "\n"))))
+    (let ((buf-obj (get-buffer buf)))
+      (unless (get-buffer-window buf-obj t)
+        (display-buffer buf-obj))
+      (comint-send-string buf-obj (concat cmd "\n")))))
 
 (defun sql-datum--get-dialect ()
   "Return the SQL dialect string from the active datum SQLi buffer."
