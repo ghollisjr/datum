@@ -632,7 +632,8 @@ When point is in a parameter context (inside function parens, right
 after a routine name, or on the same line as a procedure call),
 offers parameter name completion instead of normal identifiers.
 Completing a FUNCTION name auto-inserts parentheses."
-  (when sql-datum-populate-completion
+  (when (and sql-datum-populate-completion
+             (not (nth 3 (syntax-ppss))))  ; not inside a string literal
     (let* ((buf (or (and (derived-mode-p 'sql-interactive-mode) (current-buffer))
                     (let ((b (sql-find-sqli-buffer 'datum)))
                       (and b (get-buffer b)))))
