@@ -11,8 +11,12 @@ you live in Emacs, it feels like the database is part of your editor.
 - One tool for every database: MSSQL, PostgreSQL, SQLite, MySQL, Oracle,
   Snowflake -- if it has an ODBC driver, Datum talks to it.
 - Three keystrokes to peek at a table. =C-c t t= and you're looking at rows.
-- Completion that actually works: table names, schema names, column names, all
-  fed from live introspection, all available in your editing buffer.
+- Completion that actually works: table names, column names, routine names,
+  even stored procedure =@parameter= names -- all fed from live introspection,
+  all available in your editing buffer, all populated automatically on connect.
+- =M-.= on any name jumps to its definition. =M-.= again from inside that
+  definition drills deeper. =M-,= pops back. A full navigation stack, just
+  like source code.
 - Export a query to Parquet with one command. Import a CSV into a table with
   one command. No external scripts, no context switching.
 - The entire system is two parts: one Python package, one Emacs Lisp file.
@@ -116,13 +120,41 @@ typing table names from memory.
 
 ** Real completion, everywhere
 
-Run =:tables= once and every table name is a completion candidate -- in the
-REPL, in your scratch buffer, in any =sql-mode= buffer. Run =:columns= on a
-few tables and column names join the pool too. Candidates are annotated so you
-can tell tables from schemas from columns at a glance.
+Connect to a database and completion just works -- tables, schemas, columns,
+stored procedures, and functions are all populated automatically. No need to
+run =:tables= first; Datum introspects everything silently on connect and again
+whenever you switch databases with =:use=.
 
-This works with whatever completion framework you use: built-in, Company, Corfu,
-Vertico -- anything that respects =completion-at-point-functions=.
+Completion is context-aware:
+
+- Type a table or view name and =TAB= completes it
+- Type a function name and =TAB= completes it *and* inserts parentheses, with
+  the cursor between them and eldoc showing the signature in the minibuffer
+- Type =EXEC my_procedure= and =TAB= offers =@parameter= names from the
+  procedure's actual signature -- it knows which parameters exist and stops
+  suggesting them once you've assigned a value with ~=~
+- Inside a string literal, completion stays out of the way
+
+Candidates are annotated so you can tell tables from schemas from routines
+from columns at a glance. This works with whatever completion framework you
+use: built-in, Company, Corfu, Vertico -- anything that respects
+=completion-at-point-functions=.
+
+** Goto definition with M-.
+
+Press =M-.= on any table, view, function, or stored procedure and Datum opens
+its definition in a read-only =sql-mode= buffer -- column listings for tables,
+view SQL for views, full source for functions and procedures. The xref marker
+stack means =M-,= takes you right back where you were.
+
+The killer part: =M-.= keeps working inside definition buffers. See a function
+that calls another function? Hit =M-.= again. And again. Drill as deep as you
+want, then =M-,= your way back through the whole stack -- exactly like
+navigating source code in any programming language. Press =q= to pop back one
+level.
+
+No separate object browser. No switching to a GUI. Just point at a name and
+go.
 
 ** Export and import without leaving your seat
 
@@ -187,7 +219,7 @@ combine both in one command. Your most-used queries become one-word commands.
 * What it looks like in practice
 
 #+begin_example
-;; Connect
+;; Connect -- completion is ready immediately, no manual :tables needed
 M-x sql-connect RET my-postgres RET
 datum: connecting in background...
 datum: connected.
@@ -196,14 +228,11 @@ datum: connected.
 C-c q
 datum: scratch buffer ready
 
-;; See what tables exist
-C-c s t
-  public    users         BASE TABLE
-  public    orders        BASE TABLE
-  public    products      BASE TABLE
+;; TAB already knows every table, schema, and routine
+SELECT * FROM us TAB  →  SELECT * FROM users
 
 ;; Peek at a table
-C-c t t  →  users
+C-c t t  →  users  (prompted with completion)
 SELECT * FROM users LIMIT 10;;
 
   id    name       email              created_at
@@ -212,22 +241,36 @@ SELECT * FROM users LIMIT 10;;
   2     Bob        bob@example.com    2024-01-16 14:22:00
   ...
 
-;; How many rows?
-C-c t c  →  users
-SELECT COUNT(*) FROM users;;
-  count
-  ------
-  48231
+;; Call a function -- TAB inserts parens, eldoc shows signature
+SELECT get_user_email TAB
+  →  SELECT get_user_email()    [eldoc: user_id integer]
+
+;; Execute a stored procedure -- TAB offers @parameter names
+EXEC update_user_role TAB
+  →  @user_id   @new_role
+EXEC update_user_role @user_id=42, TAB
+  →  @new_role   (already-assigned @user_id is not re-suggested)
+
+;; Jump to a definition -- M-. on "users" opens column listing
+;;   M-. again on a view's source table drills deeper
+;;   M-, pops back through the stack
+M-.  on  update_user_role
+  →  *datum-def: update_user_role*  (full procedure source)
+  M-.  on  validate_role   (called inside the procedure)
+    →  *datum-def: validate_role*  (that function's source)
+  M-,  →  back to update_user_role
+  M-,  →  back to your SQL buffer
 
 ;; Export to Parquet
 C-c t e  →  users  →  /tmp/users.parquet
 datum: exporting users to /tmp/users.parquet
 datum: export complete — /tmp/users.parquet (parquet)
 
-;; Switch databases
+;; Switch databases -- completion refreshes automatically
 C-c u  →  analytics
 datum: switching to database analytics (reconnecting...)
 datum: connected to analytics.
+;; TAB now completes tables/routines from the analytics database
 #+end_example
 
 Two files. No configuration ceremony. Just connect and query.

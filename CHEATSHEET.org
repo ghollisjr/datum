@@ -47,8 +47,20 @@ From the scratch buffer you have full completion (=TAB=), all the =C-c s= /
 | =C-c s d= | List databases (=C-u= to filter with LIKE) |
 | =C-c s s= | List schemas (=C-u= to filter with LIKE) |
 | =C-c s r= | Running queries                          |
+| =C-c s R= | List routines (=C-u= to filter with LIKE)  |
 | =C-c s v= | Server version                           |
 | =C-c s u= | Current user                             |
+
+** Goto Definition
+
+| Key   | Action                                     |
+|-------+--------------------------------------------|
+| =M-.= | Jump to definition (table/view/proc/func)  |
+| =M-,= | Pop back to previous location              |
+| =q=   | Go back (in definition buffer)             |
+
+=M-.= works inside definition buffers too -- drill into nested definitions
+and =M-,= your way back through the stack.
 
 ** Other
 
@@ -109,8 +121,11 @@ Respects =:chars= for column width. Timestamp shows last refresh.
 | =:databases [pattern]= | List databases (LIKE filter)  |
 | =:schemas [pattern]=  | List schemas (LIKE filter)    |
 | =:tables [pattern]=   | List tables/views (LIKE filter) |
+| =:routines [pattern]= | List routines (LIKE filter)   |
 | =:columns <tbl>= | Columns (=schema.table=) |
 | =:running=       | Running queries          |
+| =:definition <name>= | Show DDL/source for object  |
+| =:refresh=       | Silently re-run all introspection |
 
 ** Export / Import
 

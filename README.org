@@ -14,11 +14,12 @@ introspection results.
 
 - Connect to any database with an ODBC driver (MSSQL, PostgreSQL, SQLite, MySQL, Oracle, ...)
 - Auto-detect SQL dialect or set it explicitly
-- Introspection commands: =:tables=, =:columns=, =:schemas=, =:databases=, =:running=
+- Introspection commands: =:tables=, =:columns=, =:schemas=, =:databases=, =:routines=, =:running=
+- Auto-introspect on connect: completion is populated automatically (no manual =:tables= needed)
 - Export query results to CSV, Parquet, or JSON (=:out=)
 - Import files into SQL tables with schema inference (=:in=)
 - Custom query templates with placeholders and ODBC parameters
-- Emacs integration: completion-at-point, mode line status, keybindings
+- Emacs integration: completion-at-point, eldoc parameter signatures, mode line status, keybindings
 - Optional Polars backend for faster import/export (falls back to pyarrow or stdlib)
 
 * Installation
@@ -161,10 +162,13 @@ All commands start with =:= and are entered at the prompt.
 | =:databases [pattern]= | List databases (filter with SQL LIKE wildcards) |
 | =:schemas [pattern]=  | List schemas (filter with SQL LIKE wildcards)   |
 | =:tables [pattern]=   | List tables and views (filter with SQL LIKE wildcards) |
+| =:routines [pattern]= | List stored procedures and functions           |
 | =:columns <table>=  | List columns (supports =schema.table=)         |
 | =:running=          | List currently running queries                 |
 | =:use <database>=   | Switch to a different database                 |
 | =:type [dialect]=   | Show or set the SQL dialect                    |
+| =:definition <name>= | Show DDL/source for a table, view, proc, or function    |
+| =:refresh=          | Silently re-run all introspection (updates autocomplete) |
 
 ** Export (=:out=)
 
@@ -381,6 +385,7 @@ dialect-aware: they use =TOP= / =NEWID()= / =OBJECT_ID()= on MSSQL and
 | =C-c s d= | =sql-datum-databases= | List databases (=C-u= to filter with LIKE) |
 | =C-c s s= | =sql-datum-schemas=  | List schemas (=C-u= to filter with LIKE)   |
 | =C-c s r= | =sql-datum-running=  | Show running queries                     |
+| =C-c s R= | =sql-datum-routines= | List routines (=C-u= to filter with LIKE)  |
 | =C-c s v= | =sql-datum-version=  | Show server version                      |
 | =C-c s u= | =sql-datum-user=     | Show current user                        |
 
@@ -395,11 +400,47 @@ SQL and use all the datum keybindings.  Bind it globally for quick access:
 (global-set-key (kbd "C-c q") #'sql-datum-scratch)
 #+end_src
 
+** Goto definition (=M-.=)
+
+Press =M-.= on any SQL identifier to jump to its definition:
+
+- *Tables*: column listing (name, type, nullability, defaults)
+- *Views*: the view's SQL source
+- *Functions / Procedures*: full source code
+
+Definitions open in a read-only =sql-mode= buffer.  =M-.= keeps working
+inside definition buffers, so you can drill from a view into the tables it
+references, or from a procedure into functions it calls.  =M-,= pops back
+through the xref marker stack; =q= also goes back one level.
+
+With no identifier at point, =M-.= prompts for a name.
+
 ** Completion at point
 
-After running =:tables= or =:columns=, table, schema, and column names are
-available for completion in both the SQLi buffer and =sql-mode= editing
-buffers.  Works with =completion-at-point= (=C-M-i=), Company, Corfu, etc.
+Table, schema, column, and routine names are available for completion in
+both the SQLi buffer and =sql-mode= editing buffers.  Works with
+=completion-at-point= (=C-M-i=), Company, Corfu, etc.
+
+When =sql-datum-auto-introspect= is non-nil (the default), completion data
+is populated automatically on connect — no need to run =:tables= or
+=:routines= manually.  You can also run =:refresh= at any time to silently
+update the completion data.
+
+*** Routine parameter completion
+
+For stored procedures, typing =TAB= after the procedure name offers
+=@parameter= names from the routine's signature.  Parameter completion is
+context-aware:
+
+- After =@param== (an already-assigned parameter), no further parameter
+  names are suggested until you type a comma
+- Inside string literals (single quotes), completion is suppressed
+
+For functions, completing a function name automatically inserts parentheses
+and places the cursor between them.  Eldoc shows the function signature
+in the minibuffer while you type inside the parentheses.
+
+*** TAB setup
 
 By default, =TAB= in =sql-mode= is bound to indentation, not completion.
 To make =TAB= complete when point is mid-word (and indent otherwise), add:
@@ -447,6 +488,7 @@ time. The timer stops automatically when the buffer is no longer visible.
 | =sql-datum-import-batch-size=        | =1000=           | Rows per batch for =:in= imports     |
 | =sql-datum-confirm-drop=             | =t=              | Prompt before =C-c t D= drops table |
 | =sql-datum-running-refresh-interval= | =5=              | Auto-refresh interval (seconds)      |
+| =sql-datum-auto-introspect=          | =t=              | Auto-run =:refresh= on connect       |
 
 * Envelope protocol
 
@@ -467,7 +509,9 @@ acted on silently.
 | =dialect=     | mssql/postgres/ansi  | Set SQL dialect                   |
 | =meta=        | key:value            | Metadata (server, database, etc.) |
 | =result-file=  | path:format          | Exported file notification        |
-| =introspect=   | kind:json-array      | Introspection data for completion |
+| =definition=   | name:source-text     | DDL/source for goto-definition    |
+| =introspect=   | kind:json-array      | Introspection data (replace)      |
+| =introspect+=  | kind:json-array      | Introspection data (append chunk) |
 | =running-text= | formatted-text       | Running queries display           |
 
 * License
