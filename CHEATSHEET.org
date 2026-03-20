@@ -64,10 +64,11 @@ and =M-,= your way back through the stack.
 
 ** Other
 
-| Key     | Action                            |
-|---------+-----------------------------------|
-| =C-c q= | Open scratch SQL buffer (global)  |
-| =C-c u= | Switch database                   |
+| Key       | Action                                          |
+|-----------+-------------------------------------------------|
+| =C-c C-c= | Send region or paragraph (auto-connects)        |
+| =C-c q=   | Open scratch SQL buffer (global)                |
+| =C-c u=   | Switch database                                 |
 
 * Running Queries Buffer
 

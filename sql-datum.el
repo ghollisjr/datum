@@ -1242,6 +1242,44 @@ a numeric suffix, prompting to confirm the name."
     (message "datum: scratch buffer ready — C-c C-r to send region, C-c C-b to send buffer")))
 
 ;;; ---------------------------------------------------------------------------
+;;; Smart send
+;;; ---------------------------------------------------------------------------
+
+(defun sql-datum-ensure-connection ()
+  "Ensure the current buffer has a live SQLi connection.
+If `sql-buffer' is nil or its process has died, call `sql-connect'
+to establish a new connection."
+  (interactive)
+  (unless (and sql-buffer
+               (let ((buffer (get-buffer sql-buffer)))
+                 (and buffer
+                      (buffer-live-p buffer)
+                      (comint-check-proc buffer))))
+    (let ((window (selected-window)))
+      (call-interactively #'sql-connect)
+      (select-window window))
+    (when (and sql-buffer (get-buffer sql-buffer))
+      (with-current-buffer sql-buffer
+        (goto-char (point-max))
+        (comint-set-process-mark)))))
+
+(defun sql-datum-send-smart (&optional start end)
+  "Send the active region, or the current paragraph if no region is active.
+Automatically ensures a live database connection first."
+  (interactive
+   (when mark-active
+     (list (region-beginning) (region-end))))
+  (sql-datum-ensure-connection)
+  (if (and start end (> end start))
+      (sql-send-region start end)
+    (let ((bounds (save-excursion
+                    (let ((beg (progn (backward-paragraph) (point)))
+                          (end (progn (forward-paragraph) (point))))
+                      (cons beg end)))))
+      (when (> (cdr bounds) (car bounds))
+        (sql-send-paragraph)))))
+
+;;; ---------------------------------------------------------------------------
 ;;; Keybindings
 ;;; ---------------------------------------------------------------------------
 
@@ -1267,7 +1305,8 @@ a numeric suffix, prompting to confirm the name."
   (define-key sql-mode-map (kbd "C-c s u") #'sql-datum-user)
   ;; C-c u: switch database
   (define-key sql-mode-map (kbd "C-c u")   #'sql-datum-use-database)
-)
+  ;; C-c C-c: smart send (region or paragraph, auto-connect)
+  (define-key sql-mode-map (kbd "C-c C-c") #'sql-datum-send-smart))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Product registration

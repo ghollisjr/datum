@@ -391,6 +391,7 @@ dialect-aware: they use =TOP= / =NEWID()= / =OBJECT_ID()= on MSSQL and
 | =C-c s v= | =sql-datum-version=      | Show server version                                        |
 | =C-c s u= | =sql-datum-user=         | Show current user                                          |
 | =C-c u=   | =sql-datum-use-database= | Switch to a different database (reconnects for PostgreSQL) |
+| =C-c C-c= | =sql-datum-send-smart=   | Send region or paragraph (auto-connects if needed)         |
 
 ** Scratch buffer
 
@@ -417,7 +418,7 @@ A typical workflow:
 
 1. =M-x sql-connect= -- connect to a database
 2. =C-c q= -- open the scratch buffer (completion is already populated)
-3. Write SQL, =C-c C-r= to run it, =M-.= to inspect objects, iterate
+3. Write SQL, =C-c C-c= to run region or paragraph, =M-.= to inspect objects, iterate
 
 Bind it globally for quick access:
 
