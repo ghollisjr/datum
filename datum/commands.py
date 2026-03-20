@@ -53,6 +53,7 @@ _help_text = """
                        database, or schema. Supports dotted names.
 
 :refresh               Silently refresh all introspection (autocomplete).
+:refresh-db <name>     Introspect another database for cross-db completion (MSSQL).
 :reconnect             Force a new connection, discarding the old one.
 :csv [path]            Legacy: export all output to CSV. No arg to disable.
 :script [path]         Read and run a SQL script file.
@@ -397,15 +398,17 @@ def tables(args):
         print()
         for row in print_ready:
             print(format_str.format(*row))
-        # Send bare names for tables in the default schema,
-        # schema-qualified names for all others.
+        # Send both bare and schema-qualified names for default schema,
+        # schema-qualified only for other schemas.
         default_schema = "dbo" if _driver.dialect_name == "mssql" else "public"
         items = []
         for row in rows:
             schema = str(row[0]) if len(row) > 2 else None
             table_name = str(row[1]) if len(row) > 2 else str(row[0])
-            if schema and schema != default_schema:
+            if schema:
                 items.append(f"{schema}.{table_name}")
+                if schema == default_schema:
+                    items.append(table_name)
             else:
                 items.append(table_name)
         envelope.introspect("tables", sorted(set(items)))
@@ -441,8 +444,10 @@ def routines(args):
         for row in rows:
             schema = str(row[0]) if len(row) > 2 else None
             routine_name = str(row[1]) if len(row) > 2 else str(row[0])
-            if schema and schema != default_schema:
+            if schema:
                 items.append(f"{schema}.{routine_name}")
+                if schema == default_schema:
+                    items.append(routine_name)
             else:
                 items.append(routine_name)
         envelope.introspect("routines", sorted(set(items)))
@@ -452,8 +457,10 @@ def routines(args):
             schema = str(row[0]) if len(row) > 2 else None
             routine_name = str(row[1]) if len(row) > 2 else str(row[0])
             routine_type = str(row[2]) if len(row) > 2 else "PROCEDURE"
-            if schema and schema != default_schema:
+            if schema:
                 type_pairs.append([f"{schema}.{routine_name}", routine_type])
+                if schema == default_schema:
+                    type_pairs.append([routine_name, routine_type])
             else:
                 type_pairs.append([routine_name, routine_type])
         envelope.introspect("routine-types", type_pairs)
@@ -468,9 +475,8 @@ def routines(args):
                     schema = str(sig_row[0])
                     rname = str(sig_row[1])
                     sig = str(sig_row[2]) if sig_row[2] is not None else ""
-                    if schema and schema != default_schema:
-                        pairs.append([f"{schema}.{rname}", sig])
-                    else:
+                    pairs.append([f"{schema}.{rname}", sig])
+                    if schema == default_schema:
                         pairs.append([rname, sig])
                 envelope.introspect("routine-sigs", pairs)
         except Exception:
@@ -666,6 +672,92 @@ def _synthesize_create_table(schema, name, column_rows):
     return f"CREATE TABLE [{schema}].[{name}] (\n{cols}\n);"
 
 
+def refresh_db(args):
+    """Built-in :refresh-db command — introspect a specific remote database.
+
+    Only works for MSSQL (cross-database three-part names).  Sends
+    xdb:<database>: prefixed envelopes for schemas, tables, routines,
+    routine-types, and routine-sigs.
+    """
+    global _driver
+    if not args:
+        print(":refresh-db requires a database name.")
+        return
+    if _driver.dialect_name != "mssql":
+        print(":refresh-db is only supported on MSSQL.")
+        return
+    database = args[0]
+    conn = connect.get_connection()
+
+    # Schemas
+    try:
+        cursor = conn.cursor()
+        cursor.execute(_driver.sql_list_schemas_in_db(database))
+        rows = cursor.fetchall()
+        if rows:
+            envelope.introspect(f"xdb:{database}:schemas",
+                                [str(r[0]) for r in rows])
+    except Exception:
+        pass
+
+    # Tables
+    try:
+        cursor = conn.cursor()
+        cursor.execute(_driver.sql_list_tables_in_db(database))
+        rows = cursor.fetchall()
+        if rows:
+            items = []
+            for row in rows:
+                schema = str(row[0])
+                table_name = str(row[1])
+                items.append(f"{database}.{schema}.{table_name}")
+            envelope.introspect(f"xdb:{database}:tables", sorted(set(items)))
+    except Exception:
+        pass
+
+    # Routines + types + signatures
+    try:
+        cursor = conn.cursor()
+        cursor.execute(_driver.sql_list_routines_in_db(database))
+        rows = cursor.fetchall()
+        if rows:
+            items = []
+            type_pairs = []
+            for row in rows:
+                schema = str(row[0])
+                routine_name = str(row[1])
+                routine_type = str(row[2])
+                qualified = f"{database}.{schema}.{routine_name}"
+                items.append(qualified)
+                type_pairs.append([qualified, routine_type])
+            envelope.introspect(f"xdb:{database}:routines", sorted(set(items)))
+            envelope.introspect(f"xdb:{database}:routine-types", type_pairs)
+            # Signatures (best-effort)
+            try:
+                sig_cursor = conn.cursor()
+                sig_cursor.execute(
+                    _driver.sql_routine_signatures_in_db(database))
+                sig_rows = sig_cursor.fetchall()
+                if sig_rows:
+                    pairs = []
+                    for sig_row in sig_rows:
+                        schema = str(sig_row[0])
+                        rname = str(sig_row[1])
+                        sig = (str(sig_row[2])
+                               if sig_row[2] is not None else "")
+                        pairs.append(
+                            [f"{database}.{schema}.{rname}", sig])
+                    envelope.introspect(f"xdb:{database}:routine-sigs",
+                                        pairs)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # Signal that all xdb envelopes have been sent
+    envelope.introspect(f"xdb:{database}:done", [])
+
+
 def refresh(args):
     """Built-in :refresh command — silently re-run all introspection queries.
 
@@ -707,8 +799,10 @@ def refresh(args):
             for row in rows:
                 schema = str(row[0]) if len(row) > 2 else None
                 table_name = str(row[1]) if len(row) > 2 else str(row[0])
-                if schema and schema != default_schema:
+                if schema:
                     items.append(f"{schema}.{table_name}")
+                    if schema == default_schema:
+                        items.append(table_name)
                 else:
                     items.append(table_name)
             envelope.introspect("tables", sorted(set(items)))
@@ -726,8 +820,10 @@ def refresh(args):
             for row in rows:
                 schema = str(row[0]) if len(row) > 2 else None
                 routine_name = str(row[1]) if len(row) > 2 else str(row[0])
-                if schema and schema != default_schema:
+                if schema:
                     items.append(f"{schema}.{routine_name}")
+                    if schema == default_schema:
+                        items.append(routine_name)
                 else:
                     items.append(routine_name)
             envelope.introspect("routines", sorted(set(items)))
@@ -737,8 +833,11 @@ def refresh(args):
                 schema = str(row[0]) if len(row) > 2 else None
                 routine_name = str(row[1]) if len(row) > 2 else str(row[0])
                 routine_type = str(row[2]) if len(row) > 2 else "PROCEDURE"
-                if schema and schema != default_schema:
-                    type_pairs.append([f"{schema}.{routine_name}", routine_type])
+                if schema:
+                    type_pairs.append([f"{schema}.{routine_name}",
+                                       routine_type])
+                    if schema == default_schema:
+                        type_pairs.append([routine_name, routine_type])
                 else:
                     type_pairs.append([routine_name, routine_type])
             envelope.introspect("routine-types", type_pairs)
@@ -753,9 +852,8 @@ def refresh(args):
                         schema = str(sig_row[0])
                         rname = str(sig_row[1])
                         sig = str(sig_row[2]) if sig_row[2] is not None else ""
-                        if schema and schema != default_schema:
-                            pairs.append([f"{schema}.{rname}", sig])
-                        else:
+                        pairs.append([f"{schema}.{rname}", sig])
+                        if schema == default_schema:
                             pairs.append([rname, sig])
                     envelope.introspect("routine-sigs", pairs)
             except Exception:
@@ -896,4 +994,5 @@ _builtins = {
     ":pwd":        pwd,
     ":definition": definition,
     ":refresh":    refresh,
+    ":refresh-db": refresh_db,
 }

@@ -217,6 +217,76 @@ class MSSQLDriver(BaseDriver):
             WHERE s.name = ?
         """, [name])
 
+    def sql_list_schemas_in_db(self, database):
+        return f"""
+            SELECT name FROM [{database}].sys.schemas ORDER BY name
+        """
+
+    def sql_list_tables_in_db(self, database):
+        return f"""
+            SELECT s.name AS table_schema,
+                   t.name AS table_name,
+                   CASE t.type
+                       WHEN 'U' THEN 'TABLE'
+                       WHEN 'V' THEN 'VIEW'
+                       ELSE t.type
+                   END AS table_type
+            FROM [{database}].sys.objects t
+            JOIN [{database}].sys.schemas s ON t.schema_id = s.schema_id
+            WHERE t.type IN ('U', 'V')
+            ORDER BY s.name, t.name
+        """
+
+    def sql_list_routines_in_db(self, database):
+        return f"""
+            SELECT s.name AS routine_schema,
+                   o.name AS routine_name,
+                   CASE o.type
+                       WHEN 'P'  THEN 'PROCEDURE'
+                       WHEN 'FN' THEN 'FUNCTION'
+                       WHEN 'IF' THEN 'FUNCTION'
+                       WHEN 'TF' THEN 'FUNCTION'
+                   END AS routine_type
+            FROM [{database}].sys.objects o
+            JOIN [{database}].sys.schemas s ON o.schema_id = s.schema_id
+            WHERE o.type IN ('P', 'FN', 'IF', 'TF')
+            ORDER BY s.name, o.name
+        """
+
+    def sql_routine_signatures_in_db(self, database):
+        return f"""
+            SELECT s.name AS routine_schema,
+                   o.name AS routine_name,
+                   ISNULL(
+                       STUFF(
+                           (SELECT ', ' + p.name + ' '
+                                   + TYPE_NAME(p.user_type_id)
+                                   + CASE
+                                       WHEN TYPE_NAME(p.user_type_id) IN
+                                            ('varchar','nvarchar','char','nchar','binary','varbinary')
+                                       THEN '(' + CASE WHEN p.max_length = -1 THEN 'MAX'
+                                                       WHEN TYPE_NAME(p.user_type_id) IN ('nvarchar','nchar')
+                                                       THEN CAST(p.max_length/2 AS VARCHAR)
+                                                       ELSE CAST(p.max_length AS VARCHAR) END + ')'
+                                       WHEN TYPE_NAME(p.user_type_id) IN ('decimal','numeric')
+                                       THEN '(' + CAST(p.precision AS VARCHAR) + ','
+                                            + CAST(p.scale AS VARCHAR) + ')'
+                                       ELSE ''
+                                     END
+                                   + CASE WHEN p.is_output = 1 THEN ' OUTPUT' ELSE '' END
+                            FROM [{database}].sys.parameters p
+                            WHERE p.object_id = o.object_id
+                              AND p.parameter_id > 0
+                            ORDER BY p.parameter_id
+                            FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)')
+                       , 1, 2, ''),
+                   '') AS signature
+            FROM [{database}].sys.objects o
+            JOIN [{database}].sys.schemas s ON o.schema_id = s.schema_id
+            WHERE o.type IN ('P', 'FN', 'IF', 'TF')
+            ORDER BY s.name, o.name
+        """
+
     def python_type_to_sql(self, python_type):
         return _MSSQL_TYPE_MAP.get(python_type, "NVARCHAR(MAX)")
 

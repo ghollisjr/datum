@@ -123,6 +123,11 @@ Populated by the routine-sigs introspect envelope.")
   "Hash table mapping routine name to type string (\"FUNCTION\" or \"PROCEDURE\").
 Populated by the routine-types introspect envelope.")
 
+(defvar-local sql-datum--xdb-cache (make-hash-table :test #'equal)
+  "Cross-database completion cache for MSSQL.
+Hash: database name -> plist with keys :tables :schemas :routines
+:routine-types :routine-sigs :pending.")
+
 ;;; ---------------------------------------------------------------------------
 ;;; Envelope protocol
 ;;; ---------------------------------------------------------------------------
@@ -166,6 +171,12 @@ Handles partial envelope lines split across multiple filter calls."
                                       (match-string 2 line))
         (push line clean-lines)))
     (string-join (nreverse clean-lines) "\n")))
+
+(defvar sql-datum--running-timer nil
+  "Timer for auto-refreshing the running queries buffer.")
+
+(defvar sql-datum--running-sqli-buf nil
+  "The SQLi buffer used for running-queries auto-refresh.")
 
 (defun sql-datum--handle-envelope (type payload)
   "Dispatch on envelope TYPE with PAYLOAD."
@@ -271,7 +282,9 @@ When `sql-datum-open-result-file' is non-nil, also offer to open the file."
                         sql-datum--routine-types))))
           ((pred (string-prefix-p "columns:"))
            (let ((table (substring kind (length "columns:"))))
-             (puthash table items sql-datum--columns)))))
+             (puthash table items sql-datum--columns)))
+          ((pred (string-prefix-p "xdb:"))
+           (sql-datum--handle-xdb-introspect kind items))))
     (error (message "datum: failed to parse introspect payload: %s" err))))
 
 (defun sql-datum--handle-introspect-append (kind json-str)
@@ -300,14 +313,43 @@ When `sql-datum-open-result-file' is non-nil, also offer to open the file."
           ((pred (string-prefix-p "columns:"))
            (let* ((table (substring kind (length "columns:")))
                   (existing (gethash table sql-datum--columns)))
-             (puthash table (append existing items) sql-datum--columns)))))
+             (puthash table (append existing items) sql-datum--columns)))
+          ((pred (string-prefix-p "xdb:"))
+           (sql-datum--handle-xdb-introspect kind items))))
     (error (message "datum: failed to parse introspect+ payload: %s" err))))
 
-(defvar sql-datum--running-timer nil
-  "Timer for auto-refreshing the running queries buffer.")
-
-(defvar sql-datum--running-sqli-buf nil
-  "The SQLi buffer used for running-queries auto-refresh.")
+(defun sql-datum--handle-xdb-introspect (kind items)
+  "Route an xdb:<db>:<subkind> introspect envelope into `sql-datum--xdb-cache'.
+KIND is the full \"xdb:dbname:subkind\" string; ITEMS is the parsed payload."
+  (when (string-match "^xdb:\\([^:]+\\):\\(.*\\)$" kind)
+    (let* ((db (match-string 1 kind))
+           (subkind (match-string 2 kind))
+           (entry (or (gethash db sql-datum--xdb-cache)
+                      (list :pending nil))))
+      (pcase subkind
+        ("schemas"
+         (setq entry (plist-put entry :schemas items)))
+        ("tables"
+         (setq entry (plist-put entry :tables items)))
+        ("routines"
+         (setq entry (plist-put entry :routines items)))
+        ("routine-types"
+         (let ((ht (or (plist-get entry :routine-types)
+                       (make-hash-table :test #'equal))))
+           (dolist (pair items)
+             (when (and (consp pair) (>= (length pair) 2))
+               (puthash (nth 0 pair) (nth 1 pair) ht)))
+           (setq entry (plist-put entry :routine-types ht))))
+        ("routine-sigs"
+         (let ((ht (or (plist-get entry :routine-sigs)
+                       (make-hash-table :test #'equal))))
+           (dolist (pair items)
+             (when (and (consp pair) (>= (length pair) 2))
+               (puthash (nth 0 pair) (nth 1 pair) ht)))
+           (setq entry (plist-put entry :routine-sigs ht))))
+        ("done"
+         (setq entry (plist-put entry :pending nil))))
+      (puthash db entry sql-datum--xdb-cache))))
 
 (defcustom sql-datum-running-refresh-interval 5
   "Seconds between auto-refresh of the running queries buffer.
@@ -486,14 +528,17 @@ With no identifier at point, prompts for a name."
 (defun sql-datum--completion-match-p (prefix candidate)
   "Return non-nil if PREFIX matches CANDIDATE.
 Matches against the full name, or if PREFIX has no dot, also against
-the portion after the last dot (so \"Pat\" matches \"dbo.PatientDim\")."
+the portion after the last dot (so \"Pat\" matches \"dbo.PatientDim\").
+When PREFIX has a dot (e.g. \"dbo.MSr\"), also matches bare candidates
+against the part after the last dot (so \"dbo.MSr\" matches \"MSreplication\")."
   (or (string-prefix-p prefix candidate t)
       (and (not (string-match-p "\\." prefix))
            (string-match-p "\\." candidate)
            (string-prefix-p
             prefix
             (car (last (split-string candidate "\\.")))
-            t))))
+            t))
+))
 
 (defun sql-datum--make-completion-table (candidates _tables)
   "Build a completion table that also matches bare table name portions.
@@ -502,7 +547,8 @@ if the prefix matches either \"rempat.fmreport\" or \"fmreport\".
 CANDIDATES is the full list."
   (lambda (string pred action)
     (pcase action
-      ('metadata nil)
+      ('metadata
+       '(metadata (category . sql-datum-identifier)))
       ('t  ;; all-completions
        (let (result)
          (dolist (c candidates)
@@ -629,6 +675,63 @@ or nil otherwise.  Checks three cases:
          (setq name (sql-datum--identifier-at-point))
          (sql-datum--sigs-canonical-key name sigs))))))
 
+(defun sql-datum--xdb-fetch-sync (db buf xdb-cache)
+  "Send :refresh-db DB and block until the cache entry is ready.
+BUF is the SQLi process buffer, XDB-CACHE the cross-db hash.
+Waits up to 15 seconds, accepting process output while spinning."
+  (let ((proc (get-buffer-process buf)))
+    (when proc
+      (message "datum: fetching objects for %s..." db)
+      ;; Mark pending and send command from the process buffer
+      (with-current-buffer buf
+        (puthash db (list :pending t) sql-datum--xdb-cache)
+        (comint-send-string proc (format ":refresh-db %s\n" db)))
+      (let ((deadline (+ (float-time) 15)))
+        (while (and (plist-get (gethash db xdb-cache) :pending)
+                    (< (float-time) deadline))
+          (accept-process-output proc 0.1)))
+      (if (plist-get (gethash db xdb-cache) :pending)
+          (message "datum: timed out fetching %s" db)
+        (message "datum: %s ready" db)))))
+
+(defun sql-datum--xdb-completion (prefix start end buf dbs xdb-cache)
+  "Handle cross-database completion for MSSQL.
+PREFIX is the typed text, START/END delimit it.  BUF is the SQLi
+buffer.  DBS is the database list, XDB-CACHE the cross-db hash.
+Returns a completion spec or nil if PREFIX is not a known database."
+  (let* ((first-dot (string-match "\\." prefix))
+         (db-part (and first-dot (substring prefix 0 first-dot))))
+    (when (and db-part (member db-part dbs))
+      ;; Fetch synchronously if not cached yet
+      (unless (gethash db-part xdb-cache)
+        (sql-datum--xdb-fetch-sync db-part buf xdb-cache))
+      (let* ((entry (gethash db-part xdb-cache))
+             (tables   (plist-get entry :tables))
+             (routines (plist-get entry :routines))
+             (xrtypes  (plist-get entry :routine-types))
+             (xsigs    (plist-get entry :routine-sigs))
+             (candidates (append tables routines)))
+        (when candidates
+          (list start end
+                (sql-datum--make-completion-table candidates tables)
+                :exclusive t
+                :annotation-function
+                (lambda (cand)
+                  (cond ((member cand tables)   " [table]")
+                        ((member cand routines) " [routine]")
+                        (t "")))
+                :exit-function
+                (lambda (cand status)
+                  (when (and (eq status 'finished)
+                             xrtypes
+                             (equal (gethash cand xrtypes) "FUNCTION"))
+                    (insert "()")
+                    (backward-char)
+                    (when (and xsigs (gethash cand xsigs))
+                      (message "%s(%s)" cand
+                               (gethash cand xsigs)))))))))))
+
+
 (defun sql-datum-completion-at-point ()
   "Provide SQL identifier completion using datum introspection data.
 Automatically added to `completion-at-point-functions' in sql-mode
@@ -703,26 +806,40 @@ Completing a FUNCTION name auto-inserts parentheses."
                (start (save-excursion
                         (skip-chars-backward "a-zA-Z0-9_.#")
                         (point)))
-               (candidates (append tables schemas routines columns)))
-          (when candidates
-            (list start end
-                  (sql-datum--make-completion-table candidates tables)
-                  :exclusive 'no
-                  :annotation-function
-                  (lambda (cand)
-                    (cond ((member cand tables)   " [table]")
-                          ((member cand schemas)  " [schema]")
-                          ((member cand routines) " [routine]")
-                          ((member cand columns)  " [column]")
-                          (t "")))
-                  :exit-function
-                  (lambda (cand status)
-                    (when (and (eq status 'finished) rtypes
-                               (equal (gethash cand rtypes) "FUNCTION"))
-                      (insert "()")
-                      (backward-char)
-                      (when-let ((msg (sql-datum-eldoc-function)))
-                        (message "%s" msg))))))))))))
+               (prefix (buffer-substring-no-properties start end))
+               (dialect (and buf (buffer-local-value 'sql-datum--dialect buf)))
+               (dbs     (and buf (buffer-local-value 'sql-datum--databases buf)))
+               (xdb-cache (and buf (buffer-local-value 'sql-datum--xdb-cache buf)))
+               ;; Check for cross-database prefix (mssql only)
+               (xdb-result (when (and (equal dialect "mssql")
+                                      (string-match-p "\\." prefix)
+                                      dbs)
+                             (sql-datum--xdb-completion
+                              prefix start end buf dbs xdb-cache))))
+          (or xdb-result
+              (when (not xdb-result)  ; nil means not xdb — allow fallback
+                (let ((candidates (append tables schemas routines columns
+                                          (when (equal dialect "mssql") dbs))))
+                  (when candidates
+                    (list start end
+                          (sql-datum--make-completion-table candidates tables)
+                          :exclusive t
+                          :annotation-function
+                          (lambda (cand)
+                            (cond ((member cand tables)   " [table]")
+                                  ((member cand schemas)  " [schema]")
+                                  ((member cand routines) " [routine]")
+                                  ((member cand columns)  " [column]")
+                                  ((and dbs (member cand dbs)) " [database]")
+                                  (t "")))
+                          :exit-function
+                          (lambda (cand status)
+                            (when (and (eq status 'finished) rtypes
+                                       (equal (gethash cand rtypes) "FUNCTION"))
+                              (insert "()")
+                              (backward-char)
+                              (when-let ((msg (sql-datum-eldoc-function)))
+                                (message "%s" msg)))))))))))))))
 
 
 ;;; ---------------------------------------------------------------------------
@@ -1205,6 +1322,8 @@ Prompts with completion from the cached database list."
   (let ((buf (sql-find-sqli-buffer 'datum)))
     (when buf
       (with-current-buffer (get-buffer buf)
+        ;; Clear cross-database cache — context has changed
+        (clrhash sql-datum--xdb-cache)
         (letrec ((watcher
                   (lambda (output)
                     (when (string-match-p (rx bol (* nonl) ">") output)
@@ -1311,6 +1430,11 @@ Automatically ensures a live database connection first."
 ;;; ---------------------------------------------------------------------------
 ;;; Product registration
 ;;; ---------------------------------------------------------------------------
+
+;; Force basic completion style for SQL identifiers so that
+;; partial-completion/orderless don't treat "." as a word separator.
+(add-to-list 'completion-category-overrides
+             '(sql-datum-identifier (styles basic)))
 
 (unless (assoc 'datum sql-product-alist)
   (sql-add-product 'datum "Datum - ODBC Client"
