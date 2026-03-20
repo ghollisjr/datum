@@ -188,6 +188,9 @@ Handles partial envelope lines split across multiple filter calls."
 (defvar sql-datum--running-sqli-buf nil
   "The SQLi buffer used for running-queries auto-refresh.")
 
+(defvar sql-datum--running-quit-flag nil
+  "Non-nil when the user has explicitly quit the running buffer.")
+
 (defun sql-datum--handle-envelope (type payload)
   "Dispatch on envelope TYPE with PAYLOAD."
   (pcase type
@@ -225,11 +228,14 @@ Handles partial envelope lines split across multiple filter calls."
          (sql-datum--handle-introspect-append kind json))))
     ("running-text"
      (let ((text (replace-regexp-in-string "\\\\n" "\n" payload)))
-       ;; Remember which SQLi buffer sent this, for refresh later
-       (setq sql-datum--running-sqli-buf (current-buffer))
-       (sql-datum--show-running-queries text)
-       (unless sql-datum--running-timer
-         (sql-datum--running-start-timer))))
+       ;; If the user quit the buffer, ignore stale responses
+       (if sql-datum--running-quit-flag
+           (setq sql-datum--running-quit-flag nil)
+         ;; Remember which SQLi buffer sent this, for refresh later
+         (setq sql-datum--running-sqli-buf (current-buffer))
+         (sql-datum--show-running-queries text)
+         (unless sql-datum--running-timer
+           (sql-datum--running-start-timer)))))
     ("definition"
      (when (string-match "\\([^:]+\\):\\(.*\\)" payload)
        (let ((obj-name (match-string 1 payload))
@@ -374,7 +380,7 @@ TEXT is pre-formatted tabular output from the Python printer."
     (with-current-buffer buf
       (let ((inhibit-read-only t))
         (erase-buffer)
-        (insert (format "datum: Running Queries  (last refresh: %s)"
+        (insert (format "datum: Running Queries & Jobs  (last refresh: %s)"
                         (format-time-string "%H:%M:%S")))
         (if sql-datum-running-refresh-interval
             (insert (format "  [auto-refresh %ds]"
@@ -420,6 +426,7 @@ TEXT is pre-formatted tabular output from the Python printer."
   "Stop auto-refresh and close the running queries buffer."
   (interactive)
   (sql-datum--running-stop-timer)
+  (setq sql-datum--running-quit-flag t)
   (quit-window t))
 
 (defun sql-datum--send-running ()
@@ -1345,6 +1352,7 @@ With a prefix argument, prompt for a filter pattern."
 (defun sql-datum-running ()
   "List currently running queries via :running."
   (interactive)
+  (setq sql-datum--running-quit-flag nil)
   (sql-datum--send-command ":running"))
 
 (defun sql-datum-version ()

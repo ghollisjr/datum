@@ -62,6 +62,46 @@ class MSSQLDriver(BaseDriver):
             ORDER BY r.start_time
         """
 
+    @property
+    def sql_running_jobs(self):
+        return """
+            SELECT
+              j.name AS job_name,
+              ja.start_execution_date as [start],
+              CONVERT(VARCHAR(8), DATEADD(SECOND, DATEDIFF(SECOND, ja.start_execution_date, GETDATE()), 0), 108)
+                AS elapsed,
+              CONCAT(next_js.step_id, ': ', next_js.step_name) AS step,
+              CASE jh.run_status
+                  WHEN 0 THEN 'Failed'
+                  WHEN 1 THEN 'Succeeded'
+                  WHEN 4 THEN 'In Progress'
+                  ELSE 'Other'
+              END AS status,
+              CONCAT(jh.step_id, ': ', jh.step_name) AS last_completed
+            FROM msdb.dbo.sysjobactivity ja
+            JOIN msdb.dbo.sysjobs j ON ja.job_id = j.job_id
+            OUTER APPLY (
+                SELECT TOP 1 step_id, step_name, run_status
+                FROM msdb.dbo.sysjobhistory
+                WHERE job_id = ja.job_id
+                  AND step_id > 0
+                ORDER BY run_date DESC, run_time DESC
+            ) jh
+            LEFT JOIN msdb.dbo.sysjobsteps cur_js
+                ON cur_js.job_id = ja.job_id
+                AND cur_js.step_id = jh.step_id
+            LEFT JOIN msdb.dbo.sysjobsteps next_js
+                ON next_js.job_id = ja.job_id
+                AND next_js.step_id = CASE
+                    WHEN cur_js.on_success_action = 3 THEN cur_js.step_id + 1
+                    WHEN cur_js.on_success_action = 4 THEN cur_js.on_success_step_id
+                    ELSE NULL
+                END
+            WHERE ja.session_id = (SELECT MAX(session_id) FROM msdb.dbo.syssessions)
+              AND ja.start_execution_date IS NOT NULL
+              AND ja.stop_execution_date IS NULL
+        """
+
     def sql_list_databases_like(self, pattern):
         return ("SELECT name FROM sys.databases WHERE name LIKE ? ORDER BY name",
                 [pattern])
