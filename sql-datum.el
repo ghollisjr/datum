@@ -704,23 +704,47 @@ Waits up to 15 seconds, accepting process output while spinning."
           (message "datum: timed out fetching %s" db)
         (message "datum: %s ready" db)))))
 
+(defun sql-datum--member-ignore-case (elt list)
+  "Like `member' but uses case-insensitive comparison.
+Returns the tail of LIST whose car matches ELT, or nil."
+  (let ((result nil))
+    (while (and list (not result))
+      (when (string-equal-ignore-case elt (car list))
+        (setq result list))
+      (setq list (cdr list)))
+    result))
+
 (defun sql-datum--xdb-completion (prefix start end buf dbs xdb-cache)
   "Handle cross-database completion for MSSQL.
 PREFIX is the typed text, START/END delimit it.  BUF is the SQLi
 buffer.  DBS is the database list, XDB-CACHE the cross-db hash.
 Returns a completion spec or nil if PREFIX is not a known database."
   (let* ((first-dot (string-match "\\." prefix))
-         (db-part (and first-dot (substring prefix 0 first-dot))))
-    (when (and db-part (member db-part dbs))
+         (db-part (and first-dot (substring prefix 0 first-dot)))
+         ;; Use canonical (server-side) casing for the database name
+         (db-match (and db-part
+                        (car (sql-datum--member-ignore-case
+                              db-part dbs)))))
+    (when db-match
       ;; Fetch synchronously if not cached yet
-      (unless (gethash db-part xdb-cache)
-        (sql-datum--xdb-fetch-sync db-part buf xdb-cache))
-      (let* ((entry (gethash db-part xdb-cache))
+      (unless (gethash db-match xdb-cache)
+        (sql-datum--xdb-fetch-sync db-match buf xdb-cache))
+      (let* ((entry (gethash db-match xdb-cache))
              (tables   (plist-get entry :tables))
              (routines (plist-get entry :routines))
              (xrtypes  (plist-get entry :routine-types))
              (xsigs    (plist-get entry :routine-sigs))
-             (candidates (append tables routines)))
+             ;; Pre-filter: only candidates belonging to this database
+             (db-prefix (concat db-match "."))
+             (all-raw (append tables routines))
+             (candidates (let (filtered)
+                           (dolist (c all-raw)
+                             (when (string-prefix-p db-prefix c t)
+                               (push c filtered)))
+                           (nreverse filtered))))
+        (message "datum xdb-cands-debug: db=%S raw=%d filtered=%d first-5=%S"
+                 db-match (length all-raw) (length candidates)
+                 (take 5 candidates))
         (when candidates
           (list start end
                 (sql-datum--make-completion-table candidates tables)
@@ -814,7 +838,7 @@ Completing a FUNCTION name auto-inserts parentheses."
        (t
         (let* ((end (point))
                (start (save-excursion
-                        (skip-chars-backward "a-zA-Z0-9_.#")
+                        (skip-chars-backward "a-zA-Z0-9_.#\\[\\]")
                         (point)))
                (prefix (buffer-substring-no-properties start end))
                (dialect (and buf (buffer-local-value 'sql-datum--dialect buf)))
@@ -826,8 +850,14 @@ Completing a FUNCTION name auto-inserts parentheses."
                                       dbs)
                              (sql-datum--xdb-completion
                               prefix start end buf dbs xdb-cache))))
+          (message "datum xdb-path-debug: prefix=%S dialect=%S dbs=%s xdb-result=%s"
+                   prefix dialect (if dbs (format "%d dbs" (length dbs)) "nil")
+                   (if xdb-result "HIT" "nil"))
           (or xdb-result
               (when (not xdb-result)  ; nil means not xdb — allow fallback
+                (message "datum fallback-debug: tables=%d schemas=%d routines=%d columns=%d"
+                         (length tables) (length schemas)
+                         (length routines) (length columns))
                 (let ((candidates (append tables schemas routines columns
                                           (when (equal dialect "mssql") dbs))))
                   (when candidates

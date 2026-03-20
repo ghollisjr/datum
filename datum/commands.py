@@ -14,6 +14,13 @@ import os
 _config = {}
 _driver = None
 
+
+def _quote_name(name):
+    """Bracket-quote a SQL identifier if it contains dots or spaces."""
+    if '.' in name or ' ' in name:
+        return f"[{name}]"
+    return name
+
 _help_text = """
 --Available commands--
 :help                  Prints this command list.
@@ -405,12 +412,13 @@ def tables(args):
         for row in rows:
             schema = str(row[0]) if len(row) > 2 else None
             table_name = str(row[1]) if len(row) > 2 else str(row[0])
+            qname = _quote_name(table_name)
             if schema:
-                items.append(f"{schema}.{table_name}")
+                items.append(f"{schema}.{qname}")
                 if schema == default_schema:
-                    items.append(table_name)
+                    items.append(qname)
             else:
-                items.append(table_name)
+                items.append(qname)
         envelope.introspect("tables", sorted(set(items)))
     except Exception as err:
         print(f"Error running tables query: {err}")
@@ -444,12 +452,13 @@ def routines(args):
         for row in rows:
             schema = str(row[0]) if len(row) > 2 else None
             routine_name = str(row[1]) if len(row) > 2 else str(row[0])
+            qname = _quote_name(routine_name)
             if schema:
-                items.append(f"{schema}.{routine_name}")
+                items.append(f"{schema}.{qname}")
                 if schema == default_schema:
-                    items.append(routine_name)
+                    items.append(qname)
             else:
-                items.append(routine_name)
+                items.append(qname)
         envelope.introspect("routines", sorted(set(items)))
         # Send routine types (FUNCTION vs PROCEDURE) for completion behavior
         type_pairs = []
@@ -457,12 +466,13 @@ def routines(args):
             schema = str(row[0]) if len(row) > 2 else None
             routine_name = str(row[1]) if len(row) > 2 else str(row[0])
             routine_type = str(row[2]) if len(row) > 2 else "PROCEDURE"
+            qname = _quote_name(routine_name)
             if schema:
-                type_pairs.append([f"{schema}.{routine_name}", routine_type])
+                type_pairs.append([f"{schema}.{qname}", routine_type])
                 if schema == default_schema:
-                    type_pairs.append([routine_name, routine_type])
+                    type_pairs.append([qname, routine_type])
             else:
-                type_pairs.append([routine_name, routine_type])
+                type_pairs.append([qname, routine_type])
         envelope.introspect("routine-types", type_pairs)
         # Fetch routine parameter signatures for eldoc display
         try:
@@ -710,7 +720,7 @@ def refresh_db(args):
             for row in rows:
                 schema = str(row[0])
                 table_name = str(row[1])
-                items.append(f"{database}.{schema}.{table_name}")
+                items.append(f"{database}.{schema}.{_quote_name(table_name)}")
             envelope.introspect(f"xdb:{database}:tables", sorted(set(items)))
     except Exception:
         pass
@@ -727,7 +737,7 @@ def refresh_db(args):
                 schema = str(row[0])
                 routine_name = str(row[1])
                 routine_type = str(row[2])
-                qualified = f"{database}.{schema}.{routine_name}"
+                qualified = f"{database}.{schema}.{_quote_name(routine_name)}"
                 items.append(qualified)
                 type_pairs.append([qualified, routine_type])
             envelope.introspect(f"xdb:{database}:routines", sorted(set(items)))
@@ -746,7 +756,8 @@ def refresh_db(args):
                         sig = (str(sig_row[2])
                                if sig_row[2] is not None else "")
                         pairs.append(
-                            [f"{database}.{schema}.{rname}", sig])
+                            [f"{database}.{schema}.{_quote_name(rname)}",
+                             sig])
                     envelope.introspect(f"xdb:{database}:routine-sigs",
                                         pairs)
             except Exception:
@@ -799,12 +810,13 @@ def refresh(args):
             for row in rows:
                 schema = str(row[0]) if len(row) > 2 else None
                 table_name = str(row[1]) if len(row) > 2 else str(row[0])
+                qname = _quote_name(table_name)
                 if schema:
-                    items.append(f"{schema}.{table_name}")
+                    items.append(f"{schema}.{qname}")
                     if schema == default_schema:
-                        items.append(table_name)
+                        items.append(qname)
                 else:
-                    items.append(table_name)
+                    items.append(qname)
             envelope.introspect("tables", sorted(set(items)))
     except Exception:
         pass
@@ -820,12 +832,13 @@ def refresh(args):
             for row in rows:
                 schema = str(row[0]) if len(row) > 2 else None
                 routine_name = str(row[1]) if len(row) > 2 else str(row[0])
+                qname = _quote_name(routine_name)
                 if schema:
-                    items.append(f"{schema}.{routine_name}")
+                    items.append(f"{schema}.{qname}")
                     if schema == default_schema:
-                        items.append(routine_name)
+                        items.append(qname)
                 else:
-                    items.append(routine_name)
+                    items.append(qname)
             envelope.introspect("routines", sorted(set(items)))
             # Routine types (best-effort)
             type_pairs = []
@@ -833,13 +846,13 @@ def refresh(args):
                 schema = str(row[0]) if len(row) > 2 else None
                 routine_name = str(row[1]) if len(row) > 2 else str(row[0])
                 routine_type = str(row[2]) if len(row) > 2 else "PROCEDURE"
+                qname = _quote_name(routine_name)
                 if schema:
-                    type_pairs.append([f"{schema}.{routine_name}",
-                                       routine_type])
+                    type_pairs.append([f"{schema}.{qname}", routine_type])
                     if schema == default_schema:
-                        type_pairs.append([routine_name, routine_type])
+                        type_pairs.append([qname, routine_type])
                 else:
-                    type_pairs.append([routine_name, routine_type])
+                    type_pairs.append([qname, routine_type])
             envelope.introspect("routine-types", type_pairs)
             # Routine signatures (best-effort)
             try:
@@ -852,9 +865,10 @@ def refresh(args):
                         schema = str(sig_row[0])
                         rname = str(sig_row[1])
                         sig = str(sig_row[2]) if sig_row[2] is not None else ""
-                        pairs.append([f"{schema}.{rname}", sig])
+                        qrname = _quote_name(rname)
+                        pairs.append([f"{schema}.{qrname}", sig])
                         if schema == default_schema:
-                            pairs.append([rname, sig])
+                            pairs.append([qrname, sig])
                     envelope.introspect("routine-sigs", pairs)
             except Exception:
                 pass
