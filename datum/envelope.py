@@ -110,6 +110,16 @@ def running_text(text):
     _send("running-text", text.replace("\n", "\\n"))
 
 
+def definition(object_name, text):
+    """Send a definition (DDL/source) to Emacs for display.
+
+    object_name is the display name (e.g. 'dbo.my_table').
+    text is the DDL or property text.  Newlines are escaped as \\n
+    so the envelope fits on a single line.
+    """
+    _send("definition", f"{object_name}:{text.replace(chr(10), chr(92) + 'n')}")
+
+
 def dialect(name):
     """Notify Emacs of the detected or declared SQL dialect."""
     _send("dialect", name)

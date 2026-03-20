@@ -86,6 +86,68 @@ class MSSQLDriver(BaseDriver):
             ORDER BY s.name, t.name
         """, [pattern])
 
+    def sql_resolve_object_type(self, schema, name):
+        return ("""
+            SELECT CASE o.type
+                       WHEN 'U'  THEN 'TABLE'
+                       WHEN 'V'  THEN 'VIEW'
+                       WHEN 'P'  THEN 'PROCEDURE'
+                       WHEN 'FN' THEN 'FUNCTION'
+                       WHEN 'IF' THEN 'FUNCTION'
+                       WHEN 'TF' THEN 'FUNCTION'
+                   END AS object_type
+            FROM sys.objects o
+            JOIN sys.schemas s ON o.schema_id = s.schema_id
+            WHERE s.name = ?
+              AND o.name = ?
+              AND o.type IN ('U', 'V', 'P', 'FN', 'IF', 'TF')
+        """, [schema, name])
+
+    def sql_get_definition(self, schema, name, object_type):
+        if object_type == 'TABLE':
+            return ("""
+                SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE,
+                       CHARACTER_MAXIMUM_LENGTH, NUMERIC_PRECISION,
+                       NUMERIC_SCALE, COLUMN_DEFAULT
+                FROM INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_SCHEMA = ?
+                  AND TABLE_NAME   = ?
+                ORDER BY ORDINAL_POSITION
+            """, [schema, name])
+        else:
+            return ("""
+                SELECT m.definition
+                FROM sys.sql_modules m
+                JOIN sys.objects o ON m.object_id = o.object_id
+                JOIN sys.schemas s ON o.schema_id = s.schema_id
+                WHERE s.name = ?
+                  AND o.name = ?
+            """, [schema, name])
+
+    def sql_check_database(self, name):
+        return ("""
+            SELECT name,
+                   database_id,
+                   create_date,
+                   compatibility_level,
+                   collation_name,
+                   state_desc,
+                   recovery_model_desc
+            FROM sys.databases
+            WHERE name = ?
+        """, [name])
+
+    def sql_check_schema(self, name):
+        return ("""
+            SELECT s.name AS schema_name,
+                   s.schema_id,
+                   dp.name AS owner
+            FROM sys.schemas s
+            LEFT JOIN sys.database_principals dp
+                   ON s.principal_id = dp.principal_id
+            WHERE s.name = ?
+        """, [name])
+
     def python_type_to_sql(self, python_type):
         return _MSSQL_TYPE_MAP.get(python_type, "NVARCHAR(MAX)")
 

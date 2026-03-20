@@ -184,7 +184,12 @@ Handles partial envelope lines split across multiple filter calls."
        (sql-datum--show-running-queries text)
        (unless sql-datum--running-timer
          (sql-datum--running-start-timer))))
-))
+    ("definition"
+     (when (string-match "\\([^:]+\\):\\(.*\\)" payload)
+       (let ((obj-name (match-string 1 payload))
+             (text (replace-regexp-in-string "\\\\n" "\n"
+                                             (match-string 2 payload))))
+         (sql-datum--show-definition obj-name text))))))
 
 (defun sql-datum--set-dialect (name)
   "Set the buffer-local dialect to NAME and refresh the mode line."
@@ -345,6 +350,64 @@ TEXT is pre-formatted tabular output from the Python printer."
     (sql-datum--running-stop-timer)))
 
 ;;; ---------------------------------------------------------------------------
+;;; Goto Definition (M-.)
+;;; ---------------------------------------------------------------------------
+
+(defun sql-datum--identifier-at-point ()
+  "Return the SQL identifier at point, including dotted and bracket-quoted names.
+Strips bracket quoting from each part."
+  (let ((start (point))
+        (end (point))
+        beg)
+    (save-excursion
+      ;; Move backward over identifier chars, dots, and brackets
+      (skip-chars-backward "a-zA-Z0-9_.\\[\\]")
+      (setq beg (point))
+      ;; Move forward over identifier chars, dots, and brackets
+      (goto-char start)
+      (skip-chars-forward "a-zA-Z0-9_.\\[\\]")
+      (setq end (point)))
+    (when (> end beg)
+      (let ((raw (buffer-substring-no-properties beg end)))
+        ;; Strip bracket quoting from each dotted part
+        (mapconcat (lambda (part)
+                     (if (and (string-prefix-p "[" part)
+                              (string-suffix-p "]" part))
+                         (substring part 1 -1)
+                       part))
+                   (split-string raw "\\." t)
+                   ".")))))
+
+(defun sql-datum--show-definition (object-name text)
+  "Display TEXT (DDL/source) for OBJECT-NAME in a dedicated buffer."
+  (let* ((buf-name (format "*datum-def: %s*" object-name))
+         (buf (get-buffer-create buf-name))
+         (sqli (or (and (derived-mode-p 'sql-interactive-mode) (current-buffer))
+                   (let ((b (sql-find-sqli-buffer 'datum)))
+                     (and b (get-buffer b))))))
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert text))
+      (sql-mode)
+      (when sqli
+        (setq-local sql-buffer sqli))
+      (goto-char (point-min)))
+    (pop-to-buffer buf)))
+
+(defun sql-datum-goto-definition (name)
+  "Look up the DDL/source of the SQL object NAME.
+With no identifier at point, prompts for a name."
+  (interactive
+   (let ((ident (sql-datum--identifier-at-point)))
+     (list (if (and ident (not (string-empty-p ident)))
+               ident
+             (read-string "Definition of: ")))))
+  (when (or (null name) (string-empty-p name))
+    (user-error "No identifier provided"))
+  (sql-datum--send-command (format ":definition %s" name)))
+
+;;; ---------------------------------------------------------------------------
 ;;; Completion at point
 ;;; ---------------------------------------------------------------------------
 
@@ -381,11 +444,12 @@ and sql-interactive-mode buffers that use datum."
                       (t ""))))))))
 
 (defun sql-datum--sql-mode-hook ()
-  "Hook for `sql-mode' to enable datum completion in editing buffers.
+  "Hook for `sql-mode' to enable datum completion and keybindings.
 The capf function itself checks for an active datum connection and
 returns nil if none is found, so this is safe for non-datum buffers."
   (add-hook 'completion-at-point-functions
-            #'sql-datum-completion-at-point -90 t))
+            #'sql-datum-completion-at-point -90 t)
+  (local-set-key (kbd "M-.") #'sql-datum-goto-definition))
 
 (add-hook 'sql-mode-hook #'sql-datum--sql-mode-hook)
 

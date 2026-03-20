@@ -48,6 +48,9 @@ _help_text = """
 :use <database>        Switch to a different database (where supported).
 :pwd                   Show current user, server, database, and version.
 
+:definition <name>     Show DDL/source for a table, view, proc, function,
+                       database, or schema. Supports dotted names.
+
 :reconnect             Force a new connection, discarding the old one.
 :csv [path]            Legacy: export all output to CSV. No arg to disable.
 :script [path]         Read and run a SQL script file.
@@ -559,6 +562,145 @@ def _args_to_abspath(args):
     return (filename, os.path.exists(filename))
 
 
+def _synthesize_create_table(schema, name, column_rows):
+    """Build a CREATE TABLE statement from INFORMATION_SCHEMA column rows.
+
+    Each row: (column_name, data_type, is_nullable,
+               char_max_length, numeric_precision, numeric_scale, column_default)
+    """
+    lines = []
+    for row in column_rows:
+        col_name = str(row[0])
+        data_type = str(row[1]).upper()
+        is_nullable = str(row[2])
+        char_max_len = row[3]
+        num_precision = row[4]
+        num_scale = row[5]
+        col_default = row[6]
+
+        # Build type with length/precision
+        if char_max_len is not None:
+            length = str(char_max_len) if int(char_max_len) > 0 else "MAX"
+            type_str = f"{data_type}({length})"
+        elif num_precision is not None and num_scale is not None:
+            type_str = f"{data_type}({num_precision},{num_scale})"
+        else:
+            type_str = data_type
+
+        null_str = "NULL" if is_nullable == "YES" else "NOT NULL"
+        default_str = f" DEFAULT {col_default}" if col_default else ""
+        lines.append(f"    {col_name} {type_str} {null_str}{default_str}")
+
+    cols = ",\n".join(lines)
+    return f"CREATE TABLE [{schema}].[{name}] (\n{cols}\n);"
+
+
+def definition(args):
+    """Built-in :definition command — show DDL/source for a SQL object."""
+    global _driver
+    if not args:
+        print(":definition requires an object name. "
+              "Example: :definition dbo.my_table")
+        return
+
+    raw_name = args[0]
+
+    # Parse dotted name: strip brackets from each part
+    parts = []
+    for p in raw_name.split("."):
+        p = p.strip()
+        if p.startswith("[") and p.endswith("]"):
+            p = p[1:-1]
+        parts.append(p)
+
+    database = None
+    schema = None
+    name = None
+
+    if len(parts) == 3:
+        database, schema, name = parts
+    elif len(parts) == 2:
+        schema, name = parts
+    elif len(parts) == 1:
+        name = parts[0]
+    else:
+        print(f":definition — cannot parse '{raw_name}'")
+        return
+
+    try:
+        cursor = connect.get_connection().cursor()
+
+        # If no schema given, check if it's a database or schema name first
+        if schema is None:
+            # Check database
+            try:
+                sql, params = _driver.sql_check_database(name)
+                cursor.execute(sql, params)
+                row = cursor.fetchone()
+                if row:
+                    col_names = [col[0] for col in cursor.description]
+                    lines = [f"-- Database: {name}", ""]
+                    for i, col in enumerate(col_names):
+                        lines.append(f"--   {col}: {row[i]}")
+                    text = "\n".join(lines)
+                    envelope.definition(name, text)
+                    return
+            except Exception:
+                pass
+
+            # Check schema
+            try:
+                sql, params = _driver.sql_check_schema(name)
+                cursor.execute(sql, params)
+                row = cursor.fetchone()
+                if row:
+                    col_names = [col[0] for col in cursor.description]
+                    lines = [f"-- Schema: {name}", ""]
+                    for i, col in enumerate(col_names):
+                        lines.append(f"--   {col}: {row[i]}")
+                    text = "\n".join(lines)
+                    envelope.definition(name, text)
+                    return
+            except Exception:
+                pass
+
+            # Default schema
+            schema = "dbo" if _driver.dialect_name == "mssql" else "public"
+
+        # Resolve object type
+        sql, params = _driver.sql_resolve_object_type(schema, name)
+        cursor.execute(sql, params)
+        row = cursor.fetchone()
+        if not row:
+            print(f":definition — object '{raw_name}' not found")
+            return
+
+        object_type = str(row[0])
+        display_name = f"{schema}.{name}"
+
+        # Fetch definition
+        sql, params = _driver.sql_get_definition(schema, name, object_type)
+        cursor.execute(sql, params)
+
+        if object_type == "TABLE":
+            rows = cursor.fetchall()
+            if not rows:
+                print(f":definition — no columns found for {display_name}")
+                return
+            text = _synthesize_create_table(schema, name, rows)
+        else:
+            row = cursor.fetchone()
+            if not row or not row[0]:
+                print(f":definition — no source found for {display_name}")
+                return
+            text = str(row[0])
+
+        envelope.definition(display_name, text)
+
+    except Exception as err:
+        print(f":definition error: {err}")
+
+
 _builtins = {
     ":help":       help_text,
     ":rows":       rows,
@@ -582,4 +724,5 @@ _builtins = {
     ":version":    version,
     ":use":        use_database,
     ":pwd":        pwd,
+    ":definition": definition,
 }

@@ -90,6 +90,83 @@ class PostgreSQLDriver(BaseDriver):
             ORDER BY table_schema, table_name
         """, [pattern])
 
+    def sql_resolve_object_type(self, schema, name):
+        return ("""
+            SELECT CASE
+                       WHEN c.relkind = 'r' THEN 'TABLE'
+                       WHEN c.relkind = 'v' THEN 'VIEW'
+                       WHEN c.relkind = 'm' THEN 'VIEW'
+                   END AS object_type
+            FROM pg_class c
+            JOIN pg_namespace n ON c.relnamespace = n.oid
+            WHERE n.nspname = ?
+              AND c.relname = ?
+              AND c.relkind IN ('r', 'v', 'm')
+            UNION ALL
+            SELECT CASE p.prokind
+                       WHEN 'f' THEN 'FUNCTION'
+                       WHEN 'p' THEN 'PROCEDURE'
+                       WHEN 'a' THEN 'FUNCTION'
+                       WHEN 'w' THEN 'FUNCTION'
+                   END AS object_type
+            FROM pg_proc p
+            JOIN pg_namespace n ON p.pronamespace = n.oid
+            WHERE n.nspname = ?
+              AND p.proname = ?
+            LIMIT 1
+        """, [schema, name, schema, name])
+
+    def sql_get_definition(self, schema, name, object_type):
+        if object_type == 'TABLE':
+            return ("""
+                SELECT column_name, data_type, is_nullable,
+                       character_maximum_length, numeric_precision,
+                       numeric_scale, column_default
+                FROM information_schema.columns
+                WHERE table_schema = ?
+                  AND table_name   = ?
+                ORDER BY ordinal_position
+            """, [schema, name])
+        elif object_type == 'VIEW':
+            return ("""
+                SELECT pg_get_viewdef(c.oid, true) AS definition
+                FROM pg_class c
+                JOIN pg_namespace n ON c.relnamespace = n.oid
+                WHERE n.nspname = ?
+                  AND c.relname = ?
+            """, [schema, name])
+        else:
+            # FUNCTION or PROCEDURE
+            return ("""
+                SELECT pg_get_functiondef(p.oid) AS definition
+                FROM pg_proc p
+                JOIN pg_namespace n ON p.pronamespace = n.oid
+                WHERE n.nspname = ?
+                  AND p.proname = ?
+                LIMIT 1
+            """, [schema, name])
+
+    def sql_check_database(self, name):
+        return ("""
+            SELECT datname AS name,
+                   pg_encoding_to_char(encoding) AS encoding,
+                   datcollate AS collation,
+                   datctype AS ctype,
+                   pg_database_size(datname) AS size_bytes
+            FROM pg_database
+            WHERE datname = ?
+        """, [name])
+
+    def sql_check_schema(self, name):
+        return ("""
+            SELECT n.nspname AS schema_name,
+                   r.rolname AS owner,
+                   obj_description(n.oid) AS comment
+            FROM pg_namespace n
+            LEFT JOIN pg_roles r ON n.nspowner = r.oid
+            WHERE n.nspname = ?
+        """, [name])
+
     def python_type_to_sql(self, python_type):
         return _POSTGRES_TYPE_MAP.get(python_type, "TEXT")
 

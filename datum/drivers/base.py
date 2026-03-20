@@ -97,6 +97,34 @@ class BaseDriver(ABC):
             ORDER BY ORDINAL_POSITION
         """
 
+    # --- Definition lookup ---
+
+    def sql_resolve_object_type(self, schema, name):
+        """Return (sql, params) to resolve object type.
+        Expected result: single row (object_type,) where object_type is
+        TABLE, VIEW, PROCEDURE, or FUNCTION.
+        """
+        raise NotImplementedError
+
+    def sql_get_definition(self, schema, name, object_type):
+        """Return (sql, params) to get the definition/source of an object.
+        For TABLE: returns column rows (name, type, nullable, default).
+        For VIEW/PROCEDURE/FUNCTION: returns a single row (definition_text,).
+        """
+        raise NotImplementedError
+
+    def sql_check_database(self, name):
+        """Return (sql, params) to check if name is a database.
+        Returns properties rows if it exists.
+        """
+        raise NotImplementedError
+
+    def sql_check_schema(self, name):
+        """Return (sql, params) to check if name is a schema.
+        Returns properties rows if it exists.
+        """
+        raise NotImplementedError
+
     # --- Type mapping for :in imports ---
 
     def python_type_to_sql(self, python_type):
