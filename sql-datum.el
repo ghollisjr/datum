@@ -233,9 +233,10 @@ Handles partial envelope lines split across multiple filter calls."
            (setq sql-datum--running-quit-flag nil)
          ;; Remember which SQLi buffer sent this, for refresh later
          (setq sql-datum--running-sqli-buf (current-buffer))
-         (sql-datum--show-running-queries text)
-         (unless sql-datum--running-timer
-           (sql-datum--running-start-timer)))))
+         (let ((initial (not sql-datum--running-timer)))
+           (sql-datum--show-running-queries text initial)
+           (when initial
+             (sql-datum--running-start-timer))))))
     ("definition"
      (when (string-match "\\([^:]+\\):\\(.*\\)" payload)
        (let ((obj-name (match-string 1 payload))
@@ -373,9 +374,10 @@ Set to nil to disable auto-refresh."
   :type '(choice (const :tag "Disabled" nil) integer)
   :group 'SQL)
 
-(defun sql-datum--show-running-queries (text)
+(defun sql-datum--show-running-queries (text &optional display)
   "Display TEXT in a dedicated running-queries buffer.
-TEXT is pre-formatted tabular output from the Python printer."
+TEXT is pre-formatted tabular output from the Python printer.
+When DISPLAY is non-nil, pop up the buffer; otherwise just update it."
   (let ((buf (get-buffer-create "*datum-running-queries*")))
     (with-current-buffer buf
       (let ((inhibit-read-only t))
@@ -392,7 +394,8 @@ TEXT is pre-formatted tabular output from the Python printer."
         (insert "Press 'g' to refresh, 'a' to toggle auto-refresh, 'q' to quit.\n"))
       (setq truncate-lines t)
       (sql-datum--running-mode))
-    (display-buffer buf)))
+    (when display
+      (display-buffer buf))))
 
 (defvar sql-datum--running-mode-map
   (let ((map (make-sparse-keymap)))
@@ -457,8 +460,8 @@ TEXT is pre-formatted tabular output from the Python printer."
     (setq sql-datum--running-timer nil)))
 
 (defun sql-datum--running-tick ()
-  "Timer callback: refresh if the buffer is still visible, else stop."
-  (if (get-buffer-window "*datum-running-queries*" t)
+  "Timer callback: refresh the running buffer (even if not visible)."
+  (if (get-buffer "*datum-running-queries*")
       (sql-datum--send-running)
     (sql-datum--running-stop-timer)))
 
