@@ -41,6 +41,7 @@ _help_text = """
 :databases [pattern]   List databases. Filter with SQL LIKE wildcards.
 :schemas [pattern]     List schemas. Filter with SQL LIKE wildcards.
 :tables [pattern]      List tables/views. Filter with SQL LIKE wildcards.
+:routines [pattern]    List stored procedures and functions.
 :columns <table>       List columns for a table (schema.table or table).
 :running               List currently running queries.
 :user                  Show the current database user.
@@ -411,6 +412,43 @@ def tables(args):
         print(f"Error running tables query: {err}")
 
 
+def routines(args):
+    """Built-in :routines command.
+
+    The routines query returns (schema, routine_name, routine_type).  We send
+    both bare routine names and schema-qualified names as completion candidates.
+    """
+    global _driver
+    try:
+        cursor = connect.get_connection().cursor()
+        if args:
+            sql, params = _driver.sql_list_routines_like(args[0])
+            cursor.execute(sql, params)
+        else:
+            cursor.execute(_driver.sql_list_routines)
+        rows = cursor.fetchall()
+        if not rows:
+            print("(no routines found)")
+            return
+        column_names = [printer.text_formatter(col[0]) for col in cursor.description]
+        format_str, print_ready = printer.format_rows(column_names, rows)
+        print()
+        for row in print_ready:
+            print(format_str.format(*row))
+        default_schema = "dbo" if _driver.dialect_name == "mssql" else "public"
+        items = []
+        for row in rows:
+            schema = str(row[0]) if len(row) > 2 else None
+            routine_name = str(row[1]) if len(row) > 2 else str(row[0])
+            if schema and schema != default_schema:
+                items.append(f"{schema}.{routine_name}")
+            else:
+                items.append(routine_name)
+        envelope.introspect("routines", sorted(set(items)))
+    except Exception as err:
+        print(f"Error running routines query: {err}")
+
+
 def columns(args):
     """Built-in :columns command."""
     global _driver
@@ -721,6 +759,7 @@ _builtins = {
     ":databases":  databases,
     ":schemas":    schemas,
     ":tables":     tables,
+    ":routines":   routines,
     ":columns":    columns,
     ":running":    running,
     ":user":       current_user,

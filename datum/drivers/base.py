@@ -81,6 +81,18 @@ class BaseDriver(ABC):
         """Return (sql, params) for a filtered table list using LIKE."""
         raise NotImplementedError
 
+    @property
+    def sql_list_routines(self):
+        """SQL to list routines (procedures and functions).
+        Returns: [(schema, routine_name, routine_type)]
+        routine_type is 'PROCEDURE' or 'FUNCTION'
+        """
+        raise NotImplementedError
+
+    def sql_list_routines_like(self, pattern):
+        """Return (sql, params) for a filtered routine list using LIKE."""
+        raise NotImplementedError
+
     def sql_list_columns(self, schema, table):
         """SQL to list columns for a given table.
         Returns: [(column_name, data_type, is_nullable, column_default)]

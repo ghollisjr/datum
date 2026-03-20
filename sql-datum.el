@@ -95,6 +95,9 @@ Override per-call with a prefix argument to `sql-datum-import'."
 (defvar-local sql-datum--databases nil
   "List of database names populated by :databases introspection.")
 
+(defvar-local sql-datum--routines nil
+  "List of routine names populated by :routines introspection.")
+
 (defvar-local sql-datum--columns (make-hash-table :test #'equal)
   "Hash table mapping \"schema.table\" to list of column name strings.")
 
@@ -230,6 +233,8 @@ When `sql-datum-open-result-file' is non-nil, also offer to open the file."
            (setq sql-datum--schemas items))
           ("tables"
            (setq sql-datum--tables items))
+          ("routines"
+           (setq sql-datum--routines items))
           ((pred (string-prefix-p "columns:"))
            (let ((table (substring kind (length "columns:"))))
              (puthash table items sql-datum--columns)))))
@@ -246,6 +251,8 @@ When `sql-datum-open-result-file' is non-nil, also offer to open the file."
            (setq sql-datum--schemas (append sql-datum--schemas items)))
           ("tables"
            (setq sql-datum--tables (append sql-datum--tables items)))
+          ("routines"
+           (setq sql-datum--routines (append sql-datum--routines items)))
           ((pred (string-prefix-p "columns:"))
            (let* ((table (substring kind (length "columns:")))
                   (existing (gethash table sql-datum--columns)))
@@ -481,6 +488,7 @@ and sql-interactive-mode buffers that use datum."
                       (and b (get-buffer b)))))
            (tables   (and buf (buffer-local-value 'sql-datum--tables   buf)))
            (schemas  (and buf (buffer-local-value 'sql-datum--schemas  buf)))
+           (routines (and buf (buffer-local-value 'sql-datum--routines buf)))
            (col-hash (and buf (buffer-local-value 'sql-datum--columns  buf)))
            (columns  (when col-hash
                        (let (all)
@@ -492,16 +500,17 @@ and sql-interactive-mode buffers that use datum."
            (start   (save-excursion
                       (skip-chars-backward "a-zA-Z0-9_.#")
                       (point)))
-           (candidates (append tables schemas columns)))
+           (candidates (append tables schemas routines columns)))
       (when candidates
         (list start end
               (sql-datum--make-completion-table candidates tables)
               :exclusive 'no
               :annotation-function
               (lambda (cand)
-                (cond ((member cand tables)  " [table]")
-                      ((member cand schemas) " [schema]")
-                      ((member cand columns) " [column]")
+                (cond ((member cand tables)   " [table]")
+                      ((member cand schemas)  " [schema]")
+                      ((member cand routines) " [routine]")
+                      ((member cand columns)  " [column]")
                       (t ""))))))))
 
 (defun sql-datum--sql-mode-hook ()
@@ -883,6 +892,15 @@ With a prefix argument, prompt for a filter pattern."
                                (format ":schemas %s" filter)
                              ":schemas")))
 
+(defun sql-datum-routines (filter)
+  "List stored procedures and functions via :routines.
+With a prefix argument, prompt for a filter pattern."
+  (interactive (list (when current-prefix-arg
+                       (read-string "Filter routines: "))))
+  (sql-datum--send-command (if filter
+                               (format ":routines %s" filter)
+                             ":routines")))
+
 (defun sql-datum-running ()
   "List currently running queries via :running."
   (interactive)
@@ -963,6 +981,7 @@ a numeric suffix, prompting to confirm the name."
   (define-key sql-mode-map (kbd "C-c s c") #'sql-datum-columns)
   (define-key sql-mode-map (kbd "C-c s d") #'sql-datum-databases)
   (define-key sql-mode-map (kbd "C-c s s") #'sql-datum-schemas)
+  (define-key sql-mode-map (kbd "C-c s R") #'sql-datum-routines)
   (define-key sql-mode-map (kbd "C-c s r") #'sql-datum-running)
   (define-key sql-mode-map (kbd "C-c s v") #'sql-datum-version)
   (define-key sql-mode-map (kbd "C-c s u") #'sql-datum-user)

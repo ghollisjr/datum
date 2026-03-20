@@ -86,6 +86,40 @@ class MSSQLDriver(BaseDriver):
             ORDER BY s.name, t.name
         """, [pattern])
 
+    @property
+    def sql_list_routines(self):
+        return """
+            SELECT s.name AS routine_schema,
+                   o.name AS routine_name,
+                   CASE o.type
+                       WHEN 'P'  THEN 'PROCEDURE'
+                       WHEN 'FN' THEN 'FUNCTION'
+                       WHEN 'IF' THEN 'FUNCTION'
+                       WHEN 'TF' THEN 'FUNCTION'
+                   END AS routine_type
+            FROM sys.objects o
+            JOIN sys.schemas s ON o.schema_id = s.schema_id
+            WHERE o.type IN ('P', 'FN', 'IF', 'TF')
+            ORDER BY s.name, o.name
+        """
+
+    def sql_list_routines_like(self, pattern):
+        return ("""
+            SELECT s.name AS routine_schema,
+                   o.name AS routine_name,
+                   CASE o.type
+                       WHEN 'P'  THEN 'PROCEDURE'
+                       WHEN 'FN' THEN 'FUNCTION'
+                       WHEN 'IF' THEN 'FUNCTION'
+                       WHEN 'TF' THEN 'FUNCTION'
+                   END AS routine_type
+            FROM sys.objects o
+            JOIN sys.schemas s ON o.schema_id = s.schema_id
+            WHERE o.type IN ('P', 'FN', 'IF', 'TF')
+              AND o.name LIKE ?
+            ORDER BY s.name, o.name
+        """, [pattern])
+
     def sql_resolve_object_type(self, schema, name):
         return ("""
             SELECT CASE o.type

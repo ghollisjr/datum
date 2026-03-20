@@ -90,6 +90,36 @@ class PostgreSQLDriver(BaseDriver):
             ORDER BY table_schema, table_name
         """, [pattern])
 
+    @property
+    def sql_list_routines(self):
+        return """
+            SELECT n.nspname AS routine_schema,
+                   p.proname AS routine_name,
+                   CASE p.prokind
+                       WHEN 'p' THEN 'PROCEDURE'
+                       ELSE 'FUNCTION'
+                   END AS routine_type
+            FROM pg_proc p
+            JOIN pg_namespace n ON p.pronamespace = n.oid
+            WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+            ORDER BY n.nspname, p.proname
+        """
+
+    def sql_list_routines_like(self, pattern):
+        return ("""
+            SELECT n.nspname AS routine_schema,
+                   p.proname AS routine_name,
+                   CASE p.prokind
+                       WHEN 'p' THEN 'PROCEDURE'
+                       ELSE 'FUNCTION'
+                   END AS routine_type
+            FROM pg_proc p
+            JOIN pg_namespace n ON p.pronamespace = n.oid
+            WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+              AND p.proname ILIKE ?
+            ORDER BY n.nspname, p.proname
+        """, [pattern])
+
     def sql_resolve_object_type(self, schema, name):
         return ("""
             SELECT CASE
