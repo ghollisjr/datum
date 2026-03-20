@@ -1,6 +1,8 @@
 #+TITLE: Why Datum?
 #+OPTIONS: toc:2 num:nil
 
+(one day I will replace this AI slop, but for now, eat your slop)
+
 Datum is a database query tool that gets out of your way. It connects to
 anything with an ODBC driver, auto-detects the dialect, and gives you a clean
 REPL with one-keystroke access to the operations you actually use every day. If
