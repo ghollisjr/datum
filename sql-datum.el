@@ -188,8 +188,11 @@ Handles partial envelope lines split across multiple filter calls."
      (when (string-match "\\([^:]+\\):\\(.*\\)" payload)
        (let ((obj-name (match-string 1 payload))
              (text (replace-regexp-in-string "\\\\n" "\n"
-                                             (match-string 2 payload))))
-         (sql-datum--show-definition obj-name text))))))
+                                             (match-string 2 payload)))
+             (sqli-buf (current-buffer)))
+         ;; Defer to avoid disrupting comint's process filter context
+         (run-at-time 0 nil #'sql-datum--show-definition
+                      obj-name text sqli-buf))))))
 
 (defun sql-datum--set-dialect (name)
   "Set the buffer-local dialect to NAME and refresh the mode line."
@@ -378,11 +381,24 @@ Strips bracket quoting from each part."
                    (split-string raw "\\." t)
                    ".")))))
 
-(defun sql-datum--show-definition (object-name text)
-  "Display TEXT (DDL/source) for OBJECT-NAME in a dedicated buffer."
+(defvar sql-datum--definition-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map "q" #'quit-window)
+    map)
+  "Keymap active in datum definition buffers.")
+
+(define-minor-mode sql-datum--definition-mode
+  "Minor mode for datum definition buffers.
+Provides `q' to quit the window."
+  :lighter " def"
+  :keymap sql-datum--definition-mode-map)
+
+(defun sql-datum--show-definition (object-name text &optional sqli-buf)
+  "Display TEXT (DDL/source) for OBJECT-NAME in a dedicated buffer.
+SQLI-BUF, if given, is wired as the sql-buffer for send-region etc."
   (let* ((buf-name (format "*datum-def: %s*" object-name))
          (buf (get-buffer-create buf-name))
-         (sqli (or (and (derived-mode-p 'sql-interactive-mode) (current-buffer))
+         (sqli (or sqli-buf
                    (let ((b (sql-find-sqli-buffer 'datum)))
                      (and b (get-buffer b))))))
     (with-current-buffer buf
@@ -390,8 +406,10 @@ Strips bracket quoting from each part."
         (erase-buffer)
         (insert text))
       (sql-mode)
+      (sql-datum--definition-mode 1)
       (when sqli
         (setq-local sql-buffer sqli))
+      (setq buffer-read-only t)
       (goto-char (point-min)))
     (pop-to-buffer buf)))
 
