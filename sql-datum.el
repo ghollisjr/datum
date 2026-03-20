@@ -752,9 +752,6 @@ Returns a completion spec or nil if PREFIX is not a known database."
                              (when (string-prefix-p db-prefix c t)
                                (push c filtered)))
                            (nreverse filtered))))
-        (message "datum xdb-cands-debug: db=%S raw=%d filtered=%d first-5=%S"
-                 db-match (length all-raw) (length candidates)
-                 (take 5 candidates))
         (when candidates
           (list start end
                 (sql-datum--make-completion-table candidates tables)
@@ -860,14 +857,8 @@ Completing a FUNCTION name auto-inserts parentheses."
                                       dbs)
                              (sql-datum--xdb-completion
                               prefix start end buf dbs xdb-cache))))
-          (message "datum xdb-path-debug: prefix=%S dialect=%S dbs=%s xdb-result=%s"
-                   prefix dialect (if dbs (format "%d dbs" (length dbs)) "nil")
-                   (if xdb-result "HIT" "nil"))
           (or xdb-result
               (when (not xdb-result)  ; nil means not xdb — allow fallback
-                (message "datum fallback-debug: tables=%d schemas=%d routines=%d columns=%d"
-                         (length tables) (length schemas)
-                         (length routines) (length columns))
                 (let ((candidates (append tables schemas routines columns
                                           (when (equal dialect "mssql") dbs))))
                   (when candidates
