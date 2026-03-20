@@ -27,7 +27,7 @@ introspection results.
 ** Python package
 
 #+begin_src shell
-pip install git+https://github.com/sebasmonia/datum.git
+pip install git+https://github.com/ghollisjr/datum.git
 #+end_src
 
 Or for development (changes take effect immediately):
@@ -388,32 +388,20 @@ dialect-aware: they use =TOP= / =NEWID()= / =OBJECT_ID()= on MSSQL and
 | =C-c s R= | =sql-datum-routines= | List routines (=C-u= to filter with LIKE)  |
 | =C-c s v= | =sql-datum-version=  | Show server version                      |
 | =C-c s u= | =sql-datum-user=     | Show current user                        |
+| =C-c u=   | =sql-datum-use-database= | Switch to a different database         |
 
 ** Scratch buffer
 
 =sql-datum-scratch= opens (or switches to) a =*datum-scratch*= buffer in
 =sql-mode=, wired to the active datum connection.  From there you can write
-SQL and use all the datum keybindings.  Bind it globally for quick access:
+SQL and use all the datum keybindings.  With a prefix argument (=C-u=), it
+creates an additional scratch buffer with a numeric suffix.  Bind it
+globally for quick access:
 
 #+begin_src emacs-lisp
 (autoload 'sql-datum-scratch "sql-datum" nil t)
 (global-set-key (kbd "C-c q") #'sql-datum-scratch)
 #+end_src
-
-** Goto definition (=M-.=)
-
-Press =M-.= on any SQL identifier to jump to its definition:
-
-- *Tables*: column listing (name, type, nullability, defaults)
-- *Views*: the view's SQL source
-- *Functions / Procedures*: full source code
-
-Definitions open in a read-only =sql-mode= buffer.  =M-.= keeps working
-inside definition buffers, so you can drill from a view into the tables it
-references, or from a procedure into functions it calls.  =M-,= pops back
-through the xref marker stack; =q= also goes back one level.
-
-With no identifier at point, =M-.= prompts for a name.
 
 ** Completion at point
 
@@ -449,6 +437,21 @@ To make =TAB= complete when point is mid-word (and indent otherwise), add:
 (add-hook 'sql-mode-hook
           (lambda () (setq-local tab-always-indent 'complete)))
 #+end_src
+
+** Goto definition (=M-.=)
+
+Press =M-.= on any SQL identifier to jump to its definition:
+
+- *Tables*: column listing (name, type, nullability, defaults)
+- *Views*: the view's SQL source
+- *Functions / Procedures*: full source code
+
+Definitions open in a read-only =sql-mode= buffer.  =M-.= keeps working
+inside definition buffers, so you can drill from a view into the tables it
+references, or from a procedure into functions it calls.  =M-,= pops back
+through the xref marker stack; =q= also goes back one level.
+
+With no identifier at point, =M-.= prompts for a name.
 
 ** Mode line
 
