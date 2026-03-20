@@ -141,7 +141,8 @@ On MSSQL, completion extends across databases: type a database name, =TAB= to
 complete it, type =.=, =TAB= again -- Datum fetches that database's tables and
 routines on demand and caches them for the session.  Three-part names
 (=other_db.schema.table=) just work.  Schema-qualified names (=dbo.users=) also
-complete correctly alongside bare names.
+complete correctly alongside bare names.  Refreshing (=C-c s f=) updates all
+cross-database caches too, so dropped or new objects are picked up everywhere.
 
 Candidates are annotated so you can tell tables from schemas from routines
 from columns at a glance. This works with whatever completion framework you

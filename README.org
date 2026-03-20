@@ -391,7 +391,7 @@ dialect-aware: they use =TOP= / =NEWID()= / =OBJECT_ID()= on MSSQL and
 | =C-c s R= | =sql-datum-routines=     | List routines (=C-u= to filter with LIKE)                  |
 | =C-c s v= | =sql-datum-version=      | Show server version                                        |
 | =C-c s u= | =sql-datum-user=         | Show current user                                          |
-| =C-c s f= | =sql-datum-refresh=      | Refresh all introspection data                             |
+| =C-c s f= | =sql-datum-refresh=      | Refresh introspection data (including cross-db caches)     |
 | =C-c s F= | =sql-datum-toggle-auto-refresh= | Toggle periodic introspection refresh (=C-u N= for interval) |
 | =C-c u=   | =sql-datum-use-database= | Switch to a different database (reconnects for PostgreSQL) |
 | =C-c C-c= | =sql-datum-send-smart=   | Send region or paragraph (auto-connects if needed)         |
@@ -448,6 +448,14 @@ Type a database name, complete it with =TAB=, type =.=, and hit =TAB=
 again -- Datum fetches that database's tables, routines, and schemas on
 demand and offers them as completions.  The results are cached per-session
 so subsequent completions are instant.
+
+Object names containing dots are bracket-quoted automatically (e.g.
+=master.dbo.[My.Dotted.Name]=) so they display as valid three-part
+references and don't get confused with additional qualifiers.
+
+Running =C-c s f= (=sql-datum-refresh=) refreshes not only the current
+database but also re-fetches any cross-database caches built during the
+session, so dropped or newly created objects are picked up everywhere.
 
 This works because MSSQL supports cross-database queries via three-part
 catalog references.  PostgreSQL cannot query across databases without
