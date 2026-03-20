@@ -103,6 +103,41 @@ class MSSQLDriver(BaseDriver):
             ORDER BY s.name, o.name
         """
 
+    @property
+    def sql_routine_signatures(self):
+        return """
+            SELECT s.name AS routine_schema,
+                   o.name AS routine_name,
+                   ISNULL(
+                       STUFF(
+                           (SELECT ', ' + p.name + ' '
+                                   + TYPE_NAME(p.user_type_id)
+                                   + CASE
+                                       WHEN TYPE_NAME(p.user_type_id) IN
+                                            ('varchar','nvarchar','char','nchar','binary','varbinary')
+                                       THEN '(' + CASE WHEN p.max_length = -1 THEN 'MAX'
+                                                       WHEN TYPE_NAME(p.user_type_id) IN ('nvarchar','nchar')
+                                                       THEN CAST(p.max_length/2 AS VARCHAR)
+                                                       ELSE CAST(p.max_length AS VARCHAR) END + ')'
+                                       WHEN TYPE_NAME(p.user_type_id) IN ('decimal','numeric')
+                                       THEN '(' + CAST(p.precision AS VARCHAR) + ','
+                                            + CAST(p.scale AS VARCHAR) + ')'
+                                       ELSE ''
+                                     END
+                                   + CASE WHEN p.is_output = 1 THEN ' OUTPUT' ELSE '' END
+                            FROM sys.parameters p
+                            WHERE p.object_id = o.object_id
+                              AND p.parameter_id > 0
+                            ORDER BY p.parameter_id
+                            FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)')
+                       , 1, 2, ''),
+                   '') AS signature
+            FROM sys.objects o
+            JOIN sys.schemas s ON o.schema_id = s.schema_id
+            WHERE o.type IN ('P', 'FN', 'IF', 'TF')
+            ORDER BY s.name, o.name
+        """
+
     def sql_list_routines_like(self, pattern):
         return ("""
             SELECT s.name AS routine_schema,

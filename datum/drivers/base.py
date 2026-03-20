@@ -93,6 +93,14 @@ class BaseDriver(ABC):
         """Return (sql, params) for a filtered routine list using LIKE."""
         raise NotImplementedError
 
+    @property
+    def sql_routine_signatures(self):
+        """SQL to list routine parameter signatures.
+        Returns: [(schema, routine_name, signature_string)]
+        One row per routine; signature_string is a formatted parameter list.
+        """
+        raise NotImplementedError
+
     def sql_list_columns(self, schema, table):
         """SQL to list columns for a given table.
         Returns: [(column_name, data_type, is_nullable, column_default)]

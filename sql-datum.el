@@ -31,6 +31,7 @@
 
 (require 'sql)
 (require 'cl-lib)
+(require 'xref)
 
 ;;; ---------------------------------------------------------------------------
 ;;; Customization
@@ -100,6 +101,10 @@ Override per-call with a prefix argument to `sql-datum-import'."
 
 (defvar-local sql-datum--columns (make-hash-table :test #'equal)
   "Hash table mapping \"schema.table\" to list of column name strings.")
+
+(defvar-local sql-datum--routine-signatures (make-hash-table :test #'equal)
+  "Hash table mapping routine name to parameter signature string.
+Populated by the routine-sigs introspect envelope.")
 
 ;;; ---------------------------------------------------------------------------
 ;;; Envelope protocol
@@ -235,6 +240,12 @@ When `sql-datum-open-result-file' is non-nil, also offer to open the file."
            (setq sql-datum--tables items))
           ("routines"
            (setq sql-datum--routines items))
+          ("routine-sigs"
+           (clrhash sql-datum--routine-signatures)
+           (dolist (pair items)
+             (when (and (vectorp pair) (>= (length pair) 2))
+               (puthash (aref pair 0) (aref pair 1)
+                        sql-datum--routine-signatures))))
           ((pred (string-prefix-p "columns:"))
            (let ((table (substring kind (length "columns:"))))
              (puthash table items sql-datum--columns)))))
@@ -253,6 +264,11 @@ When `sql-datum-open-result-file' is non-nil, also offer to open the file."
            (setq sql-datum--tables (append sql-datum--tables items)))
           ("routines"
            (setq sql-datum--routines (append sql-datum--routines items)))
+          ("routine-sigs"
+           (dolist (pair items)
+             (when (and (vectorp pair) (>= (length pair) 2))
+               (puthash (aref pair 0) (aref pair 1)
+                        sql-datum--routine-signatures))))
           ((pred (string-prefix-p "columns:"))
            (let* ((table (substring kind (length "columns:")))
                   (existing (gethash table sql-datum--columns)))
@@ -513,13 +529,72 @@ and sql-interactive-mode buffers that use datum."
                       ((member cand columns)  " [column]")
                       (t ""))))))))
 
+;;; ---------------------------------------------------------------------------
+;;; Eldoc — routine parameter signatures
+;;; ---------------------------------------------------------------------------
+
+(defun sql-datum--lookup-signature (ident sigs)
+  "Look up IDENT in SIGS hash table, trying exact and bare-name match.
+Returns a formatted \"name(params)\" string or nil."
+  (when (and ident (not (string-empty-p ident)))
+    (let ((sig (or (gethash ident sigs)
+                   ;; Try bare name against qualified keys
+                   (and (not (string-match-p "\\." ident))
+                        (let (found)
+                          (maphash (lambda (k v)
+                                     (when (and (not found)
+                                                (string-match-p "\\." k)
+                                                (string= ident
+                                                         (car (last (split-string k "\\.")))))
+                                       (setq found v)))
+                                   sigs)
+                          found)))))
+      (when sig
+        (format "%s(%s)" ident sig)))))
+
+(defun sql-datum--eldoc-search-backward (sigs)
+  "Search backward from point for a routine name in SIGS.
+Handles cursor after whitespace following a routine name, and
+cursor inside parentheses of a function call."
+  (or
+   ;; Case 1: right after whitespace following the routine name
+   ;; e.g. \"my_proc |\" or \"my_proc  |\"
+   (save-excursion
+     (skip-chars-backward " \t")
+     (sql-datum--lookup-signature (sql-datum--identifier-at-point) sigs))
+   ;; Case 2: inside parentheses of a function call
+   ;; e.g. \"my_func(arg1, |)\"
+   (save-excursion
+     (let ((paren-pos (nth 1 (syntax-ppss))))
+       (when paren-pos
+         (goto-char paren-pos)
+         (skip-chars-backward " \t")
+         (sql-datum--lookup-signature (sql-datum--identifier-at-point) sigs))))))
+
+(defun sql-datum-eldoc-function ()
+  "Return the parameter signature for the SQL routine at or before point.
+Looks up the identifier at point in `sql-datum--routine-signatures'.
+When point is not directly on an identifier (e.g. after a space or
+inside parentheses), searches backward to find the routine name."
+  (when sql-datum-populate-completion
+    (let* ((buf (or (and (derived-mode-p 'sql-interactive-mode) (current-buffer))
+                    (let ((b (sql-find-sqli-buffer 'datum)))
+                      (and b (get-buffer b)))))
+           (sigs (and buf (buffer-local-value 'sql-datum--routine-signatures buf))))
+      (when (and sigs (> (hash-table-count sigs) 0))
+        (or (sql-datum--lookup-signature (sql-datum--identifier-at-point) sigs)
+            (sql-datum--eldoc-search-backward sigs))))))
+
 (defun sql-datum--sql-mode-hook ()
   "Hook for `sql-mode' to enable datum completion and keybindings.
 The capf function itself checks for an active datum connection and
 returns nil if none is found, so this is safe for non-datum buffers."
   (add-hook 'completion-at-point-functions
             #'sql-datum-completion-at-point -90 t)
-  (local-set-key (kbd "M-.") #'sql-datum-goto-definition))
+  (local-set-key (kbd "M-.") #'sql-datum-goto-definition)
+  (when sql-datum-populate-completion
+    (setq-local eldoc-documentation-function #'sql-datum-eldoc-function)
+    (eldoc-mode 1)))
 
 (add-hook 'sql-mode-hook #'sql-datum--sql-mode-hook)
 
@@ -578,6 +653,10 @@ for the `comint' buffer."
       ;; Prepend so it runs before comint's default filename completion.
       (add-hook 'completion-at-point-functions
                 #'sql-datum-completion-at-point -90 t)
+      ;; Enable eldoc for routine parameter signatures.
+      (when sql-datum-populate-completion
+        (setq-local eldoc-documentation-function #'sql-datum-eldoc-function)
+        (eldoc-mode 1))
       ;; Watch for the first prompt to confirm connection.
       (letrec ((watcher
                 (lambda (output)

@@ -445,6 +445,24 @@ def routines(args):
             else:
                 items.append(routine_name)
         envelope.introspect("routines", sorted(set(items)))
+        # Fetch routine parameter signatures for eldoc display
+        try:
+            sig_cursor = connect.get_connection().cursor()
+            sig_cursor.execute(_driver.sql_routine_signatures)
+            sig_rows = sig_cursor.fetchall()
+            if sig_rows:
+                pairs = []
+                for sig_row in sig_rows:
+                    schema = str(sig_row[0])
+                    rname = str(sig_row[1])
+                    sig = str(sig_row[2]) if sig_row[2] is not None else ""
+                    if schema and schema != default_schema:
+                        pairs.append([f"{schema}.{rname}", sig])
+                    else:
+                        pairs.append([rname, sig])
+                envelope.introspect("routine-sigs", pairs)
+        except Exception:
+            pass  # signature fetch is best-effort
     except Exception as err:
         print(f"Error running routines query: {err}")
 

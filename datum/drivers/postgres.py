@@ -105,6 +105,18 @@ class PostgreSQLDriver(BaseDriver):
             ORDER BY n.nspname, p.proname
         """
 
+    @property
+    def sql_routine_signatures(self):
+        return """
+            SELECT n.nspname AS routine_schema,
+                   p.proname AS routine_name,
+                   pg_get_function_identity_arguments(p.oid) AS signature
+            FROM pg_proc p
+            JOIN pg_namespace n ON p.pronamespace = n.oid
+            WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+            ORDER BY n.nspname, p.proname
+        """
+
     def sql_list_routines_like(self, pattern):
         return ("""
             SELECT n.nspname AS routine_schema,
