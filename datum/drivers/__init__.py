@@ -13,6 +13,7 @@ import pyodbc
 from .base import AnsiDriver
 from .mssql import MSSQLDriver
 from .mysql import MySQLDriver
+from .oracle import OracleDriver
 from .postgres import PostgreSQLDriver
 from .sqlite import SQLiteDriver
 
@@ -28,6 +29,7 @@ _DRIVER_HINTS = {
     "mariadb":      MySQLDriver,
     "sqlite":       SQLiteDriver,
     "sqlite3":      SQLiteDriver,
+    "oracle":       OracleDriver,
 }
 
 # Explicit user-supplied type names accepted by --sql-type / :type command.
@@ -40,6 +42,7 @@ _EXPLICIT_MAP = {
     "mariadb":    MySQLDriver,
     "sqlite":     SQLiteDriver,
     "sqlite3":    SQLiteDriver,
+    "oracle":     OracleDriver,
     "ansi":       AnsiDriver,
 }
 
@@ -79,6 +82,8 @@ def get_driver(sql_type=None, conn_string=None, dsn=None):
                 return MSSQLDriver()
             if ':3306' in server or ',3306' in server:
                 return MySQLDriver()
+            if ':1521' in server or ',1521' in server:
+                return OracleDriver()
 
     # 3. Infer from DSN name via pyodbc.dataSources()
     if dsn:

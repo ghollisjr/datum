@@ -63,6 +63,32 @@ services:
       - ./docker/initdb/mssql-init.sh:/tmp/mssql-init.sh:ro
     entrypoint: ["bash", "/tmp/mssql-init.sh"]
 
+  oracle:
+    image: gvenzl/oracle-free:23-slim-faststart
+    profiles: [oracle]
+    environment:
+      ORACLE_PASSWORD: datum_test
+      APP_USER: datum_test
+      APP_USER_PASSWORD: datum_test
+    ports:
+      - "1522:1521"
+    healthcheck:
+      test: ["CMD", "healthcheck.sh"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+
+  oracle-init:
+    image: gvenzl/oracle-free:23-slim-faststart
+    profiles: [oracle]
+    depends_on:
+      oracle:
+        condition: service_healthy
+    volumes:
+      - ./test-oracle.sql:/tmp/test-oracle.sql:ro
+      - ./docker/initdb/oracle-init.sh:/tmp/oracle-init.sh:ro
+    entrypoint: ["bash", "/tmp/oracle-init.sh"]
+
   test-runner:
     build:
       context: .
@@ -74,9 +100,12 @@ services:
         condition: service_healthy
       mssql-init:
         condition: service_completed_successfully
+      oracle-init:
+        condition: service_completed_successfully
+        required: false
     environment:
       DATUM_STRICT: "1"
-      DATUM_BACKENDS: "mysql,postgres,mssql,sqlite,ansi"
+      DATUM_BACKENDS: "${DATUM_BACKENDS:-mysql,postgres,mssql,sqlite,ansi}"
       DATUM_MYSQL_SERVER: mysql
       DATUM_MYSQL_USER: root
       DATUM_MYSQL_PASS: datum_test
@@ -91,6 +120,12 @@ services:
       DATUM_MSSQL_USER: sa
       DATUM_MSSQL_PASS: "DatumTest1!"
       DATUM_MSSQL_DB: datum_test
+      DATUM_ORACLE_SERVER: oracle
+      DATUM_ORACLE_PORT: "1521"
+      DATUM_ORACLE_USER: datum_test
+      DATUM_ORACLE_PASS: datum_test
+      DATUM_ORACLE_DB: FREEPDB1
+      DATUM_ORACLE_SERVICE: FREEPDB1
     volumes:
       - .:/app
     working_dir: /app

@@ -5,7 +5,8 @@
 
 The easiest way to run all tests is with Docker Compose.  It provisions
 MariaDB, PostgreSQL, SQL Server, and SQLite automatically — no manual
-database setup required.
+database setup required.  Oracle 23c Free can be included via the
+=oracle= Docker Compose profile.
 
 #+BEGIN_SRC sh
 # Run the full test suite (unit + integration + Emacs)
@@ -13,6 +14,10 @@ docker compose up --build --abort-on-container-exit test-runner
 
 # Clean up containers and volumes
 docker compose down -v
+
+# Include Oracle (adds ~1.5 GB download on first run):
+COMPOSE_PROFILES=oracle DATUM_BACKENDS=mysql,postgres,mssql,sqlite,ansi,oracle \
+  docker compose up --build --abort-on-container-exit test-runner
 #+END_SRC
 
 That's it.  The =test-runner= container installs datum with all ODBC
@@ -29,6 +34,8 @@ skips.
 | =postgres=    | =postgres:16=                          | 5433→5432             | PostgreSQL with =test-postgres.sql=     |
 | =mssql=       | =mcr.microsoft.com/mssql/server:2022=  | 1434→1433             | SQL Server 2022                        |
 | =mssql-init=  | (same MSSQL image)                     | —                     | One-shot: loads =test-mssql.sql=        |
+| =oracle=      | =gvenzl/oracle-free:23-slim-faststart=  | 1522→1521             | Oracle 23c Free (profile: oracle)      |
+| =oracle-init= | (same Oracle image)                    | —                     | One-shot: loads =test-oracle.sql=       |
 | =test-runner= | Custom (=docker/test-runner/Dockerfile=)| —                     | Runs the test suite                    |
 
 Host ports are offset by 1 to avoid clashing with local database servers.
@@ -39,6 +46,9 @@ Start just the databases (no test runner):
 
 #+BEGIN_SRC sh
 docker compose up -d mysql postgres mssql mssql-init
+
+# Include Oracle:
+COMPOSE_PROFILES=oracle docker compose up -d mysql postgres mssql mssql-init oracle oracle-init
 #+END_SRC
 
 Then run tests or datum locally against them:
@@ -49,6 +59,14 @@ DATUM_BACKENDS=mysql,postgres,mssql,sqlite,ansi \
 DATUM_MYSQL_SERVER=localhost DATUM_MYSQL_USER=root DATUM_MYSQL_PASS=datum_test \
 DATUM_PG_SERVER=localhost DATUM_PG_PORT=5433 DATUM_PG_USER=postgres DATUM_PG_PASS=datum_test \
 DATUM_MSSQL_SERVER=localhost DATUM_MSSQL_PORT=1434 DATUM_MSSQL_USER=sa DATUM_MSSQL_PASS='DatumTest1!' \
+  bash tests/python/test_integration.sh
+
+# Include Oracle (requires Oracle Instant Client + ODBC driver installed locally):
+DATUM_BACKENDS=mysql,postgres,mssql,sqlite,ansi,oracle \
+DATUM_MYSQL_SERVER=localhost DATUM_MYSQL_USER=root DATUM_MYSQL_PASS=datum_test \
+DATUM_PG_SERVER=localhost DATUM_PG_PORT=5433 DATUM_PG_USER=postgres DATUM_PG_PASS=datum_test \
+DATUM_MSSQL_SERVER=localhost DATUM_MSSQL_PORT=1434 DATUM_MSSQL_USER=sa DATUM_MSSQL_PASS='DatumTest1!' \
+DATUM_ORACLE_SERVER=localhost DATUM_ORACLE_PORT=1522 DATUM_ORACLE_USER=datum_test DATUM_ORACLE_PASS=datum_test \
   bash tests/python/test_integration.sh
 #+END_SRC
 
@@ -66,6 +84,10 @@ datum --sql-type postgres \
 # SQL Server
 datum --sql-type mssql \
   "Driver={ODBC Driver 18 for SQL Server};Server=localhost,1434;Database=datum_test;Uid=sa;Pwd=DatumTest1!;TrustServerCertificate=yes"
+
+# Oracle (requires COMPOSE_PROFILES=oracle)
+datum --sql-type oracle \
+  "Driver={Oracle 23 ODBC driver};DBQ=localhost:1522/FREEPDB1;Uid=datum_test;Pwd=datum_test"
 #+END_SRC
 
 * Manual database setup (without Docker)
@@ -113,6 +135,30 @@ datum --sql-type mssql \
   "Driver={ODBC Driver 18 for SQL Server};Server=localhost;Database=datum_test;Uid=sa;Pwd=YOUR_PASSWORD;TrustServerCertificate=yes"
 #+END_SRC
 
+** Oracle
+
+Requires Oracle 23c with an app user =datum_test=.  The easiest way is
+via Docker:
+
+#+BEGIN_SRC sh
+docker run -d --name oracle-test \
+  -e ORACLE_PASSWORD=datum_test \
+  -e APP_USER=datum_test -e APP_USER_PASSWORD=datum_test \
+  -p 1522:1521 gvenzl/oracle-free:23-slim-faststart
+
+# Wait for the container to be healthy (~30-60s on first start):
+until docker exec oracle-test healthcheck.sh &>/dev/null; do sleep 5; done
+
+# Load test data:
+docker exec -i oracle-test sqlplus datum_test/datum_test@localhost/FREEPDB1 < test-oracle.sql
+#+END_SRC
+
+Connect with datum:
+#+BEGIN_SRC sh
+datum --sql-type oracle \
+  "Driver={Oracle 23 ODBC driver};DBQ=localhost:1522/FREEPDB1;Uid=datum_test;Pwd=datum_test"
+#+END_SRC
+
 ** SQLite
 
 #+BEGIN_SRC sh
@@ -143,11 +189,15 @@ backends that aren't reachable.  Control which backends to test:
 # Test only PostgreSQL
 DATUM_BACKENDS=postgres bash tests/python/test_integration.sh
 
-# Test all five
+# Test the five default backends
 DATUM_BACKENDS=mysql,postgres,mssql,sqlite,ansi bash tests/python/test_integration.sh
+
+# Test all six (including Oracle)
+DATUM_BACKENDS=mysql,postgres,mssql,sqlite,ansi,oracle bash tests/python/test_integration.sh
 #+END_SRC
 
 Default order: =mysql=, =postgres=, =mssql=, =sqlite=, =ansi=.
+Oracle is not in the default set — add it explicitly via =DATUM_BACKENDS=.
 
 The =ansi= backend reuses the PostgreSQL connection but forces
 =--sql-type=ansi=, verifying that the generic INFORMATION_SCHEMA fallback
@@ -170,7 +220,7 @@ DATUM_STRICT=1 bash tests/python/test_integration.sh
 
 | Variable             | Default           | Description                            |
 |----------------------+-------------------+----------------------------------------|
-| =DATUM_BACKENDS=     | all five          | Comma-separated list of backends       |
+| =DATUM_BACKENDS=     | five (no oracle)  | Comma-separated list of backends       |
 | =DATUM_STRICT=       | =0=               | =1= makes skips fatal (used in Docker) |
 | =DATUM_USER=         | =root=            | Fallback DB user                       |
 | =DATUM_PASS=         | (empty)           | Fallback DB password                   |
@@ -207,6 +257,20 @@ DATUM_STRICT=1 bash tests/python/test_integration.sh
 | =DATUM_MSSQL_PASS=   | =DATUM_PASS=      | MSSQL password                      |
 | =DATUM_MSSQL_DB=     | =DATUM_DB=        | MSSQL database name                 |
 
+*** Oracle-specific
+
+| Variable               | Default          | Description                      |
+|------------------------+------------------+----------------------------------|
+| =DATUM_ORACLE_SERVER=  | =DATUM_SERVER=   | Oracle server                    |
+| =DATUM_ORACLE_PORT=    | =1521=           | Oracle port                      |
+| =DATUM_ORACLE_USER=    | =datum_test=     | Oracle user                      |
+| =DATUM_ORACLE_PASS=    | =DATUM_PASS=     | Oracle password                  |
+| =DATUM_ORACLE_SERVICE= | =FREEPDB1=       | Oracle service name (PDB)        |
+
+Oracle is only tested when included in =DATUM_BACKENDS= (not in the
+default set).  Use =COMPOSE_PROFILES=oracle= to start the Oracle
+container.
+
 *** SQLite-specific
 
 | Variable             | Default               | Description                     |
@@ -225,6 +289,7 @@ Each backend has its own test SQL file with the same business domain
 | =test-mysql.sql=   | MariaDB    |      8 |     3 |         3 |          4 |
 | =test-postgres.sql=| PostgreSQL |      8 |     3 |         6 |          4 |
 | =test-mssql.sql=   | SQL Server |      8 |     3 |         3 |          4 |
+| =test-oracle.sql=  | Oracle     |      8 |     3 |         3 |          4 |
 | =test-sqlite.sh=   | SQLite     |      4 |     1 |         — |          — |
 
 SQLite's schema is intentionally simpler (no stored routines, no
