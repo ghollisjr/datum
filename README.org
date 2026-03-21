@@ -21,6 +21,7 @@ standalone from any terminal.
 - Export query results to CSV, Parquet, or JSON (=:out=)
 - Import files into SQL tables with schema inference (=:in=)
 - Custom query templates with placeholders and ODBC parameters
+- Native org-mode table output: query results are valid org tables, ready to yank into any =.org= document
 - Emacs integration: completion-at-point, eldoc parameter signatures, mode line status, keybindings
 - Optional Polars backend for faster import/export (falls back to pyarrow or stdlib)
 
@@ -102,7 +103,7 @@ override it with =--sql-type=:
 datum --dsn MyDSN --sql-type postgres
 #+end_src
 
-Supported dialects: =mssql=, =postgres=, =ansi= (fallback).
+Supported dialects: =mssql=, =postgres=, =mysql=, =ansi= (fallback).
 
 * Query input
 
@@ -131,6 +132,27 @@ Use =?= as an ODBC parameter placeholder.  Datum prompts for each value:
 #+end_example
 
 Values are properly escaped by pyodbc.
+
+* Output format
+
+All query results and introspection output are formatted as org-mode
+tables:
+
+#+begin_example
+| id | name  | email             | created_at          |
+|----+-------+-------------------+---------------------|
+|  1 | Alice | alice@example.com | 2024-01-15 09:30:00 |
+|  2 | Bob   | bob@example.com   | 2024-01-16 14:22:00 |
+
+Rows printed: 2/2
+#+end_example
+
+This means every result you see -- queries, =:tables=, =:columns=,
+=:running=, everything -- is a valid org table.  You can yank results
+directly into any =.org= document and they align with =TAB=
+immediately, no reformatting needed.
+
+Use =C-c s y= to copy the last result to the kill ring, ready to paste.
 
 * Built-in commands
 
@@ -392,9 +414,22 @@ dialect-aware: they use =TOP= / =NEWID()= / =OBJECT_ID()= on MSSQL and
 | =C-c s v= | =sql-datum-version=      | Show server version                                        |
 | =C-c s u= | =sql-datum-user=         | Show current user                                          |
 | =C-c s f= | =sql-datum-refresh=      | Refresh introspection data (including cross-db caches)     |
+| =C-c s y= | =sql-datum-copy-last-result= | Copy last result to kill ring (already org table format)    |
 | =C-c s F= | =sql-datum-toggle-auto-refresh= | Toggle periodic introspection refresh (=C-u N= for interval) |
 | =C-c u=   | =sql-datum-use-database= | Switch to a different database (reconnects for PostgreSQL) |
 | =C-c C-c= | =sql-datum-send-smart=   | Send region or paragraph (auto-connects if needed)         |
+
+*** Connection management (=C-c C-x=, SLIME-style)
+
+| Key             | Command                  | Description                          |
+|-----------------+--------------------------+--------------------------------------|
+| =C-c C-x c=     | =sql-connect=            | Connect to a named connection        |
+| =C-c C-x n=     | =sql-set-sqli-buffer=    | Switch active SQLi buffer            |
+| =C-c C-x s=     | =sql-datum-scratch=      | Open scratch SQL buffer (=C-u= for additional) |
+
+The final key in each sequence also works with Control held (e.g.
+=C-c C-x C-c= is equivalent to =C-c C-x c=), following the SLIME
+convention.
 
 ** Scratch buffer
 

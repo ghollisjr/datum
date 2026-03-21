@@ -55,6 +55,23 @@ def print_cursor_results(a_cursor):
                 raise e
 
 
+def format_row(format_str, row):
+    """Format a single row, handling hline strings and data tuples."""
+    if isinstance(row, str):
+        return row
+    return format_str.format(*row)
+
+
+def print_rows(format_str, rows):
+    """Print formatted rows, handling hline strings and data tuples."""
+    fmt = format_str.format
+    for row in rows:
+        if isinstance(row, str):
+            print(row)
+        else:
+            print(fmt(*row))
+
+
 def print_resultset(a_cursor):
     """Print the results of cursor (the "current" resultset)."""
     global _config
@@ -71,10 +88,7 @@ def print_resultset(a_cursor):
                     a_cursor.description]
     format_str, print_ready = format_rows(column_names, odbc_rows)
     print()  # blank line
-    _write = print
-    fmt_format = format_str.format
-    for row in print_ready:
-        _write(fmt_format(*row))
+    print_rows(format_str, print_ready)
     # Try to determine if all rows returned were printed
     # MS SQL Server doesn't report the total rows SELECTed,
     # but for example MySql does.
@@ -118,10 +132,11 @@ def format_rows(column_names, raw_rows):
     if not raw_rows:
         for i, name in enumerate(column_names):
             column_widths[i] = len(name)
-        format_str = "|".join(f"{{{i}:{column_widths[i]}}}"
-                              for i in range(num_cols))
-        separator = ["-" * w for w in column_widths]
-        return format_str, [column_names, separator]
+        format_str = "| " + " | ".join(f"{{{i}:{column_widths[i]}}}"
+                                        for i in range(num_cols)) + " |"
+        separator = ["-" * (w + 2) for w in column_widths]
+        hline = "|" + "+".join(separator) + "|"
+        return format_str, [column_names, hline]
 
     # Build per-column formatters from the first non-None value in each column.
     # This eliminates the isinstance chain for every cell.
@@ -185,11 +200,12 @@ def format_rows(column_names, raw_rows):
         if name_len > column_widths[i]:
             column_widths[i] = name_len
 
-    format_str = "|".join(f"{{{i}:{column_widths[i]}}}"
-                          for i in range(num_cols))
-    separator = ["-" * w for w in column_widths]
+    format_str = "| " + " | ".join(f"{{{i}:{column_widths[i]}}}"
+                                    for i in range(num_cols)) + " |"
+    separator = ["-" * (w + 2) for w in column_widths]
+    hline = "|" + "+".join(separator) + "|"
     formatted.insert(0, column_names)
-    formatted.insert(1, separator)
+    formatted.insert(1, hline)
     return format_str, formatted
 
 

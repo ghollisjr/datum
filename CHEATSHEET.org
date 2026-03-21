@@ -50,6 +50,7 @@ From the scratch buffer you have full completion (=TAB=), all the =C-c s= /
 | =C-c s R= | List routines (=C-u= to filter with LIKE)  |
 | =C-c s v= | Server version                           |
 | =C-c s u= | Current user                             |
+| =C-c s y= | Copy last result to kill ring (org table)  |
 | =C-c s f= | Refresh introspection (+ cross-db caches) |
 | =C-c s F= | Toggle periodic auto-refresh (=C-u N= for interval) |
 
@@ -63,6 +64,14 @@ From the scratch buffer you have full completion (=TAB=), all the =C-c s= /
 
 =M-.= works inside definition buffers too -- drill into nested definitions
 and =M-,= your way back through the stack.
+
+** Connection Management (=C-c C-x=, SLIME-style)
+
+| Key           | Action                                     |
+|---------------+--------------------------------------------|
+| =C-c C-x c=   | Connect to a named connection              |
+| =C-c C-x n=   | Switch active SQLi buffer                  |
+| =C-c C-x s=   | Open scratch SQL buffer (=C-u= for extra)  |
 
 ** Other
 

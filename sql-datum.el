@@ -1111,7 +1111,8 @@ The buffer with name BUFFER will be used or created."
   (sql-product-interactive 'datum buffer))
 
 (defun sql-datum-copy-last-result ()
-  "Copy the last query result block from the datum buffer to the kill ring."
+  "Copy the last query result from the datum buffer to the kill ring.
+Output is already in org-mode table format."
   (interactive)
   (let ((buf (sql-find-sqli-buffer 'datum)))
     (unless buf
@@ -1119,15 +1120,22 @@ The buffer with name BUFFER will be used or created."
     (with-current-buffer buf
       (save-excursion
         (goto-char (point-max))
-        ;; Search back for the separator line (dashes) that precedes result rows
-        (if (re-search-backward "^-[-\s]+" nil t)
-            (let* ((result-start (line-beginning-position))
+        ;; Find the header line above the separator (hline)
+        (if (re-search-backward "^|[-+]+" nil t)
+            (let* ((header-start (progn (forward-line -1)
+                                        (line-beginning-position)))
                    (result-end   (progn
-                                   (re-search-forward "^Rows affected:" nil t)
-                                   (line-end-position))))
-              (kill-ring-save result-start result-end)
+                                   (re-search-forward "^Rows printed:\\|^$" nil t)
+                                   (forward-line -1)
+                                   ;; Skip trailing blank lines
+                                   (while (and (> (point) header-start)
+                                               (looking-at-p "^\\s-*$"))
+                                     (forward-line -1))
+                                   (line-end-position)))
+                   (text (buffer-substring-no-properties header-start result-end)))
+              (kill-new text)
               (message "datum: last result copied to kill ring (%d chars)"
-                       (- result-end result-start)))
+                       (length text)))
           (user-error "datum: no result found in buffer"))))))
 
 (defun sql-datum-complete-table ()
@@ -1557,6 +1565,10 @@ Without, toggle on/off using `sql-datum-refresh-interval'
   (define-key sql-mode-map (kbd "C-c C-x C-c") #'sql-connect)
   (define-key sql-mode-map (kbd "C-c C-x n")   #'sql-set-sqli-buffer)
   (define-key sql-mode-map (kbd "C-c C-x C-n") #'sql-set-sqli-buffer)
+  (define-key sql-mode-map (kbd "C-c C-x s")   #'sql-datum-scratch)
+  (define-key sql-mode-map (kbd "C-c C-x C-s") #'sql-datum-scratch)
+  ;; C-c s y: copy last result
+  (define-key sql-mode-map (kbd "C-c s y") #'sql-datum-copy-last-result)
   ;; C-c C-c: smart send (region or paragraph, auto-connect)
   (define-key sql-mode-map (kbd "C-c C-c") #'sql-datum-send-smart))
 

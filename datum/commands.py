@@ -352,8 +352,7 @@ def _run_introspect(sql, kind, label, params=None):
         column_names = [printer.text_formatter(col[0]) for col in cursor.description]
         format_str, print_ready = printer.format_rows(column_names, rows)
         print()
-        for row in print_ready:
-            print(format_str.format(*row))
+        printer.print_rows(format_str, print_ready)
         # Send envelope for Emacs-side state
         items = [str(row[0]) for row in rows]
         envelope.introspect(kind, items)
@@ -403,8 +402,7 @@ def tables(args):
         column_names = [printer.text_formatter(col[0]) for col in cursor.description]
         format_str, print_ready = printer.format_rows(column_names, rows)
         print()
-        for row in print_ready:
-            print(format_str.format(*row))
+        printer.print_rows(format_str, print_ready)
         # Send both bare and schema-qualified names for default schema,
         # schema-qualified only for other schemas.
         default_schema = _driver.default_schema
@@ -445,8 +443,7 @@ def routines(args):
         column_names = [printer.text_formatter(col[0]) for col in cursor.description]
         format_str, print_ready = printer.format_rows(column_names, rows)
         print()
-        for row in print_ready:
-            print(format_str.format(*row))
+        printer.print_rows(format_str, print_ready)
         default_schema = _driver.default_schema
         items = []
         for row in rows:
@@ -536,7 +533,7 @@ def running(args):
                             for col in cursor.description]
             format_str, print_ready = printer.format_rows(column_names,
                                                           clean_rows)
-            queries_text = "\n".join(format_str.format(*row)
+            queries_text = "\n".join(printer.format_row(format_str, row)
                                      for row in print_ready)
     except Exception as err:
         queries_text = f"(error: {err})"
@@ -554,7 +551,7 @@ def running(args):
                                 for col in cursor.description]
                 format_str, print_ready = printer.format_rows(column_names,
                                                               rows)
-                jobs_text = "\n".join(format_str.format(*row)
+                jobs_text = "\n".join(printer.format_row(format_str, row)
                                       for row in print_ready)
             else:
                 jobs_text = "(none)"
