@@ -15,8 +15,11 @@ docker compose up --build --abort-on-container-exit test-runner
 docker compose down -v
 #+END_SRC
 
-That's it.  The =test-runner= container installs datum with all four ODBC
+That's it.  The =test-runner= container installs datum with all ODBC
 drivers, waits for every database to be healthy, and runs =tests/run-all.sh=.
+Strict mode (=DATUM_STRICT=1=) is enabled in Docker, so any backend that
+fails to connect or is missing a driver causes a hard failure — no silent
+skips.
 
 ** Docker services
 
@@ -42,10 +45,10 @@ Then run tests or datum locally against them:
 
 #+BEGIN_SRC sh
 # Run integration tests against Docker databases
-DATUM_BACKENDS=mysql,postgres,mssql,sqlite \
-DATUM_SERVER=localhost DATUM_USER=root DATUM_PASS=datum_test \
-DATUM_MSSQL_SERVER=localhost DATUM_MSSQL_PORT=1434 \
-DATUM_MSSQL_USER=sa DATUM_MSSQL_PASS='DatumTest1!' \
+DATUM_BACKENDS=mysql,postgres,mssql,sqlite,ansi \
+DATUM_MYSQL_SERVER=localhost DATUM_MYSQL_USER=root DATUM_MYSQL_PASS=datum_test \
+DATUM_PG_SERVER=localhost DATUM_PG_PORT=5433 DATUM_PG_USER=postgres DATUM_PG_PASS=datum_test \
+DATUM_MSSQL_SERVER=localhost DATUM_MSSQL_PORT=1434 DATUM_MSSQL_USER=sa DATUM_MSSQL_PASS='DatumTest1!' \
   bash tests/python/test_integration.sh
 #+END_SRC
 
@@ -140,30 +143,77 @@ backends that aren't reachable.  Control which backends to test:
 # Test only PostgreSQL
 DATUM_BACKENDS=postgres bash tests/python/test_integration.sh
 
-# Test all four
-DATUM_BACKENDS=mysql,postgres,mssql,sqlite bash tests/python/test_integration.sh
+# Test all five
+DATUM_BACKENDS=mysql,postgres,mssql,sqlite,ansi bash tests/python/test_integration.sh
 #+END_SRC
 
-Default order: =mysql=, =postgres=, =mssql=, =sqlite=.
+Default order: =mysql=, =postgres=, =mssql=, =sqlite=, =ansi=.
+
+The =ansi= backend reuses the PostgreSQL connection but forces
+=--sql-type=ansi=, verifying that the generic INFORMATION_SCHEMA fallback
+driver works against a real database.
+
+** Strict mode
+
+Set =DATUM_STRICT=1= to make any skip a fatal error.  This is enabled by
+default in the Docker test runner to ensure all backends are exercised.
+Locally, strict mode is off — unavailable backends are skipped gracefully.
+
+#+BEGIN_SRC sh
+# Fail if any backend can't connect or is missing a driver
+DATUM_STRICT=1 bash tests/python/test_integration.sh
+#+END_SRC
 
 ** Environment variables
 
+*** General
+
+| Variable             | Default           | Description                            |
+|----------------------+-------------------+----------------------------------------|
+| =DATUM_BACKENDS=     | all five          | Comma-separated list of backends       |
+| =DATUM_STRICT=       | =0=               | =1= makes skips fatal (used in Docker) |
+| =DATUM_USER=         | =root=            | Fallback DB user                       |
+| =DATUM_PASS=         | (empty)           | Fallback DB password                   |
+| =DATUM_SERVER=       | =localhost=       | Fallback DB server                     |
+| =DATUM_DB=           | =datum_test=      | Fallback database name                 |
+| =DATUM_PORT=         | (driver default)  | Fallback port                          |
+
+*** MySQL-specific
+
 | Variable             | Default           | Description                         |
 |----------------------+-------------------+-------------------------------------|
-| =DATUM_BACKENDS=     | all four          | Comma-separated list of backends    |
-| =DATUM_USER=         | =root=            | Default DB user (MySQL fallback)    |
-| =DATUM_PASS=         | (empty)           | Default DB password                 |
-| =DATUM_SERVER=       | =localhost=       | Default DB server                   |
-| =DATUM_DB=           | =datum_test=      | Default database name               |
-| =DATUM_PORT=         | (driver default)  | Default port                        |
-| =DATUM_MSSQL_SERVER= | =DATUM_SERVER=    | MSSQL-specific server override      |
-| =DATUM_MSSQL_PORT=   | =1433=            | MSSQL-specific port                 |
-| =DATUM_MSSQL_USER=   | =sa=              | MSSQL-specific user                 |
-| =DATUM_MSSQL_PASS=   | =DATUM_PASS=      | MSSQL-specific password             |
-| =DATUM_PG_SERVER=    | =DATUM_SERVER=    | PostgreSQL-specific server override |
-| =DATUM_PG_PORT=      | =5432=            | PostgreSQL-specific port            |
-| =DATUM_PG_USER=      | =(whoami)=        | PostgreSQL-specific user            |
-| =DATUM_PG_PASS=      | =DATUM_PASS=      | PostgreSQL-specific password        |
+| =DATUM_MYSQL_SERVER= | =DATUM_SERVER=    | MySQL server                        |
+| =DATUM_MYSQL_USER=   | =DATUM_USER=      | MySQL user                          |
+| =DATUM_MYSQL_PASS=   | =DATUM_PASS=      | MySQL password                      |
+| =DATUM_MYSQL_DB=     | =DATUM_DB=        | MySQL database name                 |
+
+*** PostgreSQL-specific
+
+| Variable             | Default           | Description                         |
+|----------------------+-------------------+-------------------------------------|
+| =DATUM_PG_SERVER=    | =DATUM_SERVER=    | PostgreSQL server                   |
+| =DATUM_PG_PORT=      | =5432=            | PostgreSQL port                     |
+| =DATUM_PG_USER=      | =(whoami)=        | PostgreSQL user                     |
+| =DATUM_PG_PASS=      | =DATUM_PASS=      | PostgreSQL password                 |
+| =DATUM_PG_DB=        | =DATUM_DB=        | PostgreSQL database name            |
+
+*** MSSQL-specific
+
+| Variable             | Default           | Description                         |
+|----------------------+-------------------+-------------------------------------|
+| =DATUM_MSSQL_SERVER= | =DATUM_SERVER=    | MSSQL server                        |
+| =DATUM_MSSQL_PORT=   | =1433=            | MSSQL port                          |
+| =DATUM_MSSQL_USER=   | =sa=              | MSSQL user                          |
+| =DATUM_MSSQL_PASS=   | =DATUM_PASS=      | MSSQL password                      |
+| =DATUM_MSSQL_DB=     | =DATUM_DB=        | MSSQL database name                 |
+
+*** SQLite-specific
+
+| Variable             | Default               | Description                     |
+|----------------------+-----------------------+---------------------------------|
+| =DATUM_SQLITE_DB=    | =/tmp/datum_test.db=  | Path to SQLite database file    |
+
+The =ansi= backend reuses PostgreSQL's connection variables (=DATUM_PG_*=).
 
 * Test databases
 
@@ -179,6 +229,11 @@ Each backend has its own test SQL file with the same business domain
 
 SQLite's schema is intentionally simpler (no stored routines, no
 multi-schema support).
+
+The =ansi= backend has no dedicated test data file — it connects to
+PostgreSQL's =datum_test= database using the generic INFORMATION_SCHEMA
+driver, verifying that basic introspection works without dialect-specific
+SQL.
 
 * Introspection commands to verify
 
