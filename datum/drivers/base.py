@@ -20,6 +20,10 @@ class BaseDriver(ABC):
     # Human-readable name shown in the Emacs mode line.
     dialect_name = "unknown"
 
+    # Default schema for completion: tables in this schema get bare names.
+    # "dbo" for MSSQL, "public" for Postgres, None for MySQL (all bare).
+    default_schema = "public"
+
     # --- Introspection SQL ---
     # Each property returns a SQL string that can be executed directly.
     # Results are always expected as a single-column list unless noted.

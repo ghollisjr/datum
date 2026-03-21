@@ -12,6 +12,7 @@ import pyodbc
 
 from .base import AnsiDriver
 from .mssql import MSSQLDriver
+from .mysql import MySQLDriver
 from .postgres import PostgreSQLDriver
 
 # Map lower-cased substrings found in driver/DSN names to driver classes.
@@ -22,6 +23,8 @@ _DRIVER_HINTS = {
     "postgresql":   PostgreSQLDriver,
     "postgres":     PostgreSQLDriver,
     "psql":         PostgreSQLDriver,
+    "mysql":        MySQLDriver,
+    "mariadb":      MySQLDriver,
 }
 
 # Explicit user-supplied type names accepted by --sql-type / :type command.
@@ -30,6 +33,8 @@ _EXPLICIT_MAP = {
     "sqlserver":  MSSQLDriver,
     "postgres":   PostgreSQLDriver,
     "postgresql": PostgreSQLDriver,
+    "mysql":      MySQLDriver,
+    "mariadb":    MySQLDriver,
     "ansi":       AnsiDriver,
 }
 
@@ -67,6 +72,8 @@ def get_driver(sql_type=None, conn_string=None, dsn=None):
                 return PostgreSQLDriver()
             if ':1433' in server or ',1433' in server:
                 return MSSQLDriver()
+            if ':3306' in server or ',3306' in server:
+                return MySQLDriver()
 
     # 3. Infer from DSN name via pyodbc.dataSources()
     if dsn:

@@ -1,0 +1,59 @@
+#+TITLE: Datum Test Setup
+#+DESCRIPTION: Commands for setting up test databases
+
+* PostgreSQL
+
+** Load test data
+#+BEGIN_SRC sh
+psql -U postgres -f test-postgres.sql
+#+END_SRC
+
+** Connect with datum
+#+BEGIN_SRC sh
+datum --sql-type postgres "Driver={PostgreSQL};Server=localhost;Port=5432;Database=datum_test;Uid=postgres;Pwd=YOUR_PASSWORD"
+#+END_SRC
+
+* MySQL / MariaDB
+
+** Load test data
+#+BEGIN_SRC sh
+sudo mysql < test-mysql.sql
+#+END_SRC
+
+Or with password prompt:
+#+BEGIN_SRC sh
+mysql -u root -p < test-mysql.sql
+#+END_SRC
+
+** Connect with datum
+#+BEGIN_SRC sh
+datum --sql-type mysql "Driver={MySQL ODBC 8.0 Unicode Driver};Server=localhost;Port=3306;Database=datum_test;Uid=root;Pwd=YOUR_PASSWORD"
+#+END_SRC
+
+Or with MariaDB ODBC driver:
+#+BEGIN_SRC sh
+datum --sql-type mysql "Driver={MariaDB ODBC 3.1 Driver};Server=localhost;Port=3306;Database=datum_test;Uid=root;Pwd=YOUR_PASSWORD"
+#+END_SRC
+
+** Introspection commands to test
+#+BEGIN_SRC
+:databases
+:schemas
+:tables
+:routines
+:columns customers
+:columns orders
+:running
+:user
+:version
+:pwd
+:definition customers
+:definition customer_order_summary
+:definition format_currency
+:definition place_order
+:definition datum_test
+:use datum_test
+:type mysql
+:type mariadb
+:refresh
+#+END_SRC

@@ -6,6 +6,7 @@ from .base import BaseDriver
 class MSSQLDriver(BaseDriver):
 
     dialect_name = "mssql"
+    default_schema = "dbo"
 
     @property
     def sql_list_databases(self):

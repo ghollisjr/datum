@@ -323,7 +323,7 @@ def sql_type(args):
     new_type = args[0].lower()
     new_driver = get_driver(sql_type=new_type)
     if new_driver.dialect_name == "ansi" and new_type != "ansi":
-        print(f"Unknown dialect '{new_type}'. Known: mssql, postgres, ansi.")
+        print(f"Unknown dialect '{new_type}'. Known: mssql, postgres, mysql, ansi.")
         return
     _driver = new_driver
     envelope.dialect(_driver.dialect_name)
@@ -407,7 +407,7 @@ def tables(args):
             print(format_str.format(*row))
         # Send both bare and schema-qualified names for default schema,
         # schema-qualified only for other schemas.
-        default_schema = "dbo" if _driver.dialect_name == "mssql" else "public"
+        default_schema = _driver.default_schema
         items = []
         for row in rows:
             schema = str(row[0]) if len(row) > 2 else None
@@ -415,7 +415,7 @@ def tables(args):
             qname = _quote_name(table_name)
             if schema:
                 items.append(f"{schema}.{qname}")
-                if schema == default_schema:
+                if default_schema is None or schema == default_schema:
                     items.append(qname)
             else:
                 items.append(qname)
@@ -447,7 +447,7 @@ def routines(args):
         print()
         for row in print_ready:
             print(format_str.format(*row))
-        default_schema = "dbo" if _driver.dialect_name == "mssql" else "public"
+        default_schema = _driver.default_schema
         items = []
         for row in rows:
             schema = str(row[0]) if len(row) > 2 else None
@@ -455,7 +455,7 @@ def routines(args):
             qname = _quote_name(routine_name)
             if schema:
                 items.append(f"{schema}.{qname}")
-                if schema == default_schema:
+                if default_schema is None or schema == default_schema:
                     items.append(qname)
             else:
                 items.append(qname)
@@ -469,7 +469,7 @@ def routines(args):
             qname = _quote_name(routine_name)
             if schema:
                 type_pairs.append([f"{schema}.{qname}", routine_type])
-                if schema == default_schema:
+                if default_schema is None or schema == default_schema:
                     type_pairs.append([qname, routine_type])
             else:
                 type_pairs.append([qname, routine_type])
@@ -486,7 +486,7 @@ def routines(args):
                     rname = str(sig_row[1])
                     sig = str(sig_row[2]) if sig_row[2] is not None else ""
                     pairs.append([f"{schema}.{rname}", sig])
-                    if schema == default_schema:
+                    if default_schema is None or schema == default_schema:
                         pairs.append([rname, sig])
                 envelope.introspect("routine-sigs", pairs)
         except Exception:
@@ -506,7 +506,7 @@ def columns(args):
     if len(parts) > 1:
         schema = parts[0]
     else:
-        schema = "dbo" if _driver.dialect_name == "mssql" else "public"
+        schema = _driver.default_schema
     table = parts[-1]
     sql = _driver.sql_list_columns(schema, table)
     _run_introspect(sql, f"columns:{table_name}", f"columns for {table_name}")
@@ -828,7 +828,7 @@ def refresh(args):
         cursor.execute(_driver.sql_list_tables)
         rows = cursor.fetchall()
         if rows:
-            default_schema = "dbo" if _driver.dialect_name == "mssql" else "public"
+            default_schema = _driver.default_schema
             items = []
             for row in rows:
                 schema = str(row[0]) if len(row) > 2 else None
@@ -836,7 +836,7 @@ def refresh(args):
                 qname = _quote_name(table_name)
                 if schema:
                     items.append(f"{schema}.{qname}")
-                    if schema == default_schema:
+                    if default_schema is None or schema == default_schema:
                         items.append(qname)
                 else:
                     items.append(qname)
@@ -850,7 +850,7 @@ def refresh(args):
         cursor.execute(_driver.sql_list_routines)
         rows = cursor.fetchall()
         if rows:
-            default_schema = "dbo" if _driver.dialect_name == "mssql" else "public"
+            default_schema = _driver.default_schema
             items = []
             for row in rows:
                 schema = str(row[0]) if len(row) > 2 else None
@@ -858,7 +858,7 @@ def refresh(args):
                 qname = _quote_name(routine_name)
                 if schema:
                     items.append(f"{schema}.{qname}")
-                    if schema == default_schema:
+                    if default_schema is None or schema == default_schema:
                         items.append(qname)
                 else:
                     items.append(qname)
@@ -872,7 +872,7 @@ def refresh(args):
                 qname = _quote_name(routine_name)
                 if schema:
                     type_pairs.append([f"{schema}.{qname}", routine_type])
-                    if schema == default_schema:
+                    if default_schema is None or schema == default_schema:
                         type_pairs.append([qname, routine_type])
                 else:
                     type_pairs.append([qname, routine_type])
@@ -890,7 +890,7 @@ def refresh(args):
                         sig = str(sig_row[2]) if sig_row[2] is not None else ""
                         qrname = _quote_name(rname)
                         pairs.append([f"{schema}.{qrname}", sig])
-                        if schema == default_schema:
+                        if default_schema is None or schema == default_schema:
                             pairs.append([qrname, sig])
                     envelope.introspect("routine-sigs", pairs)
             except Exception:
@@ -969,7 +969,7 @@ def definition(args):
                 pass
 
             # Default schema
-            schema = "dbo" if _driver.dialect_name == "mssql" else "public"
+            schema = _driver.default_schema
 
         # Resolve object type
         sql, params = _driver.sql_resolve_object_type(schema, name)
