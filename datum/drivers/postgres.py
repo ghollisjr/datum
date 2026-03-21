@@ -18,12 +18,12 @@ class PostgreSQLDriver(BaseDriver):
     @property
     def sql_list_schemas(self):
         return """
-            SELECT schema_name
-            FROM information_schema.schemata
-            WHERE schema_name NOT IN ('pg_catalog', 'information_schema')
-              AND schema_name NOT LIKE 'pg_toast%'
-              AND schema_name NOT LIKE 'pg_temp%'
-            ORDER BY schema_name
+            SELECT nspname AS schema_name
+            FROM pg_namespace
+            WHERE nspname NOT IN ('pg_catalog', 'information_schema')
+              AND nspname NOT LIKE 'pg_toast%'
+              AND nspname NOT LIKE 'pg_temp%'
+            ORDER BY nspname
         """
 
     @property
@@ -33,12 +33,19 @@ class PostgreSQLDriver(BaseDriver):
     @property
     def sql_list_tables(self):
         return """
-            SELECT table_schema,
-                   table_name,
-                   table_type
-            FROM information_schema.tables
-            WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
-            ORDER BY table_schema, table_name
+            SELECT n.nspname AS table_schema,
+                   c.relname AS table_name,
+                   CASE c.relkind
+                       WHEN 'r' THEN 'TABLE'
+                       WHEN 'v' THEN 'VIEW'
+                       WHEN 'm' THEN 'VIEW'
+                       WHEN 'p' THEN 'TABLE'
+                   END AS table_type
+            FROM pg_class c
+            JOIN pg_namespace n ON c.relnamespace = n.oid
+            WHERE c.relkind IN ('r', 'v', 'm', 'p')
+              AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+            ORDER BY n.nspname, c.relname
         """
 
     @property
@@ -70,24 +77,31 @@ class PostgreSQLDriver(BaseDriver):
 
     def sql_list_schemas_like(self, pattern):
         return ("""
-            SELECT schema_name
-            FROM information_schema.schemata
-            WHERE schema_name NOT IN ('pg_catalog', 'information_schema')
-              AND schema_name NOT LIKE 'pg_toast%%'
-              AND schema_name NOT LIKE 'pg_temp%%'
-              AND schema_name ILIKE ?
-            ORDER BY schema_name
+            SELECT nspname AS schema_name
+            FROM pg_namespace
+            WHERE nspname NOT IN ('pg_catalog', 'information_schema')
+              AND nspname NOT LIKE 'pg_toast%%'
+              AND nspname NOT LIKE 'pg_temp%%'
+              AND nspname ILIKE ?
+            ORDER BY nspname
         """, [pattern])
 
     def sql_list_tables_like(self, pattern):
         return ("""
-            SELECT table_schema,
-                   table_name,
-                   table_type
-            FROM information_schema.tables
-            WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
-              AND table_name ILIKE ?
-            ORDER BY table_schema, table_name
+            SELECT n.nspname AS table_schema,
+                   c.relname AS table_name,
+                   CASE c.relkind
+                       WHEN 'r' THEN 'TABLE'
+                       WHEN 'v' THEN 'VIEW'
+                       WHEN 'm' THEN 'VIEW'
+                       WHEN 'p' THEN 'TABLE'
+                   END AS table_type
+            FROM pg_class c
+            JOIN pg_namespace n ON c.relnamespace = n.oid
+            WHERE c.relkind IN ('r', 'v', 'm', 'p')
+              AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+              AND c.relname ILIKE ?
+            ORDER BY n.nspname, c.relname
         """, [pattern])
 
     @property
