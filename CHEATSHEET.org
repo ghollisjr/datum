@@ -81,6 +81,20 @@ and =M-,= your way back through the stack.
 | =C-c q=   | Open scratch SQL buffer (global)                |
 | =C-c u=   | Switch database                                 |
 
+* Completion
+
+- =TAB= completes tables, schemas, routines, columns, databases
+- Column completion is *contextual*: when your statement has =FROM= /
+  =JOIN= / =UPDATE= / =INTO=, only those tables' columns are offered
+- Scans full statement (before + after point): =SELECT <TAB> FROM
+  customers= narrows to =customers= columns
+- Uncached columns are fetched silently on first =TAB=; second =TAB=
+  shows contextual results
+- Multi-table: =FROM t1 JOIN t2 WHERE <TAB>= shows columns from both
+- No =FROM= yet? Falls back to all cached columns
+- MSSQL cross-database: =otherdb.<TAB>= fetches that database's objects
+- Aliases not resolved in v1 (=FROM users u WHERE u.<TAB>= falls back)
+
 * Running Queries Buffer
 
 Shows session ID, user, status, duration, and SQL text.

@@ -512,6 +512,30 @@ is populated automatically on connect — no need to run =:tables= or
 =:routines= manually.  You can also run =:refresh= at any time to silently
 update the completion data.
 
+*** Contextual column completion
+
+Column completion is context-aware: when the current SQL statement
+references specific tables (via =FROM=, =JOIN=, =UPDATE=, or =INTO=),
+only columns from those tables are offered.  The scanner reads the full
+statement -- both before and after point -- so =SELECT c<TAB> FROM
+customers= correctly narrows to the =customers= columns.
+
+Columns are fetched lazily.  When you =TAB= and the columns for a
+referenced table haven't been cached yet, Datum silently sends a
+=:columns= request in the background.  The first =TAB= falls back to all
+known columns; the second =TAB= (once the fetch completes) shows the
+narrowed contextual set.  Tables that were previously introspected with
+=:columns= are used from cache immediately.
+
+Multi-table statements work as expected: =FROM t1 JOIN t2 ON ... WHERE
+<TAB>= offers columns from both =t1= and =t2=.  When no tables can be
+detected (e.g. typing =SELECT <TAB>= before a =FROM= clause has been
+written), completion falls back to all cached columns.
+
+*Note:* Table aliases are not resolved in the current version.
+=FROM users u WHERE u.<TAB>= will not contextually filter -- it falls back
+to all columns.
+
 *** Cross-database completion (MSSQL)
 
 On MSSQL, completion supports three-part names (=other_db.schema.table=).

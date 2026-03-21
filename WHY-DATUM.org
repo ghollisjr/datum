@@ -130,8 +130,17 @@ stored procedures, and functions are all populated automatically. No need to
 run =:tables= first; Datum introspects everything silently on connect and again
 whenever you switch databases with =:use=.
 
-Completion is context-aware:
+Completion is context-aware at every level:
 
+- *Contextual columns:* type =FROM customers WHERE c<TAB>= and only
+  =customers=' columns are offered -- not every column from every table
+  you've ever looked at.  The scanner reads the full statement, both before
+  and after point, so =SELECT c<TAB> FROM customers= works too.  Multi-table
+  queries (=FROM t1 JOIN t2 WHERE <TAB>=) offer columns from all referenced
+  tables.  Columns are fetched lazily in the background: the first =TAB=
+  triggers a silent fetch and falls back to all columns; the second =TAB=
+  shows the narrowed set.  No configuration, no manual step -- it just
+  narrows automatically when it can.
 - Type a table or view name and =TAB= completes it
 - Type a function name and =TAB= completes it *and* inserts parentheses, with
   the cursor between them and eldoc showing the signature in the minibuffer
@@ -242,6 +251,15 @@ datum: scratch buffer ready
 
 ;; TAB already knows every table, schema, and routine
 SELECT * FROM us TAB  →  SELECT * FROM users
+
+;; Column completion narrows to the tables in your statement
+SELECT * FROM users WHERE em TAB  →  email
+;;   Only users' columns appear -- not every column from every table.
+;;   Works forward too:
+SELECT na TAB FROM users  →  name
+;;   Multi-table:
+SELECT * FROM users JOIN orders ON users.id = orders.user_id WHERE st TAB
+;;   → offers columns from both users AND orders
 
 ;; Peek at a table -- output is a valid org-mode table
 C-c t t  →  users  (prompted with completion)
