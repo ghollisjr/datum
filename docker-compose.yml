@@ -76,7 +76,7 @@ services:
         condition: service_completed_successfully
     environment:
       DATUM_STRICT: "1"
-      DATUM_BACKENDS: "mysql,postgres,mssql,sqlite"
+      DATUM_BACKENDS: "mysql,postgres,mssql,sqlite,ansi"
       DATUM_MYSQL_SERVER: mysql
       DATUM_MYSQL_USER: root
       DATUM_MYSQL_PASS: datum_test
