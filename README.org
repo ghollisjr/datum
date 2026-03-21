@@ -103,7 +103,7 @@ override it with =--sql-type=:
 datum --dsn MyDSN --sql-type postgres
 #+end_src
 
-Supported dialects: =mssql=, =postgres=, =mysql=, =ansi= (fallback).
+Supported dialects: =mssql=, =postgres=, =mysql=, =sqlite=, =oracle=, =ansi= (fallback).
 
 * Query input
 
@@ -516,9 +516,11 @@ update the completion data.
 
 On MSSQL, completion supports three-part names (=other_db.schema.table=).
 Type a database name, complete it with =TAB=, type =.=, and hit =TAB=
-again -- Datum fetches that database's tables, routines, and schemas on
-demand and offers them as completions.  The results are cached per-session
-so subsequent completions are instant.
+again -- Datum fetches that database's tables, routines, and schemas
+asynchronously on demand.  The first =TAB= after a new database prefix
+triggers a background fetch; press =TAB= again once the fetch completes
+to see completions.  Results are cached per-session so subsequent
+completions are instant.
 
 Object names containing dots are bracket-quoted automatically (e.g.
 =master.dbo.[My.Dotted.Name]=) so they display as valid three-part
@@ -636,7 +638,7 @@ acted on silently.
 | =info=        | message              | Status message in minibuffer      |
 | =warn=        | message              | Warning in minibuffer             |
 | =error=       | message              | Error in minibuffer               |
-| =dialect=     | mssql/postgres/ansi  | Set SQL dialect                   |
+| =dialect=     | mssql/postgres/mysql/sqlite/oracle/ansi | Set SQL dialect                   |
 | =meta=        | key:value            | Metadata (server, database, etc.) |
 | =result-file=  | path:format          | Exported file notification        |
 | =definition=   | name:source-text     | DDL/source for goto-definition    |

@@ -204,7 +204,7 @@ def _export_arrow(path, cursor, fmt):
     if fmt == "parquet":
         pq.write_table(table, path)
     elif fmt == "json":
-        # Write newline-delimited JSON without requiring pandas
+        # Write newline-delimited JSON
         with open(path, 'w', encoding='utf-8') as f:
             for batch in batches:
                 for i in range(batch.num_rows):

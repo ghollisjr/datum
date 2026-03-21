@@ -106,20 +106,20 @@ class BaseDriver(ABC):
         raise NotImplementedError
 
     def sql_list_columns(self, schema, table):
-        """SQL to list columns for a given table.
+        """Return (sql, params) to list columns for a given table.
         Returns: [(column_name, data_type, is_nullable, column_default)]
         Default implementation uses INFORMATION_SCHEMA, works on most platforms.
         """
-        return f"""
+        return ("""
             SELECT COLUMN_NAME,
                    DATA_TYPE,
                    IS_NULLABLE,
                    COLUMN_DEFAULT
             FROM INFORMATION_SCHEMA.COLUMNS
-            WHERE TABLE_SCHEMA = '{schema}'
-              AND TABLE_NAME   = '{table}'
+            WHERE TABLE_SCHEMA = ?
+              AND TABLE_NAME   = ?
             ORDER BY ORDINAL_POSITION
-        """
+        """, [schema, table])
 
     # --- Definition lookup ---
 

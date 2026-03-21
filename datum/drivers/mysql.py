@@ -139,26 +139,26 @@ class MySQLDriver(BaseDriver):
 
     def sql_list_columns(self, schema, table):
         if schema is None:
-            return f"""
+            return ("""
                 SELECT COLUMN_NAME,
                        DATA_TYPE,
                        IS_NULLABLE,
                        COLUMN_DEFAULT
                 FROM information_schema.COLUMNS
                 WHERE TABLE_SCHEMA = DATABASE()
-                  AND TABLE_NAME   = '{table}'
+                  AND TABLE_NAME   = ?
                 ORDER BY ORDINAL_POSITION
-            """
-        return f"""
+            """, [table])
+        return ("""
             SELECT COLUMN_NAME,
                    DATA_TYPE,
                    IS_NULLABLE,
                    COLUMN_DEFAULT
             FROM information_schema.COLUMNS
-            WHERE TABLE_SCHEMA = '{schema}'
-              AND TABLE_NAME   = '{table}'
+            WHERE TABLE_SCHEMA = ?
+              AND TABLE_NAME   = ?
             ORDER BY ORDINAL_POSITION
-        """
+        """, [schema, table])
 
     def sql_resolve_object_type(self, schema, name):
         schema_clause = "TABLE_SCHEMA = DATABASE()" if schema is None else "TABLE_SCHEMA = ?"

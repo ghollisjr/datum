@@ -1,10 +1,5 @@
 #+TITLE: Datum TODO
 
-* TODO Add MySQL / MariaDB driver
-Most widely used open-source RDBMS. Good ODBC driver support.
-Introspection via information_schema works well on MySQL (unlike PostgreSQL).
-Dialect differences: backtick quoting, LIMIT syntax, SHOW commands.
-
 * TODO Scheduled job support for MySQL/MariaDB
 MySQL/MariaDB has no built-in job agent like SQL Server Agent, but does
 have the Event Scheduler (=CREATE EVENT=).  Add support for listing and
@@ -33,16 +28,6 @@ and list jobs accordingly.  If neither is present, skip gracefully.
 - Detect pgAgent: check for =pgagent= schema
 - Could be a new =:jobs= or =:events= command
 - Show job name, schedule, last run, status
-
-* TODO Add Oracle driver
-Large enterprise demand. Significant dialect differences: PL/SQL,
-DUAL table, ROWNUM/FETCH FIRST, no LIMIT, VARCHAR2, NVL vs COALESCE.
-Introspection via ALL_TABLES, ALL_OBJECTS, ALL_SOURCE, etc.
-
-* TODO Add SQLite driver
-Already works through ODBC but a dedicated driver would give proper
-introspection using sqlite_master and PRAGMA statements instead of
-information_schema (which SQLite doesn't support).
 
 * TODO Neovim / Vim plugin
 The Python process and envelope protocol are editor-agnostic.

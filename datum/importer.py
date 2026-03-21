@@ -64,7 +64,7 @@ def run(path, table_name, mode, connection, driver, batch_size=1000):
     # Check table existence
     table_exists = _table_exists(cursor, table_name)
 
-    if table_exists:
+    if table_exists is not False:
         if mode is None:
             envelope.error(f":in - table '{table_name}' already exists. "
                            f"Use :insert to append or :replace to recreate.")
@@ -327,7 +327,11 @@ def _arrow_type_str(arrow_type):
     # Timestamp and time types need string matching
     s = str(arrow_type)
     if s.startswith("timestamp"):
-        return s.replace("timestamp[", "timestamp[")  # keep as-is, matches map keys
+        # Strip timezone suffix: "timestamp[us, tz=UTC]" → "timestamp[us]"
+        base = s.split(",")[0]
+        if not base.endswith("]"):
+            base += "]"
+        return base
     if s.startswith("time32") or s.startswith("time64"):
         return s
     if s.startswith("decimal128"):
@@ -364,5 +368,7 @@ def _table_exists(cursor, table_name):
                 WHERE TABLE_NAME = ?
             """, table)
         return cursor.fetchone() is not None
-    except Exception:
-        return False
+    except Exception as exc:
+        import logging
+        logging.getLogger("datum").warning("_table_exists check failed: %s", exc)
+        return None

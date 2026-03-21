@@ -505,8 +505,8 @@ def columns(args):
     else:
         schema = _driver.default_schema
     table = parts[-1]
-    sql = _driver.sql_list_columns(schema, table)
-    _run_introspect(sql, f"columns:{table_name}", f"columns for {table_name}")
+    sql, params = _driver.sql_list_columns(schema, table)
+    _run_introspect(sql, f"columns:{table_name}", f"columns for {table_name}", params=params)
 
 
 def running(args):

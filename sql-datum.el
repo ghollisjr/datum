@@ -212,6 +212,8 @@ Handles partial envelope lines split across multiple filter calls."
          (puthash key val sql-datum--meta)
          (sql-datum--update-mode-line))))
     ("result-file"
+     ;; Greedy .* captures path (may contain colons, e.g. C:\path),
+     ;; [^:]+ captures the format suffix after the last colon.
      (when (string-match "\\(.*\\):\\([^:]+\\)$" payload)
        (let ((path (match-string 1 payload))
              (fmt  (match-string 2 payload)))
@@ -238,6 +240,8 @@ Handles partial envelope lines split across multiple filter calls."
            (when initial
              (sql-datum--running-start-timer))))))
     ("definition"
+     ;; [^:]+ captures simple object name (no colons), .* captures
+     ;; the definition body which may contain colons.
      (when (string-match "\\([^:]+\\):\\(.*\\)" payload)
        (let ((obj-name (match-string 1 payload))
              (text (replace-regexp-in-string "\\\\n" "\n"
@@ -704,24 +708,23 @@ parens (CALL proc(args)), unlike MSSQL which uses EXEC proc @p=val."
         (and (equal rtype "PROCEDURE")
              (equal dialect "postgres")))))
 
-(defun sql-datum--xdb-fetch-sync (db buf xdb-cache)
-  "Send :refresh-db DB and block until the cache entry is ready.
-BUF is the SQLi process buffer, XDB-CACHE the cross-db hash.
-Waits up to 15 seconds, accepting process output while spinning."
+(defun sql-datum--xdb-fetch-async (db buf xdb-cache callback)
+  "Send :refresh-db DB asynchronously.  Call CALLBACK when cache entry is ready.
+BUF is the SQLi process buffer, XDB-CACHE the cross-db hash."
   (let ((proc (get-buffer-process buf)))
     (when proc
       (message "datum: fetching objects for %s..." db)
-      ;; Mark pending and send command from the process buffer
       (with-current-buffer buf
         (puthash db (list :pending t) sql-datum--xdb-cache)
         (comint-send-string proc (format ":refresh-db %s\n" db)))
-      (let ((deadline (+ (float-time) 15)))
-        (while (and (plist-get (gethash db xdb-cache) :pending)
-                    (< (float-time) deadline))
-          (accept-process-output proc 0.1)))
-      (if (plist-get (gethash db xdb-cache) :pending)
-          (message "datum: timed out fetching %s" db)
-        (message "datum: %s ready" db)))))
+      (letrec ((watcher
+                (lambda (_output)
+                  (unless (plist-get (gethash db xdb-cache) :pending)
+                    (remove-hook 'comint-output-filter-functions watcher t)
+                    (message "datum: %s ready" db)
+                    (when callback (funcall callback))))))
+        (with-current-buffer buf
+          (add-hook 'comint-output-filter-functions watcher nil t))))))
 
 (defun sql-datum--member-ignore-case (elt list)
   "Like `member' but uses case-insensitive comparison.
@@ -745,9 +748,9 @@ Returns a completion spec or nil if PREFIX is not a known database."
                         (car (sql-datum--member-ignore-case
                               db-part dbs)))))
     (when db-match
-      ;; Fetch synchronously if not cached yet
+      ;; Fetch asynchronously if not cached yet; return nil this time
       (unless (gethash db-match xdb-cache)
-        (sql-datum--xdb-fetch-sync db-match buf xdb-cache))
+        (sql-datum--xdb-fetch-async db-match buf xdb-cache nil))
       (let* ((entry (gethash db-match xdb-cache))
              (tables   (plist-get entry :tables))
              (routines (plist-get entry :routines))
@@ -985,20 +988,20 @@ for the `comint' buffer."
                               (unless (string-empty-p sql-database)
                                 (list "--database" sql-database))
                               (sql-datum--comint-username)))
-          (pass (sql-datum--comint-get-password)))
+          (password (sql-datum--comint-get-password)))
       (unless (and sql-connection parameters)
         (let ((conn-pair (sql-datum--prompt-connection)))
           (setf parameters (car conn-pair))
-          (setf pass (cdr conn-pair))))
-      (unless (or (null pass) (string-empty-p pass))
+          (setf password (cdr conn-pair))))
+      (unless (or (null password) (string-empty-p password))
         (setf parameters
               (append parameters
                       (if sql-datum-password-variable
                           (progn
-                            (setenv sql-datum-password-variable pass)
+                            (setenv sql-datum-password-variable password)
                             (list "--pass"
                                   (format "ENV=%s" sql-datum-password-variable)))
-                        (list "--pass" pass)))))
+                        (list "--pass" password)))))
       (sql-comint product parameters buf-name)
       (when sql-datum-password-variable
         (setenv sql-datum-password-variable))

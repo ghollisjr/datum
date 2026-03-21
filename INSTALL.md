@@ -15,11 +15,14 @@ the import will break.
 
 ## Optional dependencies
 - `pip install pyarrow`  — required for :out .parquet/.json and :in .parquet/.json
-- `pip install polars`   — not yet used, reserved for future performance work
+- `pip install polars`   — optional but recommended; preferred backend for fast import/export (falls back to pyarrow or stdlib csv)
 
 ## New CLI flag
     datum --sql-type=mssql ...
     datum --sql-type=postgres ...
+    datum --sql-type=mysql ...
+    datum --sql-type=oracle ...
+    datum --sql-type=sqlite ...
 
-Supply this for reliable introspection. If omitted, datum detects the dialect
-from the connection string or DSN automatically.
+Accepted values: `mssql`, `postgres`, `mysql`, `oracle`, `sqlite`, `ansi`.
+If omitted, datum detects the dialect from the connection string or DSN automatically.

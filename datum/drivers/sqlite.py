@@ -79,14 +79,14 @@ class SQLiteDriver(BaseDriver):
         """, [pattern])
 
     def sql_list_columns(self, schema, table):
-        return f"""
+        return (f"""
             SELECT name AS column_name,
                    type AS data_type,
                    CASE WHEN "notnull" THEN 'NO' ELSE 'YES' END AS is_nullable,
                    dflt_value AS column_default
             FROM pragma_table_info('{table}')
             ORDER BY cid
-        """
+        """, [])
 
     def sql_resolve_object_type(self, schema, name):
         return ("""

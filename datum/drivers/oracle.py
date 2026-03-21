@@ -146,19 +146,26 @@ class OracleDriver(BaseDriver):
     def sql_list_columns(self, schema, table):
         owner = self._owner(schema)
         if owner:
-            owner_clause = f"owner = '{owner}'"
-        else:
-            owner_clause = "owner = USER"
-        return f"""
+            return ("""
+                SELECT column_name,
+                       data_type,
+                       nullable AS is_nullable,
+                       data_default AS column_default
+                FROM ALL_TAB_COLUMNS
+                WHERE owner = ?
+                  AND table_name = ?
+                ORDER BY column_id
+            """, [owner, table.upper()])
+        return ("""
             SELECT column_name,
                    data_type,
                    nullable AS is_nullable,
                    data_default AS column_default
             FROM ALL_TAB_COLUMNS
-            WHERE {owner_clause}
-              AND table_name = '{table.upper()}'
+            WHERE owner = USER
+              AND table_name = ?
             ORDER BY column_id
-        """
+        """, [table.upper()])
 
     def sql_resolve_object_type(self, schema, name):
         owner = self._owner(schema)
