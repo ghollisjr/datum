@@ -1,0 +1,46 @@
+#+TITLE: Datum TODO
+
+* TODO Add MySQL / MariaDB driver
+Most widely used open-source RDBMS. Good ODBC driver support.
+Introspection via information_schema works well on MySQL (unlike PostgreSQL).
+Dialect differences: backtick quoting, LIMIT syntax, SHOW commands.
+
+* TODO Add Oracle driver
+Large enterprise demand. Significant dialect differences: PL/SQL,
+DUAL table, ROWNUM/FETCH FIRST, no LIMIT, VARCHAR2, NVL vs COALESCE.
+Introspection via ALL_TABLES, ALL_OBJECTS, ALL_SOURCE, etc.
+
+* TODO Add SQLite driver
+Already works through ODBC but a dedicated driver would give proper
+introspection using sqlite_master and PRAGMA statements instead of
+information_schema (which SQLite doesn't support).
+
+* TODO Neovim / Vim plugin
+The Python process and envelope protocol are editor-agnostic.
+A Neovim plugin (Lua) would make datum available to Vim users.
+
+** TODO Core subprocess management
+Launch datum via jobstart(), pipe stdin/stdout, filter ##DATUM:...##
+envelope lines from visible output. Parse envelope payloads into
+Lua tables for completion and UI state.
+
+** TODO SQL completion source
+Feed introspected tables, schemas, routines, columns into nvim-cmp
+(or omnifunc fallback). Annotations for object type ([table], [routine],
+etc.). Auto-insert () for functions.
+
+** TODO Signature display
+Show routine parameter signatures in statusline, virtual text, or
+floating window. Equivalent to Emacs eldoc integration.
+
+** TODO Running queries buffer
+Scratch buffer with auto-refresh timer that sends :running to the
+datum process. Keybindings for refresh, toggle auto-refresh, quit.
+
+** TODO Definition viewer
+Open :definition output in a split with SQL syntax highlighting.
+Ideally integrate with Neovim's LSP/tags for go-to-definition feel.
+
+** TODO Mode line / statusline
+Display server, database, user, dialect from meta envelopes in
+statusline component (lualine or similar).
