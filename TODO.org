@@ -5,6 +5,35 @@ Most widely used open-source RDBMS. Good ODBC driver support.
 Introspection via information_schema works well on MySQL (unlike PostgreSQL).
 Dialect differences: backtick quoting, LIMIT syntax, SHOW commands.
 
+* TODO Scheduled job support for MySQL/MariaDB
+MySQL/MariaDB has no built-in job agent like SQL Server Agent, but does
+have the Event Scheduler (=CREATE EVENT=).  Add support for listing and
+inspecting scheduled events, analogous to the MSSQL jobs section in
+=:running=.
+
+- List events via =SHOW EVENTS= or =information_schema.EVENTS=
+- Show event status, schedule, last/next execution time
+- Show event body via =SHOW CREATE EVENT=
+- Could be a new =:events= command or folded into =:running=
+- Check =event_scheduler= variable and warn if disabled
+
+* TODO Scheduled job support for PostgreSQL
+PostgreSQL has no built-in job scheduler.  Common solutions:
+
+- *pg_cron* extension: =SELECT * FROM cron.job= lists jobs,
+  =cron.job_run_details= shows execution history.  Most popular
+  approach for in-database scheduling.
+- *pgAgent*: separate daemon with its own schema (=pgagent.pga_job=,
+  =pgagent.pga_jobstep=, =pgagent.pga_schedule=).  Used with pgAdmin.
+
+Add best-effort support: detect which (if any) scheduler is installed
+and list jobs accordingly.  If neither is present, skip gracefully.
+
+- Detect pg_cron: check for =cron= schema
+- Detect pgAgent: check for =pgagent= schema
+- Could be a new =:jobs= or =:events= command
+- Show job name, schedule, last run, status
+
 * TODO Add Oracle driver
 Large enterprise demand. Significant dialect differences: PL/SQL,
 DUAL table, ROWNUM/FETCH FIRST, no LIMIT, VARCHAR2, NVL vs COALESCE.

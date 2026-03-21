@@ -14,6 +14,7 @@ from .base import AnsiDriver
 from .mssql import MSSQLDriver
 from .mysql import MySQLDriver
 from .postgres import PostgreSQLDriver
+from .sqlite import SQLiteDriver
 
 # Map lower-cased substrings found in driver/DSN names to driver classes.
 _DRIVER_HINTS = {
@@ -25,6 +26,8 @@ _DRIVER_HINTS = {
     "psql":         PostgreSQLDriver,
     "mysql":        MySQLDriver,
     "mariadb":      MySQLDriver,
+    "sqlite":       SQLiteDriver,
+    "sqlite3":      SQLiteDriver,
 }
 
 # Explicit user-supplied type names accepted by --sql-type / :type command.
@@ -35,6 +38,8 @@ _EXPLICIT_MAP = {
     "postgresql": PostgreSQLDriver,
     "mysql":      MySQLDriver,
     "mariadb":    MySQLDriver,
+    "sqlite":     SQLiteDriver,
+    "sqlite3":    SQLiteDriver,
     "ansi":       AnsiDriver,
 }
 

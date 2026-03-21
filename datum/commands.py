@@ -628,7 +628,7 @@ def use_database(args):
         print(":use requires a database name.")
         return
     db = args[0]
-    if _driver.dialect_name in ("postgres", "ansi"):
+    if _driver.dialect_name in ("postgres", "sqlite", "ansi"):
         try:
             connect.switch_database(db)
             print(f"Reconnected to database: {db}")
