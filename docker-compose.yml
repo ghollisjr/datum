@@ -1,0 +1,96 @@
+# Docker Compose test infrastructure for datum.
+#
+# Usage:
+#   docker compose up --build --abort-on-container-exit test-runner
+#   docker compose down -v
+#
+# Or start just the databases for local testing:
+#   docker compose up -d mysql postgres mssql mssql-init
+
+services:
+  mysql:
+    image: mariadb:11
+    environment:
+      MARIADB_ROOT_PASSWORD: datum_test
+      MARIADB_DATABASE: datum_test
+    ports:
+      - "3307:3306"
+    volumes:
+      - ./test-mysql.sql:/docker-entrypoint-initdb.d/test-mysql.sql:ro
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: datum_test
+      POSTGRES_DB: datum_test
+    ports:
+      - "5433:5432"
+    volumes:
+      - ./test-postgres.sql:/tmp/test-postgres.sql:ro
+      - ./docker/initdb/postgres-init.sh:/docker-entrypoint-initdb.d/postgres-init.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  mssql:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "DatumTest1!"
+    ports:
+      - "1434:1433"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'DatumTest1!' -C -Q 'SELECT 1' -b"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  mssql-init:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    depends_on:
+      mssql:
+        condition: service_healthy
+    volumes:
+      - ./test-mssql.sql:/tmp/test-mssql.sql:ro
+      - ./docker/initdb/mssql-init.sh:/tmp/mssql-init.sh:ro
+    entrypoint: ["bash", "/tmp/mssql-init.sh"]
+
+  test-runner:
+    build:
+      context: .
+      dockerfile: docker/test-runner/Dockerfile
+    depends_on:
+      mysql:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      mssql-init:
+        condition: service_completed_successfully
+    environment:
+      DATUM_STRICT: "1"
+      DATUM_BACKENDS: "mysql,postgres,mssql,sqlite"
+      DATUM_MYSQL_SERVER: mysql
+      DATUM_MYSQL_USER: root
+      DATUM_MYSQL_PASS: datum_test
+      DATUM_MYSQL_DB: datum_test
+      DATUM_PG_SERVER: postgres
+      DATUM_PG_PORT: "5432"
+      DATUM_PG_USER: postgres
+      DATUM_PG_PASS: datum_test
+      DATUM_PG_DB: datum_test
+      DATUM_MSSQL_SERVER: mssql
+      DATUM_MSSQL_PORT: "1433"
+      DATUM_MSSQL_USER: sa
+      DATUM_MSSQL_PASS: "DatumTest1!"
+      DATUM_MSSQL_DB: datum_test
+    volumes:
+      - .:/app
+    working_dir: /app

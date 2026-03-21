@@ -1,21 +1,88 @@
-#+TITLE: Datum Test Setup
-#+DESCRIPTION: Commands for setting up test databases
+#+TITLE: Datum Test Guide
+#+DESCRIPTION: Running the test suite and setting up test databases
 
-* PostgreSQL
+* Quick start (Docker)
 
-** Load test data
+The easiest way to run all tests is with Docker Compose.  It provisions
+MariaDB, PostgreSQL, SQL Server, and SQLite automatically — no manual
+database setup required.
+
+#+BEGIN_SRC sh
+# Run the full test suite (unit + integration + Emacs)
+docker compose up --build --abort-on-container-exit test-runner
+
+# Clean up containers and volumes
+docker compose down -v
+#+END_SRC
+
+That's it.  The =test-runner= container installs datum with all four ODBC
+drivers, waits for every database to be healthy, and runs =tests/run-all.sh=.
+
+** Docker services
+
+| Service       | Image                                  | Port (host→container) | Purpose                                |
+|---------------+----------------------------------------+-----------------------+----------------------------------------|
+| =mysql=       | =mariadb:11=                           | 3307→3306             | MariaDB with =test-mysql.sql= loaded   |
+| =postgres=    | =postgres:16=                          | 5433→5432             | PostgreSQL with =test-postgres.sql=     |
+| =mssql=       | =mcr.microsoft.com/mssql/server:2022=  | 1434→1433             | SQL Server 2022                        |
+| =mssql-init=  | (same MSSQL image)                     | —                     | One-shot: loads =test-mssql.sql=        |
+| =test-runner= | Custom (=docker/test-runner/Dockerfile=)| —                     | Runs the test suite                    |
+
+Host ports are offset by 1 to avoid clashing with local database servers.
+
+** Using Docker databases for local development
+
+Start just the databases (no test runner):
+
+#+BEGIN_SRC sh
+docker compose up -d mysql postgres mssql mssql-init
+#+END_SRC
+
+Then run tests or datum locally against them:
+
+#+BEGIN_SRC sh
+# Run integration tests against Docker databases
+DATUM_BACKENDS=mysql,postgres,mssql,sqlite \
+DATUM_SERVER=localhost DATUM_USER=root DATUM_PASS=datum_test \
+DATUM_MSSQL_SERVER=localhost DATUM_MSSQL_PORT=1434 \
+DATUM_MSSQL_USER=sa DATUM_MSSQL_PASS='DatumTest1!' \
+  bash tests/python/test_integration.sh
+#+END_SRC
+
+Or connect interactively:
+
+#+BEGIN_SRC sh
+# MariaDB
+datum --sql-type mysql \
+  "Driver={MariaDB};Server=localhost;Port=3307;Database=datum_test;User=root;Password=datum_test"
+
+# PostgreSQL
+datum --sql-type postgres \
+  "Driver={PostgreSQL};Server=localhost;Port=5433;Database=datum_test;Uid=postgres;Pwd=datum_test"
+
+# SQL Server
+datum --sql-type mssql \
+  "Driver={ODBC Driver 18 for SQL Server};Server=localhost,1434;Database=datum_test;Uid=sa;Pwd=DatumTest1!;TrustServerCertificate=yes"
+#+END_SRC
+
+* Manual database setup (without Docker)
+
+If you prefer to run databases natively, load the test SQL files manually.
+
+** PostgreSQL
+
 #+BEGIN_SRC sh
 psql -U postgres -f test-postgres.sql
 #+END_SRC
 
-** Connect with datum
+Connect with datum:
 #+BEGIN_SRC sh
-datum --sql-type postgres "Driver={PostgreSQL};Server=localhost;Port=5432;Database=datum_test;Uid=postgres;Pwd=YOUR_PASSWORD"
+datum --sql-type postgres \
+  "Driver={PostgreSQL};Server=localhost;Port=5432;Database=datum_test;Uid=postgres;Pwd=YOUR_PASSWORD"
 #+END_SRC
 
-* MySQL / MariaDB
+** MySQL / MariaDB
 
-** Load test data
 #+BEGIN_SRC sh
 sudo mysql < test-mysql.sql
 #+END_SRC
@@ -25,17 +92,98 @@ Or with password prompt:
 mysql -u root -p < test-mysql.sql
 #+END_SRC
 
-** Connect with datum
+Connect with datum:
 #+BEGIN_SRC sh
-datum --sql-type mysql "Driver={MySQL ODBC 8.0 Unicode Driver};Server=localhost;Port=3306;Database=datum_test;Uid=root;Pwd=YOUR_PASSWORD"
+datum --sql-type mysql \
+  "Driver={MariaDB};Server=localhost;Port=3306;Database=datum_test;Uid=root;Pwd=YOUR_PASSWORD"
 #+END_SRC
 
-Or with MariaDB ODBC driver:
+** SQL Server
+
 #+BEGIN_SRC sh
-datum --sql-type mysql "Driver={MariaDB ODBC 3.1 Driver};Server=localhost;Port=3306;Database=datum_test;Uid=root;Pwd=YOUR_PASSWORD"
+sqlcmd -S localhost -U sa -P 'YOUR_PASSWORD' -C -i test-mssql.sql
 #+END_SRC
 
-** Introspection commands to test
+Connect with datum:
+#+BEGIN_SRC sh
+datum --sql-type mssql \
+  "Driver={ODBC Driver 18 for SQL Server};Server=localhost;Database=datum_test;Uid=sa;Pwd=YOUR_PASSWORD;TrustServerCertificate=yes"
+#+END_SRC
+
+** SQLite
+
+#+BEGIN_SRC sh
+bash test-sqlite.sh
+#+END_SRC
+
+Connect with datum:
+#+BEGIN_SRC sh
+datum --sql-type sqlite "Driver={SQLite3};Database=/tmp/datum_test.db"
+#+END_SRC
+
+* Test suite structure
+
+The test suite has three layers, run by =tests/run-all.sh=:
+
+| Layer             | Runner                           | What it tests                           |
+|-------------------+----------------------------------+-----------------------------------------|
+| Python unit tests | =python -m pytest tests/python/= | Driver registry, SQL type detection     |
+| Integration tests | =tests/python/test_integration.sh= | Live database introspection & queries |
+| Emacs tests       | =tests/emacs/run-tests.sh=       | Envelope protocol, Emacs-side parsing   |
+
+** Integration test backends
+
+The integration test script auto-detects available ODBC drivers and skips
+backends that aren't reachable.  Control which backends to test:
+
+#+BEGIN_SRC sh
+# Test only PostgreSQL
+DATUM_BACKENDS=postgres bash tests/python/test_integration.sh
+
+# Test all four
+DATUM_BACKENDS=mysql,postgres,mssql,sqlite bash tests/python/test_integration.sh
+#+END_SRC
+
+Default order: =mysql=, =postgres=, =mssql=, =sqlite=.
+
+** Environment variables
+
+| Variable             | Default           | Description                         |
+|----------------------+-------------------+-------------------------------------|
+| =DATUM_BACKENDS=     | all four          | Comma-separated list of backends    |
+| =DATUM_USER=         | =root=            | Default DB user (MySQL fallback)    |
+| =DATUM_PASS=         | (empty)           | Default DB password                 |
+| =DATUM_SERVER=       | =localhost=       | Default DB server                   |
+| =DATUM_DB=           | =datum_test=      | Default database name               |
+| =DATUM_PORT=         | (driver default)  | Default port                        |
+| =DATUM_MSSQL_SERVER= | =DATUM_SERVER=    | MSSQL-specific server override      |
+| =DATUM_MSSQL_PORT=   | =1433=            | MSSQL-specific port                 |
+| =DATUM_MSSQL_USER=   | =sa=              | MSSQL-specific user                 |
+| =DATUM_MSSQL_PASS=   | =DATUM_PASS=      | MSSQL-specific password             |
+| =DATUM_PG_SERVER=    | =DATUM_SERVER=    | PostgreSQL-specific server override |
+| =DATUM_PG_PORT=      | =5432=            | PostgreSQL-specific port            |
+| =DATUM_PG_USER=      | =(whoami)=        | PostgreSQL-specific user            |
+| =DATUM_PG_PASS=      | =DATUM_PASS=      | PostgreSQL-specific password        |
+
+* Test databases
+
+Each backend has its own test SQL file with the same business domain
+(customers, orders, products) but dialect-appropriate DDL:
+
+| File               | Backend    | Tables | Views | Functions | Procedures |
+|--------------------+------------+--------+-------+-----------+------------|
+| =test-mysql.sql=   | MariaDB    |      8 |     3 |         3 |          4 |
+| =test-postgres.sql=| PostgreSQL |      8 |     3 |         6 |          4 |
+| =test-mssql.sql=   | SQL Server |      8 |     3 |         3 |          4 |
+| =test-sqlite.sh=   | SQLite     |      4 |     1 |         — |          — |
+
+SQLite's schema is intentionally simpler (no stored routines, no
+multi-schema support).
+
+* Introspection commands to verify
+
+After connecting to any test database, these commands should work:
+
 #+BEGIN_SRC
 :databases
 :schemas
@@ -50,10 +198,7 @@ datum --sql-type mysql "Driver={MariaDB ODBC 3.1 Driver};Server=localhost;Port=3
 :definition customers
 :definition customer_order_summary
 :definition format_currency
-:definition place_order
 :definition datum_test
 :use datum_test
-:type mysql
-:type mariadb
 :refresh
 #+END_SRC
