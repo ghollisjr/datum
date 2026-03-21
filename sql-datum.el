@@ -1552,6 +1552,11 @@ Without, toggle on/off using `sql-datum-refresh-interval'
   (define-key sql-mode-map (kbd "C-c s F") #'sql-datum-toggle-auto-refresh)
   ;; C-c u: switch database
   (define-key sql-mode-map (kbd "C-c u")   #'sql-datum-use-database)
+  ;; C-c C-x: connection management (SLIME-style)
+  (define-key sql-mode-map (kbd "C-c C-x c")   #'sql-connect)
+  (define-key sql-mode-map (kbd "C-c C-x C-c") #'sql-connect)
+  (define-key sql-mode-map (kbd "C-c C-x n")   #'sql-set-sqli-buffer)
+  (define-key sql-mode-map (kbd "C-c C-x C-n") #'sql-set-sqli-buffer)
   ;; C-c C-c: smart send (region or paragraph, auto-connect)
   (define-key sql-mode-map (kbd "C-c C-c") #'sql-datum-send-smart))
 
