@@ -125,6 +125,10 @@ completion candidates up to date.  Set to nil to disable."
 (defvar-local sql-datum--columns (make-hash-table :test #'equal)
   "Hash table mapping \"schema.table\" to list of column name strings.")
 
+(defvar-local sql-datum--columns-pending (make-hash-table :test #'equal)
+  "Hash table tracking in-flight silent column fetches.
+Keys are table names, values are t.  Prevents duplicate fetch requests.")
+
 (defvar-local sql-datum--routine-signatures (make-hash-table :test #'equal)
   "Hash table mapping routine name to parameter signature string.
 Populated by the routine-sigs introspect envelope.")
@@ -708,6 +712,120 @@ parens (CALL proc(args)), unlike MSSQL which uses EXEC proc @p=val."
         (and (equal rtype "PROCEDURE")
              (equal dialect "postgres")))))
 
+(defun sql-datum--tables-in-statement ()
+  "Return list of table names referenced in the current SQL statement.
+Scans both before and after point for FROM, JOIN, UPDATE, INTO keywords
+and collects the table identifiers that follow them.  Handles
+comma-separated table lists (e.g. FROM t1, t2).  Returns nil if no
+tables are found."
+  (save-excursion
+    (let* ((stmt-start (save-excursion
+                         (or (and (search-backward ";"
+                                                   (if (derived-mode-p 'sql-interactive-mode)
+                                                       (comint-line-beginning-position)
+                                                     (point-min))
+                                                   t)
+                                  (1+ (point)))
+                             (if (derived-mode-p 'sql-interactive-mode)
+                                 (comint-line-beginning-position)
+                               (point-min)))))
+           (stmt-end (save-excursion
+                       (or (and (search-forward ";" nil t)
+                                (1- (point)))
+                           (point-max))))
+           (table-kw-re (concat "\\<\\("
+                                "FROM\\|"
+                                "\\(?:LEFT\\|RIGHT\\|INNER\\|FULL\\|CROSS\\|OUTER\\|NATURAL\\)?[ \t]*JOIN\\|"
+                                "UPDATE\\|"
+                                "INTO"
+                                "\\)\\>"))
+           (stop-kw-re (concat "\\<\\("
+                               "WHERE\\|ON\\|SET\\|ORDER\\|GROUP\\|HAVING\\|"
+                               "LIMIT\\|UNION\\|VALUES\\|SELECT\\|"
+                               "LEFT\\|RIGHT\\|INNER\\|FULL\\|CROSS\\|OUTER\\|NATURAL\\|"
+                               "JOIN\\|FROM\\|INTO\\|UPDATE"
+                               "\\)\\>"))
+           (tables nil))
+      (goto-char stmt-start)
+      (while (re-search-forward table-kw-re stmt-end t)
+        (skip-chars-forward " \t\n")
+        ;; Collect table names, handling comma-separated lists
+        (let ((continue t))
+          (while (and continue (<= (point) stmt-end))
+            (skip-chars-forward " \t\n")
+            (when (>= (point) stmt-end)
+              (setq continue nil))
+            (when continue
+              ;; Check if we hit a clause-terminating keyword
+              (if (looking-at stop-kw-re)
+                  (setq continue nil)
+                ;; Read a table identifier
+                (let ((id-start (point)))
+                  (skip-chars-forward "a-zA-Z0-9_.\\[\\]#")
+                  (if (= (point) id-start)
+                      (setq continue nil)  ; no identifier found
+                    (let* ((raw (buffer-substring-no-properties id-start (point)))
+                           ;; Strip bracket quoting from each segment
+                           (cleaned (mapconcat
+                                     (lambda (seg)
+                                       (if (and (string-prefix-p "[" seg)
+                                                (string-suffix-p "]" seg))
+                                           (substring seg 1 -1)
+                                         seg))
+                                     (split-string raw "\\." t)
+                                     ".")))
+                      (unless (string-empty-p cleaned)
+                        (push cleaned tables)))
+                    ;; Check for comma to continue list
+                    (skip-chars-forward " \t\n")
+                    (if (and (< (point) stmt-end) (eq (char-after) ?,))
+                        (forward-char 1)
+                      (setq continue nil)))))))))
+      (delete-dups (nreverse tables)))))
+
+(defun sql-datum--fetch-columns-async (table buf col-hash pending-hash)
+  "Fetch columns for TABLE silently in the background.
+BUF is the SQLi process buffer.  COL-HASH is `sql-datum--columns',
+PENDING-HASH is `sql-datum--columns-pending'.
+Skips if TABLE is already cached or already in-flight."
+  (let ((col-key (concat "columns:" table)))
+    ;; Check if already cached (try exact key match in col-hash)
+    (unless (or (gethash col-key col-hash)
+                ;; Also check without the columns: prefix for any key containing this table
+                (let ((found nil))
+                  (maphash (lambda (k _v)
+                             (when (and (string-prefix-p "columns:" k)
+                                        (let ((tname (substring k 8)))
+                                          (or (string-equal-ignore-case tname table)
+                                              (string-suffix-p (concat "." table)
+                                                               tname t))))
+                               (setq found t)))
+                           col-hash)
+                  found)
+                (gethash table pending-hash))
+      (let ((proc (get-buffer-process buf)))
+        (when proc
+          (with-current-buffer buf
+            (puthash table t sql-datum--columns-pending)
+            (comint-send-string proc (format ":columns %s :silent\n" table)))
+          (letrec ((watcher
+                    (lambda (_output)
+                      ;; Check if columns for this table have been populated
+                      (let ((populated nil))
+                        (maphash (lambda (k _v)
+                                   (when (and (string-prefix-p "columns:" k)
+                                              (let ((tname (substring k 8)))
+                                                (or (string-equal-ignore-case tname table)
+                                                    (string-suffix-p (concat "." table)
+                                                                     tname t))))
+                                     (setq populated t)))
+                                 col-hash)
+                        (when populated
+                          (remove-hook 'comint-output-filter-functions watcher t)
+                          (remhash table pending-hash))))))
+            (with-current-buffer buf
+              (add-hook 'comint-output-filter-functions watcher nil t))))))))
+
 (defun sql-datum--xdb-fetch-async (db buf xdb-cache callback)
   "Send :refresh-db DB asynchronously.  Call CALLBACK when cache entry is ready.
 BUF is the SQLi process buffer, XDB-CACHE the cross-db hash."
@@ -872,8 +990,40 @@ Completing a FUNCTION name auto-inserts parentheses."
                               prefix start end buf dbs xdb-cache))))
           (or xdb-result
               (when (not xdb-result)  ; nil means not xdb — allow fallback
-                (let ((candidates (append tables schemas routines columns
-                                          (when (equal dialect "mssql") dbs))))
+                (let* ((stmt-tables (sql-datum--tables-in-statement))
+                       (pending-hash (and buf (buffer-local-value
+                                               'sql-datum--columns-pending buf)))
+                       ;; Collect columns from tables found in statement
+                       (ctx-columns
+                        (when (and stmt-tables col-hash)
+                          (let (result)
+                            (dolist (tbl stmt-tables)
+                              (let ((found nil))
+                                ;; Try exact key "columns:TABLE"
+                                (let ((exact (gethash (concat "columns:" tbl) col-hash)))
+                                  (when exact
+                                    (setq found t)
+                                    (setq result (append exact result))))
+                                ;; Try suffix match for bare names against schema-qualified keys
+                                (unless found
+                                  (maphash (lambda (k v)
+                                             (when (and (string-prefix-p "columns:" k)
+                                                        (let ((tname (substring k 8)))
+                                                          (or (string-equal-ignore-case tname tbl)
+                                                              (string-suffix-p
+                                                               (concat "." tbl) tname t))))
+                                               (setq found t)
+                                               (setq result (append v result))))
+                                           col-hash))
+                                ;; Not cached — trigger async fetch
+                                (unless found
+                                  (when (and buf pending-hash)
+                                    (sql-datum--fetch-columns-async
+                                     tbl buf col-hash pending-hash)))))
+                            (delete-dups result))))
+                       (effective-columns (or ctx-columns columns))
+                       (candidates (append tables schemas routines effective-columns
+                                           (when (equal dialect "mssql") dbs))))
                   (when candidates
                     (list start end
                           (sql-datum--make-completion-table candidates tables)
@@ -883,7 +1033,9 @@ Completing a FUNCTION name auto-inserts parentheses."
                             (cond ((member cand tables)   " [table]")
                                   ((member cand schemas)  " [schema]")
                                   ((member cand routines) " [routine]")
-                                  ((member cand columns)  " [column]")
+                                  ((and ctx-columns (member cand ctx-columns))
+                                   " [column]")
+                                  ((member cand effective-columns) " [column]")
                                   ((and dbs (member cand dbs)) " [database]")
                                   (t "")))
                           :exit-function

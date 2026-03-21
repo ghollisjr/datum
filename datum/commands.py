@@ -332,11 +332,14 @@ def sql_type(args):
 
 # --- Introspection commands ---
 
-def _run_introspect(sql, kind, label, params=None):
+def _run_introspect(sql, kind, label, params=None, silent=False):
     """Run an introspection query, print results, and send an envelope.
 
     sql can be a plain SQL string, or when params is given, a parameterized
     query string with ? placeholders (executed with params via ODBC).
+
+    When silent is True, skip all print output but still execute the query
+    and send the envelope.
     """
     try:
         cursor = connect.get_connection().cursor()
@@ -346,18 +349,21 @@ def _run_introspect(sql, kind, label, params=None):
             cursor.execute(sql)
         rows = cursor.fetchall()
         if not rows:
-            print(f"(no {label} found)")
+            if not silent:
+                print(f"(no {label} found)")
             return
-        # Use the standard printer for consistent formatting
-        column_names = [printer.text_formatter(col[0]) for col in cursor.description]
-        format_str, print_ready = printer.format_rows(column_names, rows)
-        print()
-        printer.print_rows(format_str, print_ready)
+        if not silent:
+            # Use the standard printer for consistent formatting
+            column_names = [printer.text_formatter(col[0]) for col in cursor.description]
+            format_str, print_ready = printer.format_rows(column_names, rows)
+            print()
+            printer.print_rows(format_str, print_ready)
         # Send envelope for Emacs-side state
         items = [str(row[0]) for row in rows]
         envelope.introspect(kind, items)
     except Exception as err:
-        print(f"Error running {label} query: {err}")
+        if not silent:
+            print(f"Error running {label} query: {err}")
 
 
 def databases(args):
@@ -498,7 +504,13 @@ def columns(args):
     if not args:
         print(":columns requires a table name. Example: :columns dbo.users")
         return
-    table_name = args[0]
+    # Check for :silent flag
+    silent = ":silent" in args
+    filtered_args = [a for a in args if a != ":silent"]
+    if not filtered_args:
+        print(":columns requires a table name. Example: :columns dbo.users")
+        return
+    table_name = filtered_args[0]
     parts = table_name.split(".")
     if len(parts) > 1:
         schema = parts[0]
@@ -506,7 +518,8 @@ def columns(args):
         schema = _driver.default_schema
     table = parts[-1]
     sql, params = _driver.sql_list_columns(schema, table)
-    _run_introspect(sql, f"columns:{table_name}", f"columns for {table_name}", params=params)
+    _run_introspect(sql, f"columns:{table_name}", f"columns for {table_name}",
+                    params=params, silent=silent)
 
 
 def running(args):
