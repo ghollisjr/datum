@@ -1,3 +1,4 @@
+.emacs_backups/
 tests/
 
 # Byte-compiled / optimized / DLL files
