@@ -379,6 +379,42 @@ machine my-postgres login postgres password secret123
 By default, passwords are passed via a temporary environment variable
 (=SQLDATUMPASS=) so they don't appear in process listings.
 
+** Connection gotchas
+
+*** Always set all login fields explicitly
+
+Emacs =sql-mode= stores =sql-server=, =sql-database=, =sql-user=, and
+=sql-password= as global variables.  When you connect, these are set to
+whatever that connection entry specifies — but fields you *omit* keep
+their previous value.  This means a password from connection A can leak
+into connection B if B doesn't explicitly clear it.
+
+*Rule of thumb:* every entry in =sql-connection-alist= should set all
+four fields, even if the value is an empty string.
+
+#+begin_src emacs-lisp
+;; BAD — if a previous connection set sql-password, it leaks here:
+'("my-local-pg"
+  (sql-product 'datum)
+  (sql-server "")
+  (sql-user "")
+  ;; sql-password not set — inherits from last connection!
+  (sql-datum-options '("--conn-string=Driver={PostgreSQL Unicode};...")))
+
+;; GOOD — explicitly clear the password for peer/ident auth:
+'("my-local-pg"
+  (sql-product 'datum)
+  (sql-server "")
+  (sql-database "")
+  (sql-user "")
+  (sql-password "")
+  (sql-datum-options '("--conn-string=Driver={PostgreSQL Unicode};...")))
+#+end_src
+
+This is especially important when switching between password-authenticated
+connections (e.g. Docker test databases) and passwordless connections (e.g.
+local PostgreSQL with peer auth).
+
 ** Keybindings
 
 All keybindings are active in =sql-mode= buffers.
