@@ -695,6 +695,15 @@ or nil otherwise.  Checks three cases:
          (setq name (sql-datum--identifier-at-point))
          (sql-datum--sigs-canonical-key name sigs))))))
 
+(defun sql-datum--routine-uses-parens-p (routine-name rtypes dialect)
+  "Return non-nil if ROUTINE-NAME should use parenthesized call syntax.
+Functions always use parens.  On PostgreSQL, procedures also use
+parens (CALL proc(args)), unlike MSSQL which uses EXEC proc @p=val."
+  (let ((rtype (and rtypes (gethash routine-name rtypes))))
+    (or (equal rtype "FUNCTION")
+        (and (equal rtype "PROCEDURE")
+             (equal dialect "postgres")))))
+
 (defun sql-datum--xdb-fetch-sync (db buf xdb-cache)
   "Send :refresh-db DB and block until the cache entry is ready.
 BUF is the SQLi process buffer, XDB-CACHE the cross-db hash.
@@ -799,11 +808,13 @@ Completing a FUNCTION name auto-inserts parentheses."
                                     (setq all (append v all)))
                                   col-hash)
                          (delete-dups all))))
+           (dialect (and buf (buffer-local-value 'sql-datum--dialect buf)))
            (routine-ctx (sql-datum--find-param-routine sigs))
            (in-parens (nth 1 (syntax-ppss))))
       (cond
-       ;; --- Parameter context: right after a FUNCTION name (not in parens) ---
+       ;; --- Parameter context: right after a routine that uses parens ---
        ;; Insert () and place cursor inside.
+       ;; Functions always use parens; PostgreSQL procedures also use parens.
        ((and routine-ctx (not in-parens)
              (save-excursion
                (skip-chars-backward " \t")
@@ -811,7 +822,7 @@ Completing a FUNCTION name auto-inserts parentheses."
                  (and ident
                       (string= (or (sql-datum--sigs-canonical-key ident sigs) "")
                                routine-ctx))))
-             rtypes (equal (gethash routine-ctx rtypes) "FUNCTION"))
+             (sql-datum--routine-uses-parens-p routine-ctx rtypes dialect))
         (let ((start (save-excursion
                        (skip-chars-backward " \t")
                        (point)))
@@ -822,13 +833,12 @@ Completing a FUNCTION name auto-inserts parentheses."
                                  (backward-char)
                                  (when-let ((msg (sql-datum-eldoc-function)))
                                    (message "%s" msg))))))
-       ;; --- Parameter context: procedure params (not inside function parens) ---
-       ;; Functions take positional args, so param name completion would be
-       ;; misleading (e.g. MSSQL doesn't allow @name=val in function calls).
-       ;; Eldoc already shows the signature inside function parens.
+       ;; --- Parameter context: procedure params (not inside parens-style call) ---
+       ;; For MSSQL procedures: offer @param name completion.
+       ;; Skip if inside parens of a routine that uses parens syntax.
        ((and routine-ctx
-             (not (and in-parens rtypes
-                       (equal (gethash routine-ctx rtypes) "FUNCTION")))
+             (not (and in-parens
+                       (sql-datum--routine-uses-parens-p routine-ctx rtypes dialect)))
              (sql-datum--at-new-param-p routine-ctx sigs))
         (let* ((sig (gethash routine-ctx sigs))
                (params (sql-datum--parse-param-names sig))
@@ -875,8 +885,9 @@ Completing a FUNCTION name auto-inserts parentheses."
                                   (t "")))
                           :exit-function
                           (lambda (cand status)
-                            (when (and (eq status 'finished) rtypes
-                                       (equal (gethash cand rtypes) "FUNCTION"))
+                            (when (and (eq status 'finished)
+                                       (sql-datum--routine-uses-parens-p
+                                        cand rtypes dialect))
                               (insert "()")
                               (backward-char)
                               (when-let ((msg (sql-datum-eldoc-function)))
