@@ -1381,7 +1381,14 @@ defaults to `sql-datum-import-batch-size', overridden with \\[universal-argument
           (buf  (sql-find-sqli-buffer 'datum))
           (tables (and buf (buffer-local-value 'sql-datum--tables
                                                (get-buffer buf))))
-          (table (completing-read "Into table: " tables nil nil))
+          (ident (sql-datum--identifier-at-point))
+          (default (and ident tables
+                        (cl-find ident tables :test #'string-equal-ignore-case)
+                        ident))
+          (table (completing-read (if default
+                                      (format "Into table: (default %s) " default)
+                                    "Into table: ")
+                                  tables nil nil nil nil default))
           (mode  (completing-read "Mode: "
                                   '("default (error if exists)"
                                     ":insert (append)"
@@ -1440,11 +1447,19 @@ When SILENT is non-nil, skip the echo and buffer display."
 
 (defun sql-datum--read-table (prompt)
   "Read a table name with completion from the introspection cache.
-PROMPT is displayed to the user."
+PROMPT is displayed to the user.  If the identifier at point is a
+known table, it is offered as the default."
   (let* ((buf (sql-find-sqli-buffer 'datum))
          (tables (and buf (buffer-local-value 'sql-datum--tables
-                                              (get-buffer buf)))))
-    (completing-read prompt tables nil nil)))
+                                              (get-buffer buf))))
+         (ident (sql-datum--identifier-at-point))
+         (default (and ident tables
+                       (cl-find ident tables :test #'string-equal-ignore-case)
+                       ident)))
+    (completing-read (if default
+                         (format "%s(default %s) " prompt default)
+                       prompt)
+                     tables nil nil nil nil default)))
 
 (defun sql-datum--mssql-p ()
   "Return non-nil if the current dialect is MSSQL."
