@@ -978,7 +978,9 @@ Completing a FUNCTION name auto-inserts parentheses."
                   (lambda (_) (format " [param of %s]" routine-ctx))))))
        ;; --- Normal identifier completion ---
        (t
-        (let* ((end (point))
+        (let* ((end (save-excursion
+                      (skip-chars-forward "a-zA-Z0-9_.#\\[\\]")
+                      (point)))
                (start (save-excursion
                         (skip-chars-backward "a-zA-Z0-9_.#\\[\\]")
                         (point)))
