@@ -146,6 +146,11 @@ Populated by the routine-types introspect envelope.")
 Hash: database name -> plist with keys :tables :schemas :routines
 :routine-types :routine-sigs :pending.")
 
+(defvar-local sql-datum--suppress-next-prompt nil
+  "When non-nil, the preoutput filter strips the next prompt.
+Set by silent commands (e.g. M-. definition) so the SQLi buffer
+stays completely clean.")
+
 (defvar-local sql-datum--refresh-in-progress nil
   "Non-nil while an async refresh chain is running.
 Prevents overlapping refresh chains.")
@@ -192,7 +197,15 @@ Handles partial envelope lines split across multiple filter calls."
           (sql-datum--handle-envelope (match-string 1 line)
                                       (match-string 2 line))
         (push line clean-lines)))
-    (string-join (nreverse clean-lines) "\n")))
+    (let ((result (string-join (nreverse clean-lines) "\n")))
+      ;; When a silent command was sent, suppress the prompt that follows.
+      ;; The Python REPL emits "\n>" which, after envelope stripping, appears
+      ;; as whitespace + ">" in the remaining output.
+      (when sql-datum--suppress-next-prompt
+        (when (string-match-p "\\`[\n\r ]*>\\'" result)
+          (setq result "")
+          (setq sql-datum--suppress-next-prompt nil)))
+      result)))
 
 (defvar sql-datum--running-timer nil
   "Timer for auto-refreshing the running queries buffer.")
@@ -1436,6 +1449,9 @@ When SILENT is non-nil, skip the echo and buffer display."
             (goto-char (process-mark proc))
             (insert (format "\n>> %s\n" cmd))
             (set-marker (process-mark proc) (point)))))
+      (when silent
+        (with-current-buffer buf-obj
+          (setq sql-datum--suppress-next-prompt t)))
       (comint-send-string buf-obj (concat cmd "\n")))))
 
 (defun sql-datum--get-dialect ()
