@@ -113,10 +113,8 @@ def get_connection(force_new=False):
     _connection.add_output_converter(-155, _handle_datetimeoffset)
     try:
         _connection.timeout = _timeout
-    except Exception as e:
-        # Connecting to Excel files using ODBC, it said "Optional feature not
-        # implemented". So if the timeout can't be set, just print a message
-        print('WARNING: command timeout not set')
+    except Exception:
+        pass
     return _connection
 
 

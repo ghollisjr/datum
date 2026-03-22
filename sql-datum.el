@@ -142,6 +142,10 @@ Populated by the routine-types introspect envelope.")
 Hash: database name -> plist with keys :tables :schemas :routines
 :routine-types :routine-sigs :pending.")
 
+(defvar-local sql-datum--refresh-in-progress nil
+  "Non-nil while an async refresh chain is running.
+Prevents overlapping refresh chains.")
+
 ;;; ---------------------------------------------------------------------------
 ;;; Envelope protocol
 ;;; ---------------------------------------------------------------------------
@@ -1185,7 +1189,7 @@ for the `comint' buffer."
                     (message "datum: connected.")
                     (remove-hook 'comint-output-filter-functions watcher t)
                     (when sql-datum-auto-introspect
-                      (comint-send-string (current-buffer) ":refresh\n"))
+                      (sql-datum--refresh-async (current-buffer)))
                     (when (and sql-datum-refresh-interval
                                (not sql-datum--refresh-timer))
                       (setq sql-datum--refresh-timer
@@ -1552,7 +1556,7 @@ Prompts with completion from the cached database list."
                       (message "datum: connected to %s." db)
                       (remove-hook 'comint-output-filter-functions watcher t)
                       (when sql-datum-auto-introspect
-                        (comint-send-string (current-buffer) ":refresh\n"))))))
+                        (sql-datum--refresh-async (current-buffer)))))))
           (add-hook 'comint-output-filter-functions watcher nil t)))))
   (sql-datum--send-command (format ":use %s" db))
   (message "datum: switching to database %s (reconnecting...)" db))
@@ -1624,13 +1628,53 @@ Automatically ensures a live database connection first."
 ;;; Introspection refresh
 ;;; ---------------------------------------------------------------------------
 
+(defun sql-datum--refresh-chain (commands buf)
+  "Send COMMANDS one at a time to BUF, yielding to the event loop between each.
+COMMANDS is a list of strings (e.g. \":refresh-databases\").
+After sending each command, installs a watcher that waits for the
+prompt, then defers the next step via `run-at-time' so Emacs can
+process pending user input (keystrokes, window commands, etc.)
+before the next sub-command runs.  When the list is exhausted,
+clears `sql-datum--refresh-in-progress'."
+  (if (null commands)
+      (when (buffer-live-p buf)
+        (with-current-buffer buf
+          (setq sql-datum--refresh-in-progress nil)))
+    (let ((proc (and (buffer-live-p buf) (get-buffer-process buf))))
+      (when proc
+        (comint-send-string proc (concat (car commands) "\n"))
+        (letrec ((watcher
+                  (lambda (_output)
+                    (when (string-match-p (rx bol (* nonl) ">") _output)
+                      (with-current-buffer buf
+                        (remove-hook 'comint-output-filter-functions watcher t))
+                      ;; Defer to the event loop so pending user input
+                      ;; (keystrokes, window commands) is processed first.
+                      (run-at-time 0 nil #'sql-datum--refresh-chain
+                                   (cdr commands) buf)))))
+          (with-current-buffer buf
+            (add-hook 'comint-output-filter-functions watcher nil t)))))))
+
+(defun sql-datum--refresh-async (buf)
+  "Start a non-blocking refresh chain in BUF.
+Sends the 4 refresh sub-commands one at a time, yielding to the
+REPL between each so user input is not blocked."
+  (when (buffer-live-p buf)
+    (with-current-buffer buf
+      (unless sql-datum--refresh-in-progress
+        (setq sql-datum--refresh-in-progress t)
+        (sql-datum--refresh-chain
+         '(":refresh-databases"
+           ":refresh-schemas"
+           ":refresh-tables"
+           ":refresh-routines")
+         buf)))))
+
 (defun sql-datum-refresh ()
   "Refresh all introspection data (autocomplete candidates).
-Sends :refresh to the active datum process.  Also re-fetches any
-cross-database caches built during this session."
+Uses the async refresh chain so user input is not blocked.
+Also re-fetches any cross-database caches built during this session."
   (interactive)
-  (sql-datum--send-command ":refresh")
-  ;; Re-fetch any previously introspected cross-databases
   (let* ((buf (or (and (derived-mode-p 'sql-interactive-mode)
                        (current-buffer))
                   (let ((b (sql-find-sqli-buffer 'datum)))
@@ -1639,12 +1683,14 @@ cross-database caches built during this session."
                               'sql-datum--xdb-cache buf)))
          (dialect (and buf (buffer-local-value
                             'sql-datum--dialect buf))))
+    (when buf
+      (sql-datum--refresh-async buf))
+    ;; Re-fetch any previously introspected cross-databases
     (when (and xdb-cache (equal dialect "mssql"))
       (let ((dbs-to-refresh nil))
         (maphash (lambda (db _entry) (push db dbs-to-refresh))
                  xdb-cache)
         (when dbs-to-refresh
-          ;; Clear old entries so fetch-sync re-populates them
           (with-current-buffer buf
             (clrhash sql-datum--xdb-cache))
           (dolist (db dbs-to-refresh)
@@ -1679,8 +1725,7 @@ Without, toggle on/off using `sql-datum-refresh-interval'
   "Timer callback: send :refresh if a datum process is alive."
   (let ((buf (sql-find-sqli-buffer 'datum)))
     (if (and buf (get-buffer-process (get-buffer buf)))
-        (comint-send-string (get-buffer-process (get-buffer buf))
-                            ":refresh\n")
+        (sql-datum--refresh-async (get-buffer buf))
       ;; No live process — stop the timer
       (when sql-datum--refresh-timer
         (cancel-timer sql-datum--refresh-timer)

@@ -802,17 +802,10 @@ def refresh_db(args):
     envelope.introspect(f"xdb:{database}:done", [])
 
 
-def refresh(args):
-    """Built-in :refresh command — silently re-run all introspection queries.
-
-    Sends envelope updates for databases, schemas, tables, routines, and
-    routine signatures without printing any output to the SQLi buffer.
-    Each query is independent — one failure won't block the rest.
-    """
+def refresh_databases(args):
+    """Built-in :refresh-databases — refresh database list."""
     global _driver
     conn = connect.get_connection()
-
-    # Databases
     try:
         cursor = conn.cursor()
         cursor.execute(_driver.sql_list_databases)
@@ -821,8 +814,13 @@ def refresh(args):
             envelope.introspect("databases", [str(r[0]) for r in rows])
     except Exception:
         pass
+    return ""
 
-    # Schemas
+
+def refresh_schemas(args):
+    """Built-in :refresh-schemas — refresh schema list."""
+    global _driver
+    conn = connect.get_connection()
     try:
         cursor = conn.cursor()
         cursor.execute(_driver.sql_list_schemas)
@@ -831,8 +829,13 @@ def refresh(args):
             envelope.introspect("schemas", [str(r[0]) for r in rows])
     except Exception:
         pass
+    return ""
 
-    # Tables (same logic as tables() for schema-qualified names)
+
+def refresh_tables(args):
+    """Built-in :refresh-tables — refresh table list."""
+    global _driver
+    conn = connect.get_connection()
     try:
         cursor = conn.cursor()
         cursor.execute(_driver.sql_list_tables)
@@ -853,8 +856,13 @@ def refresh(args):
             envelope.introspect("tables", sorted(set(items)))
     except Exception:
         pass
+    return ""
 
-    # Routines + signatures (same logic as routines())
+
+def refresh_routines(args):
+    """Built-in :refresh-routines — refresh routine list and signatures."""
+    global _driver
+    conn = connect.get_connection()
     try:
         cursor = conn.cursor()
         cursor.execute(_driver.sql_list_routines)
@@ -907,6 +915,20 @@ def refresh(args):
                 pass
     except Exception:
         pass
+    return ""
+
+
+def refresh(args):
+    """Built-in :refresh command — silently re-run all introspection queries.
+
+    Sends envelope updates for databases, schemas, tables, routines, and
+    routine signatures without printing any output to the SQLi buffer.
+    Each query is independent — one failure won't block the rest.
+    """
+    refresh_databases(args)
+    refresh_schemas(args)
+    refresh_tables(args)
+    refresh_routines(args)
 
 
 def definition(args):
@@ -1040,6 +1062,10 @@ _builtins = {
     ":use":        use_database,
     ":pwd":        pwd,
     ":definition": definition,
-    ":refresh":    refresh,
-    ":refresh-db": refresh_db,
+    ":refresh":            refresh,
+    ":refresh-databases":  refresh_databases,
+    ":refresh-schemas":    refresh_schemas,
+    ":refresh-tables":     refresh_tables,
+    ":refresh-routines":   refresh_routines,
+    ":refresh-db":         refresh_db,
 }
