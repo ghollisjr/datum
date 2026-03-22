@@ -189,9 +189,9 @@ All commands start with =:= and are entered at the prompt.
 | =:routines [pattern]= | List stored procedures and functions           |
 | =:columns <table>=  | List columns (supports =schema.table=)         |
 | =:running=          | List currently running queries                 |
-| =:use <database>=   | Switch to a different database                 |
+| =:use <database>=   | Switch to a different database (clears and refreshes autocomplete) |
 | =:type [dialect]=   | Show or set the SQL dialect                    |
-| =:definition <name>= | Show DDL/source for a table, view, proc, or function    |
+| =:definition <name>= | Show DDL/source for a table, view, proc, or function (silent in SQLi buffer) |
 | =:refresh=          | Silently re-run all introspection (updates autocomplete) |
 | =:refresh-db <name>= | Introspect another database for cross-db completion (MSSQL) |
 
@@ -209,6 +209,10 @@ Run your query now. The next query's results will be exported.
 #+end_example
 
 Supported formats: =.csv=, =.parquet=, =.json= (newline-delimited).
+
+When a query produces duplicate column names (e.g. =SELECT a.id, b.id
+FROM ...=), they are automatically disambiguated with =_1=, =_2= suffixes,
+and a warning is shown.
 
 Use =:force= to overwrite an existing file:
 
@@ -432,6 +436,10 @@ All keybindings are active in =sql-mode= buffers.
 | =C-c t x= | =sql-datum-table-exists= | Check if table exists                        |
 | =C-c t D= | =sql-datum-drop-table=   | Drop table (with confirmation)               |
 
+All table operations default to the identifier at point when it matches a
+known table name, so you can place your cursor on a table name and press
+the keybinding without re-typing it.
+
 The quick-query commands (=top=, =sample=, =count=, =table-exists=) are
 dialect-aware: they use =TOP= / =NEWID()= / =OBJECT_ID()= on MSSQL and
 =LIMIT= / =RANDOM()= / =to_regclass()= on PostgreSQL and other dialects.
@@ -605,6 +613,10 @@ through the xref marker stack; =q= also goes back one level.
 
 With no identifier at point, =M-.= prompts for a name.
 
+The definition command is completely silent in the SQLi buffer -- no
+command echo or output appears there.  Errors (object not found, etc.)
+are reported in the minibuffer.
+
 ** Mode line
 
 The mode line shows connection status:
@@ -665,7 +677,7 @@ acted on silently.
 | =dialect=     | mssql/postgres/mysql/sqlite/oracle/ansi | Set SQL dialect                   |
 | =meta=        | key:value            | Metadata (server, database, etc.) |
 | =result-file=  | path:format          | Exported file notification        |
-| =definition=   | name:source-text     | DDL/source for goto-definition    |
+| =definition=   | JSON {"name":...,"text":...} | DDL/source for goto-definition    |
 | =introspect=   | kind:json-array      | Introspection data (replace)      |
 | =introspect+=  | kind:json-array      | Introspection data (append chunk) |
 | =running-text= | formatted-text       | Running queries display           |

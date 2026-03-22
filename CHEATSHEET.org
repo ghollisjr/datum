@@ -26,6 +26,10 @@ From the scratch buffer you have full completion (=TAB=), all the =C-c s= /
 
 ** Table Operations (=C-c t=)
 
+All table operations default to the table name at point (if it matches a
+known table), so you can cursor onto a name and press the keybinding
+directly.
+
 | Key       | Action                                       |
 |-----------+----------------------------------------------|
 | =C-c t e= | Export table to file (=C-u= for custom query)   |
@@ -125,7 +129,7 @@ Respects =:chars= for column width. Timestamp shows last refresh.
 | =:user=       | Current user                 |
 | =:version=    | Server version               |
 | =:reconnect=  | Force new connection         |
-| =:use <db>=   | Switch database (reconnects on PostgreSQL) |
+| =:use <db>=   | Switch database (clears + refreshes autocomplete) |
 | =:type [val]= | Show/set dialect             |
 | =:exit=       | End session                  |
 
@@ -158,7 +162,7 @@ Respects =:chars= for column width. Timestamp shows last refresh.
 
 | Command                          | Description                       |
 |----------------------------------+-----------------------------------|
-| =:out <path> [:force]=           | Export next query (.csv/.parquet/.json) |
+| =:out <path> [:force]=           | Export next query (.csv/.parquet/.json, dedupes column names) |
 | =:in <path> <table>=            | Import (error if exists)          |
 | =:in <path> <table> :insert=    | Import (append)                   |
 | =:in <path> <table> :replace=   | Import (drop & recreate)          |

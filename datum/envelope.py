@@ -16,6 +16,8 @@ Message types:
                 Payload: <kind>:<json-array>
     dialect     The detected or declared SQL dialect.
                 Payload: mssql|postgres|ansi
+    definition  DDL/source for goto-definition display.
+                Payload: JSON {"name": ..., "text": ...}
     meta        Key/value metadata (current db, schema, user, version).
                 Payload: <key>:<value>
 """
