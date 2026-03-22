@@ -125,6 +125,10 @@ completion candidates up to date.  Set to nil to disable."
 (defvar-local sql-datum--columns (make-hash-table :test #'equal)
   "Hash table mapping \"schema.table\" to list of column name strings.")
 
+(defvar-local sql-datum--column-details (make-hash-table :test #'equal)
+  "Hash table mapping \"schema.table\" to full column metadata rows.
+Each value is a list of [col_name type nullable default] vectors.")
+
 (defvar-local sql-datum--columns-pending (make-hash-table :test #'equal)
   "Hash table tracking in-flight silent column fetches.
 Keys are table names, values are t.  Prevents duplicate fetch requests.")
@@ -218,7 +222,18 @@ Handles partial envelope lines split across multiple filter calls."
        (let ((key (match-string 1 payload))
              (val (match-string 2 payload)))
          (puthash key val sql-datum--meta)
-         (sql-datum--update-mode-line))))
+         (sql-datum--update-mode-line)
+         ;; Database changed — clear stale completion state and refresh
+         (when (equal key "database")
+           (setq sql-datum--schemas nil)
+           (setq sql-datum--tables nil)
+           (setq sql-datum--routines nil)
+           (clrhash sql-datum--columns)
+           (clrhash sql-datum--column-details)
+           (clrhash sql-datum--columns-pending)
+           (clrhash sql-datum--routine-signatures)
+           (clrhash sql-datum--routine-types)
+           (sql-datum--refresh-async (current-buffer))))))
     ("result-file"
      ;; Greedy .* captures path (may contain colons, e.g. C:\path),
      ;; [^:]+ captures the format suffix after the last colon.
@@ -248,16 +263,15 @@ Handles partial envelope lines split across multiple filter calls."
            (when initial
              (sql-datum--running-start-timer))))))
     ("definition"
-     ;; [^:]+ captures simple object name (no colons), .* captures
-     ;; the definition body which may contain colons.
-     (when (string-match "\\([^:]+\\):\\(.*\\)" payload)
-       (let ((obj-name (match-string 1 payload))
-             (text (replace-regexp-in-string "\\\\n" "\n"
-                                             (match-string 2 payload)))
-             (sqli-buf (current-buffer)))
-         ;; Defer to avoid disrupting comint's process filter context
-         (run-at-time 0 nil #'sql-datum--show-definition
-                      obj-name text sqli-buf))))))
+     ;; Payload is JSON: {"name": ..., "text": ...}
+     (let* ((parsed (json-parse-string payload :object-type 'alist))
+            (obj-name (alist-get 'name parsed))
+            (text (replace-regexp-in-string "\\\\n" "\n"
+                                            (alist-get 'text parsed)))
+            (sqli-buf (current-buffer)))
+       ;; Defer to avoid disrupting comint's process filter context
+       (run-at-time 0 nil #'sql-datum--show-definition
+                    obj-name text sqli-buf)))))
 
 (defun sql-datum--set-dialect (name)
   "Set the buffer-local dialect to NAME and refresh the mode line."
@@ -311,7 +325,12 @@ When `sql-datum-open-result-file' is non-nil, also offer to open the file."
                         sql-datum--routine-types))))
           ((pred (string-prefix-p "columns:"))
            (let ((table (substring kind (length "columns:"))))
-             (puthash table items sql-datum--columns)))
+             ;; Items are now full rows [name, type, nullable, default].
+             ;; Store just names for completion, full rows for metadata.
+             (puthash table (mapcar (lambda (row) (if (consp row) (car row) row))
+                                    items)
+                      sql-datum--columns)
+             (puthash table items sql-datum--column-details)))
           ((pred (string-prefix-p "xdb:"))
            (sql-datum--handle-xdb-introspect kind items))))
     (error (message "datum: failed to parse introspect payload: %s" err))))
@@ -341,8 +360,12 @@ When `sql-datum-open-result-file' is non-nil, also offer to open the file."
                         sql-datum--routine-types))))
           ((pred (string-prefix-p "columns:"))
            (let* ((table (substring kind (length "columns:")))
-                  (existing (gethash table sql-datum--columns)))
-             (puthash table (append existing items) sql-datum--columns)))
+                  (existing-names (gethash table sql-datum--columns))
+                  (existing-details (gethash table sql-datum--column-details))
+                  (new-names (mapcar (lambda (row) (if (consp row) (car row) row))
+                                     items)))
+             (puthash table (append existing-names new-names) sql-datum--columns)
+             (puthash table (append existing-details items) sql-datum--column-details)))
           ((pred (string-prefix-p "xdb:"))
            (sql-datum--handle-xdb-introspect kind items))))
     (error (message "datum: failed to parse introspect+ payload: %s" err))))
@@ -551,7 +574,7 @@ With no identifier at point, prompts for a name."
   (when (or (null name) (string-empty-p name))
     (user-error "No identifier provided"))
   (xref-push-marker-stack)
-  (sql-datum--send-command (format ":definition %s" name)))
+  (sql-datum--send-command (format ":definition %s" name) t))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Completion at point
@@ -787,6 +810,16 @@ tables are found."
                       (setq continue nil)))))))))
       (delete-dups (nreverse tables)))))
 
+(defun sql-datum--at-prompt-p (buf)
+  "Return non-nil if BUF appears to be at a datum prompt.
+Checks whether the last non-whitespace character before `point-max' is `>'."
+  (with-current-buffer buf
+    (save-excursion
+      (goto-char (point-max))
+      (skip-chars-backward " \t\n\r")
+      (and (> (point) (point-min))
+           (eq (char-before) ?>)))))
+
 (defun sql-datum--fetch-columns-async (table buf col-hash pending-hash)
   "Fetch columns for TABLE silently in the background.
 BUF is the SQLi process buffer.  COL-HASH is `sql-datum--columns',
@@ -794,41 +827,31 @@ PENDING-HASH is `sql-datum--columns-pending'.
 Skips if TABLE is already cached or already in-flight."
   (let ((col-key (concat "columns:" table)))
     ;; Check if already cached (try exact key match in col-hash)
-    (unless (or (gethash col-key col-hash)
-                ;; Also check without the columns: prefix for any key containing this table
+    (unless (or (gethash table col-hash)
+                ;; Also check with "columns:" prefix or fuzzy schema match
+                (gethash col-key col-hash)
                 (let ((found nil))
                   (maphash (lambda (k _v)
-                             (when (and (string-prefix-p "columns:" k)
-                                        (let ((tname (substring k 8)))
-                                          (or (string-equal-ignore-case tname table)
-                                              (string-suffix-p (concat "." table)
-                                                               tname t))))
+                             (when (or (string-equal-ignore-case k table)
+                                       (string-suffix-p (concat "." table) k t))
                                (setq found t)))
                            col-hash)
                   found)
                 (gethash table pending-hash))
       (let ((proc (get-buffer-process buf)))
-        (when proc
+        (when (and proc (sql-datum--at-prompt-p buf))
           (with-current-buffer buf
             (puthash table t sql-datum--columns-pending)
             (comint-send-string proc (format ":columns %s :silent\n" table)))
-          (letrec ((watcher
-                    (lambda (_output)
-                      ;; Check if columns for this table have been populated
-                      (let ((populated nil))
-                        (maphash (lambda (k _v)
-                                   (when (and (string-prefix-p "columns:" k)
-                                              (let ((tname (substring k 8)))
-                                                (or (string-equal-ignore-case tname table)
-                                                    (string-suffix-p (concat "." table)
-                                                                     tname t))))
-                                     (setq populated t)))
-                                 col-hash)
-                        (when populated
+          (let ((sigil (format "##DATUM:introspect:columns:%s:" table)))
+            (letrec ((watcher
+                      (lambda (output)
+                        ;; Match on the raw envelope line — O(1) per output chunk
+                        (when (string-match-p (regexp-quote sigil) output)
                           (remove-hook 'comint-output-filter-functions watcher t)
-                          (remhash table pending-hash))))))
-            (with-current-buffer buf
-              (add-hook 'comint-output-filter-functions watcher nil t))))))))
+                          (remhash table pending-hash)))))
+              (with-current-buffer buf
+                (add-hook 'comint-output-filter-functions watcher nil t)))))))))
 
 (defun sql-datum--xdb-fetch-async (db buf xdb-cache callback)
   "Send :refresh-db DB asynchronously.  Call CALLBACK when cache entry is ready.
@@ -1387,23 +1410,25 @@ defaults to `sql-datum-import-batch-size', overridden with \\[universal-argument
              (file-name-nondirectory abs-path) table-name
              (or mode-flag " (default)") batch-size)))
 
-(defun sql-datum--send-command (cmd)
+(defun sql-datum--send-command (cmd &optional silent)
   "Send CMD string to the active datum process.
 If the SQLi buffer is not currently visible, display it.
 The command is echoed at the process mark so it appears in the
-buffer history, making saved sessions easier to follow."
+buffer history, making saved sessions easier to follow.
+When SILENT is non-nil, skip the echo and buffer display."
   (let ((buf (sql-find-sqli-buffer 'datum)))
     (unless buf
       (user-error "No active datum buffer found"))
     (let* ((buf-obj (get-buffer buf))
            (proc (get-buffer-process buf-obj)))
-      (unless (get-buffer-window buf-obj)
-        (display-buffer buf-obj))
-      (when proc
-        (with-current-buffer buf-obj
-          (goto-char (process-mark proc))
-          (insert (format "\n>> %s\n" cmd))
-          (set-marker (process-mark proc) (point))))
+      (unless silent
+        (unless (get-buffer-window buf-obj)
+          (display-buffer buf-obj))
+        (when proc
+          (with-current-buffer buf-obj
+            (goto-char (process-mark proc))
+            (insert (format "\n>> %s\n" cmd))
+            (set-marker (process-mark proc) (point)))))
       (comint-send-string buf-obj (concat cmd "\n")))))
 
 (defun sql-datum--get-dialect ()
@@ -1654,8 +1679,8 @@ clears `sql-datum--refresh-in-progress'."
       (when proc
         (comint-send-string proc (concat (car commands) "\n"))
         (letrec ((watcher
-                  (lambda (_output)
-                    (when (string-match-p (rx bol (* nonl) ">") _output)
+                  (lambda (output)
+                    (when (string-match-p (rx bol (* nonl) ">") output)
                       (with-current-buffer buf
                         (remove-hook 'comint-output-filter-functions watcher t))
                       ;; Defer to the event loop so pending user input

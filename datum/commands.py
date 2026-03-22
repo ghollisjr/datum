@@ -358,8 +358,14 @@ def _run_introspect(sql, kind, label, params=None, silent=False):
             column_widths, print_ready = printer.format_rows(column_names, rows)
             print()
             printer.print_rows(column_widths, print_ready)
-        # Send envelope for Emacs-side state
-        items = [str(row[0]) for row in rows]
+        # Send envelope for Emacs-side state.
+        # For columns, send full rows [col_name, type, nullable, default]
+        # so Emacs can store detailed metadata; for everything else, just names.
+        if kind.startswith("columns:"):
+            items = [[str(col) if col is not None else None for col in row]
+                     for row in rows]
+        else:
+            items = [str(row[0]) for row in rows]
         envelope.introspect(kind, items)
     except Exception as err:
         if not silent:
@@ -935,8 +941,8 @@ def definition(args):
     """Built-in :definition command — show DDL/source for a SQL object."""
     global _driver
     if not args:
-        print(":definition requires an object name. "
-              "Example: :definition dbo.my_table")
+        envelope.error(":definition requires an object name. "
+                       "Example: :definition dbo.my_table")
         return
 
     raw_name = args[0]
@@ -960,7 +966,7 @@ def definition(args):
     elif len(parts) == 1:
         name = parts[0]
     else:
-        print(f":definition — cannot parse '{raw_name}'")
+        envelope.error(f":definition — cannot parse '{raw_name}'")
         return
 
     try:
@@ -1008,7 +1014,7 @@ def definition(args):
         cursor.execute(sql, params)
         row = cursor.fetchone()
         if not row:
-            print(f":definition — object '{raw_name}' not found")
+            envelope.error(f":definition — object '{raw_name}' not found")
             return
 
         object_type = str(row[0])
@@ -1021,20 +1027,20 @@ def definition(args):
         if object_type == "TABLE":
             rows = cursor.fetchall()
             if not rows:
-                print(f":definition — no columns found for {display_name}")
+                envelope.error(f":definition — no columns found for {display_name}")
                 return
             text = _synthesize_create_table(schema, name, rows)
         else:
             row = cursor.fetchone()
             if not row or not row[0]:
-                print(f":definition — no source found for {display_name}")
+                envelope.error(f":definition — no source found for {display_name}")
                 return
             text = str(row[0]).rstrip().rstrip(";\r\n \t").rstrip() + ";"
 
         envelope.definition(display_name, text)
 
     except Exception as err:
-        print(f":definition error: {err}")
+        envelope.error(f":definition error: {err}")
 
 
 _builtins = {

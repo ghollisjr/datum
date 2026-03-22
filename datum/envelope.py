@@ -114,10 +114,12 @@ def definition(object_name, text):
     """Send a definition (DDL/source) to Emacs for display.
 
     object_name is the display name (e.g. 'dbo.my_table').
-    text is the DDL or property text.  Newlines are escaped as \\n
-    so the envelope fits on a single line.
+    text is the DDL or property text.  The payload is JSON-encoded to
+    avoid fragility with colon-separated parsing when names contain colons.
     """
-    _send("definition", f"{object_name}:{text.replace(chr(10), chr(92) + 'n')}")
+    payload = json.dumps({"name": object_name,
+                          "text": text.replace(chr(10), chr(92) + 'n')})
+    _send("definition", payload)
 
 
 def dialect(name):

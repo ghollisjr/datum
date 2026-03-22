@@ -127,14 +127,38 @@ def _infer_format(path):
     return {".csv": "csv", ".parquet": "parquet", ".json": "json"}.get(ext)
 
 
+def _dedupe_headers(headers):
+    """Append _1, _2, etc. to duplicate column names. Returns (headers, changed)."""
+    seen = {}
+    result = []
+    changed = False
+    for h in headers:
+        if h in seen:
+            seen[h] += 1
+            result.append(f"{h}_{seen[h]}")
+            changed = True
+        else:
+            seen[h] = 0
+            result.append(h)
+    return result, changed
+
+
 # --- Polars export (preferred when available) ---
 
 def _export_polars(path, cursor, fmt):
     """Export cursor results via polars. Returns row count."""
     headers = [col[0] for col in cursor.description]
+    headers, deduped = _dedupe_headers(headers)
+    if deduped:
+        envelope.warn(":out - duplicate column names detected; suffixed with _1, _2, etc.")
     batch_size = 50_000
     all_rows = []
 
+    # Polars cannot stream from Python iterables — pl.DataFrame(),
+    # pl.from_dicts(), and pl.from_records() all materialize fully in memory.
+    # LazyFrame.sink_* only works with file-based sources.  The batched
+    # fetchmany is still useful for limiting ODBC cursor memory, but polars
+    # requires the full dataset before it can build a DataFrame.
     rows = cursor.fetchmany(batch_size)
     while rows:
         all_rows.extend(rows)
@@ -164,6 +188,9 @@ def _export_polars(path, cursor, fmt):
 def _export_csv(path, cursor):
     """Stream cursor results to a CSV file. Returns row count."""
     headers = [col[0] for col in cursor.description]
+    headers, deduped = _dedupe_headers(headers)
+    if deduped:
+        envelope.warn(":out - duplicate column names detected; suffixed with _1, _2, etc.")
     rows_written = 0
     batch_size = 10_000
     with open(path, 'w', encoding='utf-8', newline='') as f:
@@ -184,6 +211,9 @@ def _export_arrow(path, cursor, fmt):
     Returns row count.
     """
     headers = [col[0] for col in cursor.description]
+    headers, deduped = _dedupe_headers(headers)
+    if deduped:
+        envelope.warn(":out - duplicate column names detected; suffixed with _1, _2, etc.")
     batch_size = 10_000
     rows_written = 0
     batches = []
