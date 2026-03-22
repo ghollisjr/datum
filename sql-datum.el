@@ -1388,7 +1388,7 @@ If the SQLi buffer is not currently visible, display it."
     (unless buf
       (user-error "No active datum buffer found"))
     (let ((buf-obj (get-buffer buf)))
-      (unless (get-buffer-window buf-obj t)
+      (unless (get-buffer-window buf-obj)
         (display-buffer buf-obj))
       (comint-send-string buf-obj (concat cmd "\n")))))
 
