@@ -275,13 +275,8 @@ def int_len(number):
 
 
 def decimal_len(decimal_number):
-    """Calculate the length, in characters, of a number with decimals."""
-    sign, digits, _ = decimal_number.as_tuple()
-
-    # digits + decimal point + sign (where sign is either 0 or 1 for negatives)
-    total_length = len(digits) + 1 + sign
-    # TODO: I need to give this more thought, but it seems by default we get at
-    # most 22 characters printed. This only became apparent working with Oracle
-    # , which BTW reports _all numbers_ as Decimal. But is that the driver, or
-    # just this particular DB? Until I know, let's take the easy way out...
-    return min(22, total_length)
+    """Calculate the length, in characters, of a Decimal number."""
+    # Use the actual string representation to avoid edge cases with
+    # integers-as-Decimal (no decimal point) and scientific notation.
+    # Cap at 22 for Oracle which reports all numbers as Decimal.
+    return min(22, len(str(decimal_number)))
