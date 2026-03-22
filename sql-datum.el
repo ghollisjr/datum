@@ -1389,13 +1389,21 @@ defaults to `sql-datum-import-batch-size', overridden with \\[universal-argument
 
 (defun sql-datum--send-command (cmd)
   "Send CMD string to the active datum process.
-If the SQLi buffer is not currently visible, display it."
+If the SQLi buffer is not currently visible, display it.
+The command is echoed at the process mark so it appears in the
+buffer history, making saved sessions easier to follow."
   (let ((buf (sql-find-sqli-buffer 'datum)))
     (unless buf
       (user-error "No active datum buffer found"))
-    (let ((buf-obj (get-buffer buf)))
+    (let* ((buf-obj (get-buffer buf))
+           (proc (get-buffer-process buf-obj)))
       (unless (get-buffer-window buf-obj)
         (display-buffer buf-obj))
+      (when proc
+        (with-current-buffer buf-obj
+          (goto-char (process-mark proc))
+          (insert (format "\n>> %s\n" cmd))
+          (set-marker (process-mark proc) (point))))
       (comint-send-string buf-obj (concat cmd "\n")))))
 
 (defun sql-datum--get-dialect ()
