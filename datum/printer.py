@@ -5,12 +5,27 @@ from pyodbc import ProgrammingError
 import decimal
 import math
 import operator as op
+import unicodedata
 
 _config = {}
 
 # Cached translation table for text_formatter; rebuilt when config changes.
 _trans_table = None
 _trans_config_key = None
+
+
+def display_width(s):
+    """Return the display width of string s, counting wide chars as 2."""
+    w = 0
+    for ch in str(s):
+        w += 2 if unicodedata.east_asian_width(ch) in ('W', 'F') else 1
+    return w
+
+
+def pad_to_width(s, width):
+    """Pad string s with spaces to reach target display width."""
+    s = str(s)
+    return s + ' ' * max(0, width - display_width(s))
 
 
 def initialize_module(config):
@@ -55,21 +70,21 @@ def print_cursor_results(a_cursor):
                 raise e
 
 
-def format_row(format_str, row):
+def format_row(column_widths, row):
     """Format a single row, handling hline strings and data tuples."""
     if isinstance(row, str):
         return row
-    return format_str.format(*row)
+    parts = [pad_to_width(cell, w) for cell, w in zip(row, column_widths)]
+    return "| " + " | ".join(parts) + " |"
 
 
-def print_rows(format_str, rows):
+def print_rows(column_widths, rows):
     """Print formatted rows, handling hline strings and data tuples."""
-    fmt = format_str.format
     for row in rows:
         if isinstance(row, str):
             print(row)
         else:
-            print(fmt(*row))
+            print(format_row(column_widths, row))
 
 
 def print_resultset(a_cursor):
@@ -86,9 +101,9 @@ def print_resultset(a_cursor):
     # when exploring how many columns there are and their names in a new DB
     column_names = [text_formatter(column[0]) for column in
                     a_cursor.description]
-    format_str, print_ready = format_rows(column_names, odbc_rows)
+    column_widths, print_ready = format_rows(column_names, odbc_rows)
     print()  # blank line
-    print_rows(format_str, print_ready)
+    print_rows(column_widths, print_ready)
     # Try to determine if all rows returned were printed
     # MS SQL Server doesn't report the total rows SELECTed,
     # but for example MySql does.
@@ -112,8 +127,18 @@ def text_formatter(value):
     """
     col_width = _config["column_display_length"]
     value = str(value).translate(_get_trans_table())
-    if col_width and len(value) > col_width:
-        value = value[:col_width-5] + "[...]"
+    if col_width and display_width(value) > col_width:
+        # Truncate by walking characters until display width reaches limit
+        truncated = []
+        w = 0
+        limit = col_width - 5  # leave room for "[...]"
+        for ch in value:
+            cw = 2 if unicodedata.east_asian_width(ch) in ('W', 'F') else 1
+            if w + cw > limit:
+                break
+            truncated.append(ch)
+            w += cw
+        value = "".join(truncated) + "[...]"
     return value
 
 
@@ -125,18 +150,16 @@ def format_rows(column_names, raw_rows):
     """
     global _config
     null_string = _config["null_string"]
-    null_len = len(null_string)
+    null_len = display_width(null_string)
     num_cols = len(column_names)
     column_widths = [0] * num_cols
 
     if not raw_rows:
         for i, name in enumerate(column_names):
-            column_widths[i] = len(name)
-        format_str = "| " + " | ".join(f"{{{i}:{column_widths[i]}}}"
-                                        for i in range(num_cols)) + " |"
+            column_widths[i] = display_width(name)
         separator = ["-" * (w + 2) for w in column_widths]
         hline = "|" + "+".join(separator) + "|"
-        return format_str, [column_names, hline]
+        return column_widths, [column_names, hline]
 
     # Build per-column formatters from the first non-None value in each column.
     # This eliminates the isinstance chain for every cell.
@@ -196,17 +219,15 @@ def format_rows(column_names, raw_rows):
         formatted.append(tuple(new_row))
 
     for i, name in enumerate(column_names):
-        name_len = len(name)
+        name_len = display_width(name)
         if name_len > column_widths[i]:
             column_widths[i] = name_len
 
-    format_str = "| " + " | ".join(f"{{{i}:{column_widths[i]}}}"
-                                    for i in range(num_cols)) + " |"
     separator = ["-" * (w + 2) for w in column_widths]
     hline = "|" + "+".join(separator) + "|"
     formatted.insert(0, column_names)
     formatted.insert(1, hline)
-    return format_str, formatted
+    return column_widths, formatted
 
 
 # --- Per-type formatter functions ---
@@ -230,11 +251,11 @@ def _fmt_decimal(value):
 
 def _fmt_str(value):
     v = text_formatter(value)
-    return v, len(v)
+    return v, display_width(v)
 
 def _fmt_bytes(value):
     v = text_formatter('0x' + value.hex())
-    return v, len(v)
+    return v, display_width(v)
 
 def _fmt_fallback(value):
     return "#DatumPrinterBroke#", 19
@@ -257,10 +278,8 @@ def decimal_len(decimal_number):
     """Calculate the length, in characters, of a number with decimals."""
     sign, digits, _ = decimal_number.as_tuple()
 
-    # digits + separator + sign (where sign is either 0 or 1 for negatives)
-    # NOTE: plus 1 because something was off when testing. I need to research a
-    #       bit more to understand what's up, but it works...
-    total_length = len(digits) + 1 + sign + 1
+    # digits + decimal point + sign (where sign is either 0 or 1 for negatives)
+    total_length = len(digits) + 1 + sign
     # TODO: I need to give this more thought, but it seems by default we get at
     # most 22 characters printed. This only became apparent working with Oracle
     # , which BTW reports _all numbers_ as Decimal. But is that the driver, or

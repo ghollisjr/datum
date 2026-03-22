@@ -355,9 +355,9 @@ def _run_introspect(sql, kind, label, params=None, silent=False):
         if not silent:
             # Use the standard printer for consistent formatting
             column_names = [printer.text_formatter(col[0]) for col in cursor.description]
-            format_str, print_ready = printer.format_rows(column_names, rows)
+            column_widths, print_ready = printer.format_rows(column_names, rows)
             print()
-            printer.print_rows(format_str, print_ready)
+            printer.print_rows(column_widths, print_ready)
         # Send envelope for Emacs-side state
         items = [str(row[0]) for row in rows]
         envelope.introspect(kind, items)
@@ -406,9 +406,9 @@ def tables(args):
             return
         # Use the standard printer for consistent formatting
         column_names = [printer.text_formatter(col[0]) for col in cursor.description]
-        format_str, print_ready = printer.format_rows(column_names, rows)
+        column_widths, print_ready = printer.format_rows(column_names, rows)
         print()
-        printer.print_rows(format_str, print_ready)
+        printer.print_rows(column_widths, print_ready)
         # Send both bare and schema-qualified names for default schema,
         # schema-qualified only for other schemas.
         default_schema = _driver.default_schema
@@ -447,9 +447,9 @@ def routines(args):
             print("(no routines found)")
             return
         column_names = [printer.text_formatter(col[0]) for col in cursor.description]
-        format_str, print_ready = printer.format_rows(column_names, rows)
+        column_widths, print_ready = printer.format_rows(column_names, rows)
         print()
-        printer.print_rows(format_str, print_ready)
+        printer.print_rows(column_widths, print_ready)
         default_schema = _driver.default_schema
         items = []
         for row in rows:
@@ -544,9 +544,9 @@ def running(args):
                 clean_rows.append(tuple(row))
             column_names = [printer.text_formatter(col[0])
                             for col in cursor.description]
-            format_str, print_ready = printer.format_rows(column_names,
-                                                          clean_rows)
-            queries_text = "\n".join(printer.format_row(format_str, row)
+            column_widths, print_ready = printer.format_rows(column_names,
+                                                             clean_rows)
+            queries_text = "\n".join(printer.format_row(column_widths, row)
                                      for row in print_ready)
     except Exception as err:
         queries_text = f"(error: {err})"
@@ -562,9 +562,9 @@ def running(args):
             if rows:
                 column_names = [printer.text_formatter(col[0])
                                 for col in cursor.description]
-                format_str, print_ready = printer.format_rows(column_names,
-                                                              rows)
-                jobs_text = "\n".join(printer.format_row(format_str, row)
+                column_widths, print_ready = printer.format_rows(column_names,
+                                                                rows)
+                jobs_text = "\n".join(printer.format_row(column_widths, row)
                                       for row in print_ready)
             else:
                 jobs_text = "(none)"
