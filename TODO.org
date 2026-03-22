@@ -1,5 +1,11 @@
 #+TITLE: Datum TODO
 
+* TODO Qualified column autocomplete
+Right now, columns can be completed as-is once there's enough of a
+query that the table can be inferred, but <table>.<column> is not
+suggested nor autocompleted. This along with alias-qualified
+completion would be beneficial.
+
 * TODO Scheduled job support for MySQL/MariaDB
 MySQL/MariaDB has no built-in job agent like SQL Server Agent, but does
 have the Event Scheduler (=CREATE EVENT=).  Add support for listing and

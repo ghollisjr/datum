@@ -76,6 +76,7 @@ and =M-,= your way back through the stack.
 | =C-c C-x c=   | Connect to a named connection              |
 | =C-c C-x n=   | Switch active SQLi buffer                  |
 | =C-c C-x s=   | Open scratch SQL buffer (=C-u= for extra)  |
+| =C-c C-x d=   | Disconnect session                         |
 
 ** Other
 

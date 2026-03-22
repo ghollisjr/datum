@@ -1815,6 +1815,57 @@ Without, toggle on/off using `sql-datum-refresh-interval'
         (setq sql-datum--refresh-timer nil)))))
 
 ;;; ---------------------------------------------------------------------------
+;;; Disconnect
+;;; ---------------------------------------------------------------------------
+
+(defun sql-datum-disconnect ()
+  "Disconnect the current datum session.
+Sends :exit to the datum process, kills the SQLi buffer, and
+cancels any active refresh timers.  Scratch buffers are kept
+but detached, so they can be reused with a new connection."
+  (interactive)
+  (let ((sqli-name (cond
+                    ;; In a SQL editing buffer, use sql-buffer
+                    ((and (derived-mode-p 'sql-mode) sql-buffer)
+                     sql-buffer)
+                    ;; In the SQLi buffer itself
+                    ((derived-mode-p 'sql-interactive-mode)
+                     (buffer-name (current-buffer)))
+                    ;; Fall back to finding any datum SQLi
+                    (t (sql-find-sqli-buffer 'datum)))))
+    (unless sqli-name
+      (user-error "No active datum session"))
+    (let ((sqli-buf (get-buffer sqli-name)))
+      (unless (and sqli-buf (buffer-live-p sqli-buf))
+        (user-error "No active datum session"))
+      ;; Cancel refresh timers
+      (when sql-datum--refresh-timer
+        (cancel-timer sql-datum--refresh-timer)
+        (setq sql-datum--refresh-timer nil))
+      (when sql-datum--running-timer
+        (sql-datum--running-stop-timer))
+      ;; Send :exit to cleanly shut down
+      (let ((proc (get-buffer-process sqli-buf)))
+        (when (and proc (process-live-p proc))
+          (comint-send-string proc ":exit\n")
+          ;; Give it a moment to clean up, then force if needed
+          (sit-for 0.5)
+          (when (process-live-p proc)
+            (delete-process proc))))
+      ;; Detach scratch buffers so they can be reused with a new connection
+      (dolist (buf (buffer-list))
+        (when (and (buffer-live-p buf)
+                   (with-current-buffer buf
+                     (and (derived-mode-p 'sql-mode)
+                          (equal sql-buffer sqli-name)
+                          (string-match-p "\\*datum-scratch" (buffer-name buf)))))
+          (with-current-buffer buf
+            (setq-local sql-buffer nil))))
+      ;; Kill the SQLi buffer
+      (kill-buffer sqli-buf)
+      (message "datum: session disconnected"))))
+
+;;; ---------------------------------------------------------------------------
 ;;; Keybindings
 ;;; ---------------------------------------------------------------------------
 
@@ -1850,6 +1901,8 @@ Without, toggle on/off using `sql-datum-refresh-interval'
   (define-key sql-mode-map (kbd "C-c C-x C-n") #'sql-set-sqli-buffer)
   (define-key sql-mode-map (kbd "C-c C-x s")   #'sql-datum-scratch)
   (define-key sql-mode-map (kbd "C-c C-x C-s") #'sql-datum-scratch)
+  (define-key sql-mode-map (kbd "C-c C-x d")   #'sql-datum-disconnect)
+  (define-key sql-mode-map (kbd "C-c C-x C-d") #'sql-datum-disconnect)
   ;; C-c s y: copy last result
   (define-key sql-mode-map (kbd "C-c s y") #'sql-datum-copy-last-result)
   ;; C-c C-c: smart send (region or paragraph, auto-connect)
