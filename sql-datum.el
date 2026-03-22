@@ -521,33 +521,166 @@ When DISPLAY is non-nil, pop up the buffer; otherwise just update it."
     (sql-datum--running-stop-timer)))
 
 ;;; ---------------------------------------------------------------------------
+;;; Identifier quoting helpers
+;;; ---------------------------------------------------------------------------
+
+(defun sql-datum--unquote-part (part)
+  "Strip bracket or double-quote quoting from a single identifier PART.
+Handles both closed quotes and unclosed leading quotes (mid-typing).
+\"[foo bar]\" → \"foo bar\", \"\\\"foo\\\"\" → \"foo\", \"\\\"che\" → \"che\"."
+  (cond ((and (string-prefix-p "[" part)
+              (string-suffix-p "]" part))
+         (substring part 1 -1))
+        ((and (string-prefix-p "\"" part)
+              (string-suffix-p "\"" part)
+              (> (length part) 1))
+         (substring part 1 -1))
+        ;; Unclosed leading quote/bracket (user is mid-typing)
+        ((string-prefix-p "\"" part)
+         (substring part 1))
+        ((string-prefix-p "[" part)
+         (substring part 1))
+        (t part)))
+
+(defun sql-datum--split-identifier (raw)
+  "Split RAW identifier string on dots, respecting bracket and double-quote quoting.
+Returns a list of parts (still quoted).  E.g.
+  \"public.\\\"my table\\\"\" → (\"public\" \"\\\"my table\\\"\")
+  \"dbo.[my col]\"       → (\"dbo\" \"[my col]\")."
+  (let ((parts nil)
+        (current "")
+        (in-bracket nil)
+        (in-dquote nil)
+        (i 0)
+        (len (length raw)))
+    (while (< i len)
+      (let ((ch (aref raw i)))
+        (cond
+         ((and (not in-bracket) (not in-dquote) (eq ch ?\[))
+          (setq in-bracket t)
+          (setq current (concat current (string ch))))
+         ((and in-bracket (eq ch ?\]))
+          (setq in-bracket nil)
+          (setq current (concat current (string ch))))
+         ((and (not in-bracket) (not in-dquote) (eq ch ?\"))
+          (setq in-dquote t)
+          (setq current (concat current (string ch))))
+         ((and in-dquote (eq ch ?\"))
+          (setq in-dquote nil)
+          (setq current (concat current (string ch))))
+         ((and (not in-bracket) (not in-dquote) (eq ch ?.))
+          (unless (string-empty-p current)
+            (push current parts))
+          (setq current ""))
+         (t
+          (setq current (concat current (string ch))))))
+      (setq i (1+ i)))
+    (unless (string-empty-p current)
+      (push current parts))
+    (nreverse parts)))
+
+(defun sql-datum--needs-quoting-p (name)
+  "Return non-nil if identifier NAME contains characters requiring SQL quoting."
+  (and (stringp name)
+       (not (string-empty-p name))
+       (string-match-p "[^a-zA-Z0-9_.#@]" name)))
+
+(defun sql-datum--quote-segment (segment dialect)
+  "Quote a single identifier SEGMENT for DIALECT if it needs quoting.
+Uses double quotes for postgres, square brackets for mssql."
+  (if (sql-datum--needs-quoting-p segment)
+      (if (equal dialect "mssql")
+          (concat "[" segment "]")
+        (concat "\"" segment "\""))
+    segment))
+
+(defun sql-datum--quote-identifier (name dialect)
+  "Quote each dotted segment of NAME that needs quoting for DIALECT.
+E.g. \"public.my table\" → \"public.\\\"my table\\\"\" for postgres,
+or \"dbo.my col\" → \"dbo.[my col]\" for mssql."
+  (if (not (sql-datum--needs-quoting-p name))
+      name
+    (mapconcat (lambda (seg) (sql-datum--quote-segment seg dialect))
+               (split-string name "\\." t)
+               ".")))
+
+(defun sql-datum--maybe-quote-completed (cand start dialect)
+  "After completion inserts CAND at START, replace with quoted form if needed.
+DIALECT determines quoting style.  If the user already typed an
+opening quote or bracket before START, it is consumed so the result
+doesn't get double-quoted."
+  (when (sql-datum--needs-quoting-p cand)
+    (let ((quoted (sql-datum--quote-identifier cand dialect))
+          (real-start start))
+      (unless (string= cand quoted)
+        ;; Check for a user-typed opening quote/bracket just before start
+        (when (> real-start (point-min))
+          (let ((prev-char (char-after (1- real-start))))
+            (when (or (and (eq prev-char ?\") (not (equal dialect "mssql")))
+                      (and (eq prev-char ?\[) (equal dialect "mssql")))
+              (setq real-start (1- real-start)))))
+        (let ((end (point)))
+          (delete-region real-start end)
+          (goto-char real-start)
+          (insert quoted))))))
+
+;;; ---------------------------------------------------------------------------
 ;;; Goto Definition (M-.)
 ;;; ---------------------------------------------------------------------------
 
+(defun sql-datum--scan-quoted-identifier (direction)
+  "Scan in DIRECTION (-1 backward, 1 forward) over a possibly-quoted SQL identifier.
+Handles bare identifiers, bracket-quoted [name with spaces], and
+double-quoted \"name with spaces\", connected by dots.
+Returns the new position."
+  (let ((keep-going t))
+    (while keep-going
+      (setq keep-going nil)
+      (cond
+       ;; Double-quoted segment
+       ((and (eq direction 1) (eq (char-after) ?\"))
+        (forward-char)
+        (search-forward "\"" nil t)
+        (setq keep-going (eq (char-after) ?.)))
+       ((and (eq direction -1) (eq (char-before) ?\"))
+        (backward-char)
+        (search-backward "\"" nil t)
+        (setq keep-going (eq (char-before) ?.)))
+       ;; Bracket-quoted segment
+       ((and (eq direction 1) (eq (char-after) ?\[))
+        (forward-char)
+        (search-forward "]" nil t)
+        (setq keep-going (eq (char-after) ?.)))
+       ((and (eq direction -1) (eq (char-before) ?\]))
+        (backward-char)
+        (search-backward "[" nil t)
+        (setq keep-going (eq (char-before) ?.)))
+       ;; Bare identifier segment
+       (t
+        (if (eq direction 1)
+            (skip-chars-forward "a-zA-Z0-9_#@")
+          (skip-chars-backward "a-zA-Z0-9_#@"))
+        (setq keep-going
+              (if (eq direction 1)
+                  (eq (char-after) ?.)
+                (eq (char-before) ?.)))))
+      ;; Skip the dot to continue to the next segment
+      (when keep-going
+        (forward-char direction)))
+    (point)))
+
 (defun sql-datum--identifier-at-point ()
-  "Return the SQL identifier at point, including dotted and bracket-quoted names.
-Strips bracket quoting from each part."
-  (let ((start (point))
-        (end (point))
-        beg)
+  "Return the SQL identifier at point, including dotted and quoted names.
+Handles bracket quoting ([name]) and double-quote quoting (\"name\"),
+returning the bare (unquoted) identifier for lookup."
+  (let (beg end)
     (save-excursion
-      ;; Move backward over identifier chars, dots, and brackets
-      (skip-chars-backward "a-zA-Z0-9_.\\[\\]")
-      (setq beg (point))
-      ;; Move forward over identifier chars, dots, and brackets
-      (goto-char start)
-      (skip-chars-forward "a-zA-Z0-9_.\\[\\]")
-      (setq end (point)))
+      (setq beg (sql-datum--scan-quoted-identifier -1))
+      (setq end (sql-datum--scan-quoted-identifier 1)))
     (when (> end beg)
       (let ((raw (buffer-substring-no-properties beg end)))
-        ;; Strip bracket quoting from each dotted part
-        (mapconcat (lambda (part)
-                     (if (and (string-prefix-p "[" part)
-                              (string-suffix-p "]" part))
-                         (substring part 1 -1)
-                       part))
-                   (split-string raw "\\." t)
-                   ".")))))
+        (let ((parts (sql-datum--split-identifier raw)))
+          (mapconcat #'sql-datum--unquote-part parts "."))))))
 
 (defvar sql-datum--definition-mode-map
   (let ((map (make-sparse-keymap)))
@@ -600,20 +733,30 @@ With no identifier at point, prompts for a name."
 ;;; Completion at point
 ;;; ---------------------------------------------------------------------------
 
+(defun sql-datum--strip-leading-quotes (s)
+  "Strip a leading double-quote or bracket from S.
+Handles the case where a user starts typing a quoted identifier
+and the completion framework passes the quote as part of the prefix."
+  (if (and (> (length s) 0)
+           (memq (aref s 0) '(?\" ?\[)))
+      (substring s 1)
+    s))
+
 (defun sql-datum--completion-match-p (prefix candidate)
   "Return non-nil if PREFIX matches CANDIDATE.
+Strips leading quote characters from PREFIX before matching.
 Matches against the full name, or if PREFIX has no dot, also against
 the portion after the last dot (so \"Pat\" matches \"dbo.PatientDim\").
 When PREFIX has a dot (e.g. \"dbo.MSr\"), also matches bare candidates
 against the part after the last dot (so \"dbo.MSr\" matches \"MSreplication\")."
-  (or (string-prefix-p prefix candidate t)
-      (and (not (string-match-p "\\." prefix))
-           (string-match-p "\\." candidate)
-           (string-prefix-p
-            prefix
-            (car (last (split-string candidate "\\.")))
-            t))
-))
+  (let ((prefix (sql-datum--strip-leading-quotes prefix)))
+    (or (string-prefix-p prefix candidate t)
+        (and (not (string-match-p "\\." prefix))
+             (string-match-p "\\." candidate)
+             (string-prefix-p
+              prefix
+              (car (last (split-string candidate "\\.")))
+              t)))))
 
 (defun sql-datum--make-completion-table (candidates _tables)
   "Build a completion table that also matches bare table name portions.
@@ -637,10 +780,13 @@ CANDIDATES is the full list."
                                string pred 't)))
          (cond ((null matches) nil)
                ((= (length matches) 1)
-                (if (string= string (car matches)) t (car matches)))
+                (if (string= (sql-datum--strip-leading-quotes string)
+                              (car matches))
+                    t
+                  (car matches)))
                (t (try-completion "" matches)))))
       ('lambda  ;; test-completion
-       (member string candidates))
+       (member (sql-datum--strip-leading-quotes string) candidates))
       (_ nil))))
 
 (defun sql-datum--parse-param-names (sig)
@@ -806,20 +952,15 @@ tables are found."
               ;; Check if we hit a clause-terminating keyword
               (if (looking-at stop-kw-re)
                   (setq continue nil)
-                ;; Read a table identifier
+                ;; Read a table identifier (may be quoted)
                 (let ((id-start (point)))
-                  (skip-chars-forward "a-zA-Z0-9_.\\[\\]#")
+                  (sql-datum--scan-quoted-identifier 1)
                   (if (= (point) id-start)
                       (setq continue nil)  ; no identifier found
                     (let* ((raw (buffer-substring-no-properties id-start (point)))
-                           ;; Strip bracket quoting from each segment
                            (cleaned (mapconcat
-                                     (lambda (seg)
-                                       (if (and (string-prefix-p "[" seg)
-                                                (string-suffix-p "]" seg))
-                                           (substring seg 1 -1)
-                                         seg))
-                                     (split-string raw "\\." t)
+                                     #'sql-datum--unquote-part
+                                     (sql-datum--split-identifier raw)
                                      ".")))
                       (unless (string-empty-p cleaned)
                         (push cleaned tables)))
@@ -948,14 +1089,16 @@ Returns a completion spec or nil if PREFIX is not a known database."
                         (t "")))
                 :exit-function
                 (lambda (cand status)
-                  (when (and (eq status 'finished)
-                             xrtypes
-                             (equal (gethash cand xrtypes) "FUNCTION"))
-                    (insert "()")
-                    (backward-char)
-                    (when (and xsigs (gethash cand xsigs))
-                      (message "%s(%s)" cand
-                               (gethash cand xsigs)))))))))))
+                  (when (eq status 'finished)
+                    ;; MSSQL always uses brackets
+                    (sql-datum--maybe-quote-completed cand start "mssql")
+                    (when (and xrtypes
+                               (equal (gethash cand xrtypes) "FUNCTION"))
+                      (insert "()")
+                      (backward-char)
+                      (when (and xsigs (gethash cand xsigs))
+                        (message "%s(%s)" cand
+                                 (gethash cand xsigs))))))))))))
 
 
 (defun sql-datum-completion-at-point ()
@@ -1030,12 +1173,15 @@ Completing a FUNCTION name auto-inserts parentheses."
        ;; --- Normal identifier completion ---
        (t
         (let* ((end (save-excursion
-                      (skip-chars-forward "a-zA-Z0-9_.#\\[\\]")
+                      (sql-datum--scan-quoted-identifier 1)
                       (point)))
                (start (save-excursion
-                        (skip-chars-backward "a-zA-Z0-9_.#\\[\\]")
+                        (sql-datum--scan-quoted-identifier -1)
                         (point)))
-               (prefix (buffer-substring-no-properties start end))
+               (raw-prefix (buffer-substring-no-properties start end))
+               ;; Strip quotes from prefix so it matches bare candidates
+               (prefix (let ((parts (sql-datum--split-identifier raw-prefix)))
+                         (mapconcat #'sql-datum--unquote-part parts ".")))
                (dialect (and buf (buffer-local-value 'sql-datum--dialect buf)))
                (dbs     (and buf (buffer-local-value 'sql-datum--databases buf)))
                (xdb-cache (and buf (buffer-local-value 'sql-datum--xdb-cache buf)))
@@ -1080,7 +1226,9 @@ Completing a FUNCTION name auto-inserts parentheses."
                             (delete-dups result))))
                        (effective-columns (or ctx-columns columns))
                        (candidates (append tables schemas routines effective-columns
-                                           (when (equal dialect "mssql") dbs))))
+                                           (when (equal dialect "mssql") dbs)))
+                       ;; Capture start for exit-function closure
+                       (comp-start start))
                   (when candidates
                     (list start end
                           (sql-datum--make-completion-table candidates tables)
@@ -1097,13 +1245,15 @@ Completing a FUNCTION name auto-inserts parentheses."
                                   (t "")))
                           :exit-function
                           (lambda (cand status)
-                            (when (and (eq status 'finished)
-                                       (sql-datum--routine-uses-parens-p
-                                        cand rtypes dialect))
-                              (insert "()")
-                              (backward-char)
-                              (when-let ((msg (sql-datum-eldoc-function)))
-                                (message "%s" msg)))))))))))))))
+                            (when (eq status 'finished)
+                              (sql-datum--maybe-quote-completed
+                               cand comp-start dialect)
+                              (when (sql-datum--routine-uses-parens-p
+                                     cand rtypes dialect)
+                                (insert "()")
+                                (backward-char)
+                                (when-let ((msg (sql-datum-eldoc-function)))
+                                  (message "%s" msg))))))))))))))))
 
 
 ;;; ---------------------------------------------------------------------------
