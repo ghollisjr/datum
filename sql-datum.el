@@ -758,15 +758,19 @@ against the part after the last dot (so \"dbo.MSr\" matches \"MSreplication\")."
               (car (last (split-string candidate "\\.")))
               t)))))
 
-(defun sql-datum--make-completion-table (candidates _tables)
+(defun sql-datum--make-completion-table (candidates _tables &optional sort-fn)
   "Build a completion table that also matches bare table name portions.
 For a prefix without a dot, a candidate like \"rempat.fmreport\" matches
 if the prefix matches either \"rempat.fmreport\" or \"fmreport\".
-CANDIDATES is the full list."
+CANDIDATES is the full list.  SORT-FN, when non-nil, is used as
+the `display-sort-function' in metadata."
   (lambda (string pred action)
     (pcase action
       ('metadata
-       '(metadata (category . sql-datum-identifier)))
+       (if sort-fn
+           `(metadata (category . sql-datum-identifier)
+                      (display-sort-function . ,sort-fn))
+         '(metadata (category . sql-datum-identifier))))
       ('t  ;; all-completions
        (let (result)
          (dolist (c candidates)
@@ -986,12 +990,9 @@ Checks whether the last non-whitespace character before `point-max' is `>'."
 BUF is the SQLi process buffer.  COL-HASH is `sql-datum--columns',
 PENDING-HASH is `sql-datum--columns-pending'.
 Skips if TABLE is already cached or already in-flight."
-  (let ((col-key (concat "columns:" table)))
-    ;; Check if already cached (try exact key match in col-hash)
-    (unless (or (gethash table col-hash)
-                ;; Also check with "columns:" prefix or fuzzy schema match
-                (gethash col-key col-hash)
-                (let ((found nil))
+  ;; Check if already cached (try exact key match in col-hash)
+  (unless (or (gethash table col-hash)
+              (let ((found nil))
                   (maphash (lambda (k _v)
                              (when (or (string-equal-ignore-case k table)
                                        (string-suffix-p (concat "." table) k t))
@@ -1020,7 +1021,7 @@ Skips if TABLE is already cached or already in-flight."
                         (remove-hook 'comint-output-filter-functions watcher t)
                         (remhash table pending-hash)))))
             (with-current-buffer buf
-              (add-hook 'comint-output-filter-functions watcher nil t))))))))
+              (add-hook 'comint-output-filter-functions watcher nil t)))))))
 
 (defun sql-datum--xdb-fetch-async (db buf xdb-cache callback)
   "Send :refresh-db DB asynchronously.  Call CALLBACK when cache entry is ready.
@@ -1111,7 +1112,9 @@ after a routine name, or on the same line as a procedure call),
 offers parameter name completion instead of normal identifiers.
 Completing a FUNCTION name auto-inserts parentheses."
   (when (and sql-datum-populate-completion
-             (not (nth 3 (syntax-ppss))))  ; not inside a string literal
+             ;; Suppress inside single-quoted strings only.  Double quotes
+             ;; are SQL identifier quotes and should still complete.
+             (not (eq (nth 3 (syntax-ppss)) ?')))
     (let* ((buf (or (and (derived-mode-p 'sql-interactive-mode) (current-buffer))
                     (let ((b (sql-find-sqli-buffer 'datum)))
                       (and b (get-buffer b)))))
@@ -1202,19 +1205,17 @@ Completing a FUNCTION name auto-inserts parentheses."
                           (let (result)
                             (dolist (tbl stmt-tables)
                               (let ((found nil))
-                                ;; Try exact key "columns:TABLE"
-                                (let ((exact (gethash (concat "columns:" tbl) col-hash)))
+                                ;; Try exact key match (hash stores bare table names)
+                                (let ((exact (gethash tbl col-hash)))
                                   (when exact
                                     (setq found t)
                                     (setq result (append exact result))))
                                 ;; Try suffix match for bare names against schema-qualified keys
                                 (unless found
                                   (maphash (lambda (k v)
-                                             (when (and (string-prefix-p "columns:" k)
-                                                        (let ((tname (substring k 8)))
-                                                          (or (string-equal-ignore-case tname tbl)
-                                                              (string-suffix-p
-                                                               (concat "." tbl) tname t))))
+                                             (when (or (string-equal-ignore-case k tbl)
+                                                       (string-suffix-p
+                                                        (concat "." tbl) k t))
                                                (setq found t)
                                                (setq result (append v result))))
                                            col-hash))
@@ -1225,13 +1226,30 @@ Completing a FUNCTION name auto-inserts parentheses."
                                      tbl buf col-hash pending-hash)))))
                             (delete-dups result))))
                        (effective-columns (or ctx-columns columns))
-                       (candidates (append tables schemas routines effective-columns
-                                           (when (equal dialect "mssql") dbs)))
+                       ;; Put columns first when we have context columns
+                       (candidates (if ctx-columns
+                                       (append ctx-columns tables schemas routines
+                                               (when (equal dialect "mssql") dbs))
+                                     (append tables schemas routines effective-columns
+                                             (when (equal dialect "mssql") dbs))))
                        ;; Capture start for exit-function closure
                        (comp-start start))
                   (when candidates
+                    (let ((sort-fn
+                           (when ctx-columns
+                             (let ((col-set (make-hash-table :test #'equal)))
+                               (dolist (c ctx-columns)
+                                 (puthash c t col-set))
+                               (lambda (completions)
+                                 (let (cols others)
+                                   (dolist (c completions)
+                                     (if (gethash c col-set)
+                                         (push c cols)
+                                       (push c others)))
+                                   (nconc (nreverse cols) (nreverse others))))))))
                     (list start end
-                          (sql-datum--make-completion-table candidates tables)
+                          (sql-datum--make-completion-table
+                           candidates tables sort-fn)
                           :exclusive t
                           :annotation-function
                           (lambda (cand)
@@ -1253,7 +1271,7 @@ Completing a FUNCTION name auto-inserts parentheses."
                                 (insert "()")
                                 (backward-char)
                                 (when-let ((msg (sql-datum-eldoc-function)))
-                                  (message "%s" msg))))))))))))))))
+                                  (message "%s" msg)))))))))))))))))
 
 
 ;;; ---------------------------------------------------------------------------
