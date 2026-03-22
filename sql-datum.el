@@ -146,10 +146,14 @@ Populated by the routine-types introspect envelope.")
 Hash: database name -> plist with keys :tables :schemas :routines
 :routine-types :routine-sigs :pending.")
 
-(defvar-local sql-datum--suppress-next-prompt nil
-  "When non-nil, the preoutput filter strips the next prompt.
-Set by silent commands (e.g. M-. definition) so the SQLi buffer
-stays completely clean.")
+(defvar-local sql-datum--suppress-prompt-count 0
+  "Number of upcoming prompts to suppress in the preoutput filter.
+Incremented by silent commands (e.g. M-. definition, background refresh).")
+
+(defvar-local sql-datum--prompt-suppressed nil
+  "Set to t by the preoutput filter when a prompt was just suppressed.
+Read and cleared by watchers that detect command completion without
+needing to see `>' in the output text.")
 
 (defvar-local sql-datum--refresh-in-progress nil
   "Non-nil while an async refresh chain is running.
@@ -198,13 +202,16 @@ Handles partial envelope lines split across multiple filter calls."
                                       (match-string 2 line))
         (push line clean-lines)))
     (let ((result (string-join (nreverse clean-lines) "\n")))
-      ;; When a silent command was sent, suppress the prompt that follows.
-      ;; The Python REPL emits "\n>" which, after envelope stripping, appears
-      ;; as whitespace + ">" in the remaining output.
-      (when sql-datum--suppress-next-prompt
-        (when (string-match-p "\\`[\n\r ]*>\\'" result)
-          (setq result "")
-          (setq sql-datum--suppress-next-prompt nil)))
+      ;; When silent commands are pending, suppress the prompt that follows
+      ;; each one.  The Python REPL emits "\n>" which, after envelope
+      ;; stripping, appears as whitespace + ">" in the remaining output.
+      ;; Set the suppressed flag so watchers can detect completion.
+      (setq sql-datum--prompt-suppressed nil)
+      (when (and (> sql-datum--suppress-prompt-count 0)
+                 (string-match-p "\\`[\n\r ]*>\\'" result))
+        (setq result "")
+        (cl-decf sql-datum--suppress-prompt-count)
+        (setq sql-datum--prompt-suppressed t))
       result)))
 
 (defvar sql-datum--running-timer nil
@@ -856,15 +863,23 @@ Skips if TABLE is already cached or already in-flight."
           (with-current-buffer buf
             (puthash table t sql-datum--columns-pending)
             (comint-send-string proc (format ":columns %s :silent\n" table)))
-          (let ((sigil (format "##DATUM:introspect:columns:%s:" table)))
-            (letrec ((watcher
-                      (lambda (output)
-                        ;; Match on the raw envelope line — O(1) per output chunk
-                        (when (string-match-p (regexp-quote sigil) output)
-                          (remove-hook 'comint-output-filter-functions watcher t)
-                          (remhash table pending-hash)))))
-              (with-current-buffer buf
-                (add-hook 'comint-output-filter-functions watcher nil t)))))))))
+          (letrec ((watcher
+                    (lambda (_output)
+                      ;; Check if columns have been populated by the preoutput
+                      ;; filter's envelope handler (which runs before us).
+                      (when (or (gethash table col-hash)
+                                (let ((found nil))
+                                  (maphash (lambda (k _v)
+                                             (when (or (string-equal-ignore-case k table)
+                                                       (string-suffix-p
+                                                        (concat "." table) k t))
+                                               (setq found t)))
+                                           col-hash)
+                                  found))
+                        (remove-hook 'comint-output-filter-functions watcher t)
+                        (remhash table pending-hash)))))
+            (with-current-buffer buf
+              (add-hook 'comint-output-filter-functions watcher nil t))))))))
 
 (defun sql-datum--xdb-fetch-async (db buf xdb-cache callback)
   "Send :refresh-db DB asynchronously.  Call CALLBACK when cache entry is ready.
@@ -1451,7 +1466,7 @@ When SILENT is non-nil, skip the echo and buffer display."
             (set-marker (process-mark proc) (point)))))
       (when silent
         (with-current-buffer buf-obj
-          (setq sql-datum--suppress-next-prompt t)))
+          (cl-incf sql-datum--suppress-prompt-count)))
       (comint-send-string buf-obj (concat cmd "\n")))))
 
 (defun sql-datum--get-dialect ()
@@ -1697,21 +1712,23 @@ Automatically ensures a live database connection first."
 (defun sql-datum--refresh-chain (commands buf)
   "Send COMMANDS one at a time to BUF, yielding to the event loop between each.
 COMMANDS is a list of strings (e.g. \":refresh-databases\").
-After sending each command, installs a watcher that waits for the
-prompt, then defers the next step via `run-at-time' so Emacs can
-process pending user input (keystrokes, window commands, etc.)
-before the next sub-command runs.  When the list is exhausted,
-clears `sql-datum--refresh-in-progress'."
+After sending each command, installs a watcher that detects completion
+via `sql-datum--prompt-suppressed' (set by the preoutput filter), then
+defers the next step via `run-at-time' so Emacs can process pending
+user input before the next sub-command runs.  When the list is
+exhausted, clears `sql-datum--refresh-in-progress'."
   (if (null commands)
       (when (buffer-live-p buf)
         (with-current-buffer buf
           (setq sql-datum--refresh-in-progress nil)))
     (let ((proc (and (buffer-live-p buf) (get-buffer-process buf))))
       (when proc
+        (with-current-buffer buf
+          (cl-incf sql-datum--suppress-prompt-count))
         (comint-send-string proc (concat (car commands) "\n"))
         (letrec ((watcher
-                  (lambda (output)
-                    (when (string-match-p (rx bol (* nonl) ">") output)
+                  (lambda (_output)
+                    (when (buffer-local-value 'sql-datum--prompt-suppressed buf)
                       (with-current-buffer buf
                         (remove-hook 'comint-output-filter-functions watcher t))
                       ;; Defer to the event loop so pending user input
