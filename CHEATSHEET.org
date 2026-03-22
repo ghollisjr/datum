@@ -97,6 +97,9 @@ and =M-,= your way back through the stack.
   shows contextual results
 - Multi-table: =FROM t1 JOIN t2 WHERE <TAB>= shows columns from both
 - No =FROM= yet? Falls back to all cached columns
+- Context columns are sorted before tables in the completion list
+- Identifiers with spaces are auto-quoted: ="my col"= (PostgreSQL), =[my col]= (MSSQL)
+- Typing ="che<TAB>= or =[che<TAB>= matches and quotes correctly
 - MSSQL cross-database: =otherdb.<TAB>= fetches that database's objects
 - Aliases not resolved in v1 (=FROM users u WHERE u.<TAB>= falls back)
 

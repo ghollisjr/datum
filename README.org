@@ -541,6 +541,9 @@ Multi-table statements work as expected: =FROM t1 JOIN t2 ON ... WHERE
 detected (e.g. typing =SELECT <TAB>= before a =FROM= clause has been
 written), completion falls back to all cached columns.
 
+When contextual columns are available, they are sorted before tables,
+schemas, and other object types in the completion list.
+
 *Note:* Table aliases are not resolved in the current version.
 =FROM users u WHERE u.<TAB>= will not contextually filter -- it falls back
 to all columns.
@@ -568,6 +571,17 @@ catalog references.  PostgreSQL cannot query across databases without
 reconnecting, so this feature is MSSQL-only.
 
 You can also introspect a remote database manually with =:refresh-db <name>=.
+
+*** Quoted identifier completion
+
+Identifiers containing spaces, hyphens, or other special characters are
+automatically quoted when completed.  PostgreSQL uses double quotes
+(="my column"=), MSSQL uses square brackets (=[my column]=).  Only the
+segments that need quoting are wrapped — e.g. =public."my table"=.
+
+You can start typing with an opening quote or bracket (="che<TAB>= or
+=[che<TAB>=) and completion will match against the bare name, then
+produce the correctly quoted result without double-quoting.
 
 *** Schema-qualified completion
 
