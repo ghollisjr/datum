@@ -1154,6 +1154,7 @@ docstring of `sql-datum--prompt-suppressed' for details."
         (when (and proc (sql-datum--at-prompt-p buf))
           (with-current-buffer buf
             (puthash table t sql-datum--columns-pending)
+            (cl-incf sql-datum--suppress-prompt-count)
             (comint-send-string proc (format ":columns %s :silent\n" table)))
           (letrec ((watcher
                     (lambda (_output)
