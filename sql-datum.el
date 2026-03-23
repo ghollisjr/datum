@@ -1326,18 +1326,9 @@ Completing a FUNCTION name auto-inserts parentheses."
     (let* ((buf (or (and (derived-mode-p 'sql-interactive-mode) (current-buffer))
                     (let ((b (sql-find-sqli-buffer 'datum)))
                       (and b (get-buffer b)))))
-           (tables   (and buf (buffer-local-value 'sql-datum--tables   buf)))
-           (schemas  (and buf (buffer-local-value 'sql-datum--schemas  buf)))
-           (routines (and buf (buffer-local-value 'sql-datum--routines buf)))
            (sigs     (and buf (buffer-local-value 'sql-datum--routine-signatures buf)))
            (rtypes   (and buf (buffer-local-value 'sql-datum--routine-types buf)))
            (col-hash (and buf (buffer-local-value 'sql-datum--columns  buf)))
-           (columns  (when col-hash
-                       (let (all)
-                         (maphash (lambda (_k v)
-                                    (setq all (append v all)))
-                                  col-hash)
-                         (delete-dups all))))
            (dialect (and buf (buffer-local-value 'sql-datum--dialect buf)))
            (routine-ctx (sql-datum--find-param-routine sigs))
            (in-parens (nth 1 (syntax-ppss))))
@@ -1420,157 +1411,202 @@ Completing a FUNCTION name auto-inserts parentheses."
                        (resolved (or (cdr (assoc tbl-part aliases
                                                  #'string-equal-ignore-case))
                                      tbl-part))
-                       ;; Look up columns for the resolved table (keys are downcased)
                        (resolved-key (downcase resolved))
-                       (tbl-cols (gethash resolved-key col-hash))
-                       (tbl-details (and buf (buffer-local-value
-                                              'sql-datum--column-details buf)))
-                       (detail-rows (when tbl-details
-                                      (gethash resolved-key tbl-details)))
                        (pending-hash (and buf (buffer-local-value
-                                               'sql-datum--columns-pending buf))))
-                  (if tbl-cols
-                      ;; Build table.column candidates
-                      (let* ((qualified (mapcar (lambda (c)
-                                                 (concat tbl-part "." c))
-                                               tbl-cols))
-                             (comp-start start)
-                             ;; Build type annotation map
-                             (type-map (when detail-rows
-                                         (let ((h (make-hash-table :test #'equal)))
-                                           (dolist (row detail-rows)
-                                             (when (and (consp row) (>= (length row) 2))
-                                               (puthash (concat tbl-part "." (nth 0 row))
-                                                        (nth 1 row) h)))
-                                           h))))
-                        ;; Prefetch columns for other tables in the statement
-                        ;; so they're cached by the time the user completes them.
-                        (when (and buf pending-hash)
-                          (dolist (entry aliases)
-                            (let ((tbl (cdr entry)))
-                              (unless (string= (downcase tbl) resolved-key)
-                                (sql-datum--fetch-columns-async
-                                 tbl buf col-hash pending-hash)))))
-                        (list start end
-                              (completion-table-case-fold qualified)
-                              :exclusive t
-                              :annotation-function
-                              (lambda (cand)
-                                (let ((dtype (and type-map (gethash cand type-map))))
-                                  (if dtype
-                                      (format " [column: %s]" dtype)
-                                    " [column]")))
-                              :exit-function
-                              (lambda (cand status)
-                                (when (eq status 'finished)
-                                  (sql-datum--maybe-quote-completed
-                                   cand comp-start dialect)))))
-                    ;; Columns not cached — trigger async fetch, return nil.
-                    ;; Next TAB will find the cached columns.
+                                               'sql-datum--columns-pending buf)))
+                       (comp-start start))
+                  ;; Trigger async fetch if not cached
+                  (unless (gethash resolved-key col-hash)
                     (when (and buf pending-hash)
                       (sql-datum--fetch-columns-async
-                       resolved buf col-hash pending-hash))
-                    nil)))
+                       resolved buf col-hash pending-hash)))
+                  ;; Prefetch columns for other tables in the statement
+                  (when (and buf pending-hash)
+                    (dolist (entry aliases)
+                      (let ((tbl (cdr entry)))
+                        (unless (string= (downcase tbl) resolved-key)
+                          (sql-datum--fetch-columns-async
+                           tbl buf col-hash pending-hash)))))
+                  ;; Dynamic table: re-reads col-hash on every query so
+                  ;; async-fetched columns appear without re-invoking capf.
+                  (list start end
+                        (lambda (string pred action)
+                          (let* ((cur-col-hash (and buf (buffer-local-value
+                                                         'sql-datum--columns buf)))
+                                 (tbl-cols (when cur-col-hash
+                                             (gethash resolved-key cur-col-hash)))
+                                 (qualified (when tbl-cols
+                                              (mapcar (lambda (c)
+                                                        (concat tbl-part "." c))
+                                                      tbl-cols))))
+                            (funcall (completion-table-case-fold (or qualified '()))
+                                     string pred action)))
+                        :exclusive t
+                        :annotation-function
+                        (lambda (cand)
+                          (let* ((cur-details (and buf (buffer-local-value
+                                                        'sql-datum--column-details buf)))
+                                 (detail-rows (when cur-details
+                                                (gethash resolved-key cur-details)))
+                                 (col-name (and (string-match-p "\\." cand)
+                                                (car (last (split-string cand "\\.")))))
+                                 (dtype (when (and detail-rows col-name)
+                                          (cl-some
+                                           (lambda (row)
+                                             (when (and (consp row) (>= (length row) 2)
+                                                        (string-equal-ignore-case
+                                                         (nth 0 row) col-name))
+                                               (nth 1 row)))
+                                           detail-rows))))
+                            (if dtype
+                                (format " [column: %s]" dtype)
+                              " [column]")))
+                        :exit-function
+                        (lambda (cand status)
+                          (when (eq status 'finished)
+                            (sql-datum--maybe-quote-completed
+                             cand comp-start dialect))))))
               ;; --- Normal identifier completion (fallback) ---
+              ;; Returns a DYNAMIC completion table that re-reads live
+              ;; state from the SQLi buffer on every query.  This is
+              ;; critical because Emacs caches the capf result — if we
+              ;; close over a static snapshot of candidates, async-fetched
+              ;; columns (and refreshed tables/routines) never appear
+              ;; until the user changes text to force a capf re-invocation.
               (when (not xdb-result)
                 (let* ((default-schema (and buf (buffer-local-value 'sql-datum--default-schema buf)))
                        (ds-prefix (and default-schema (concat default-schema ".")))
-                       (bare-tables (when ds-prefix
-                                      (let (result)
-                                        (dolist (tbl tables)
-                                          (when (string-prefix-p ds-prefix tbl t)
-                                            (push (substring tbl (length ds-prefix)) result)))
-                                        (nreverse result))))
-                       (bare-routines (when ds-prefix
-                                        (let (result)
-                                          (dolist (r routines)
-                                            (when (string-prefix-p ds-prefix r t)
-                                              (push (substring r (length ds-prefix)) result)))
-                                          (nreverse result))))
                        (stmt-tables (sql-datum--tables-in-statement))
-                       (pending-hash (and buf (buffer-local-value
-                                               'sql-datum--columns-pending buf)))
-                       ;; Collect columns from tables found in statement
-                       ;; (cache keys are downcased — normalize before lookup)
-                       (ctx-columns
-                        (when (and stmt-tables col-hash)
-                          (let (result)
-                            (dolist (tbl stmt-tables)
-                              (let ((cols (gethash (downcase tbl) col-hash)))
-                                (if cols
-                                    (setq result (append cols result))
-                                  ;; Not cached — trigger async fetch
-                                  (when (and buf pending-hash)
-                                    (sql-datum--fetch-columns-async
-                                     tbl buf col-hash pending-hash)))))
-                            (delete-dups result))))
-                       (effective-columns (or ctx-columns columns))
-                       ;; Put columns first when we have context columns
-                       (candidates (if ctx-columns
-                                       (append ctx-columns tables bare-tables schemas
-                                               routines bare-routines
-                                               (when (equal dialect "mssql") dbs))
-                                     (append tables bare-tables schemas
-                                             routines bare-routines
-                                             effective-columns
-                                             (when (equal dialect "mssql") dbs))))
-                       ;; Capture start for exit-function closure
-                       (comp-start start))
-                  (when candidates
-                    (let* ((tables-set   (sql-datum--make-hash-set (append tables bare-tables)))
-                           (schemas-set  (sql-datum--make-hash-set schemas))
-                           (routines-set (sql-datum--make-hash-set (append routines bare-routines)))
-                           (columns-set  (sql-datum--make-hash-set
-                                          effective-columns))
-                           (dbs-set      (when dbs
-                                          (sql-datum--make-hash-set dbs)))
-                           (ctx-columns-set (when ctx-columns
-                                             (sql-datum--make-hash-set
-                                              ctx-columns)))
-                           (sort-fn
-                            ;; Sort columns before other candidates.  When
-                            ;; ctx-columns exist they go first; otherwise all
-                            ;; cached columns are promoted.
-                            (when effective-columns
-                              (lambda (completions)
-                                (let (cols others)
-                                  (dolist (c completions)
-                                    (if (gethash c columns-set)
-                                        (push c cols)
-                                      (push c others)))
-                                  (nconc (nreverse cols) (nreverse others)))))))
-                    (list start end
-                          (sql-datum--make-completion-table
-                           candidates sort-fn ds-prefix)
-                          :exclusive t
-                          :annotation-function
-                          (lambda (cand)
-                            (cond ((gethash cand tables-set)   " [table]")
-                                  ((gethash cand schemas-set)  " [schema]")
-                                  ((gethash cand routines-set) " [routine]")
-                                  ((and ctx-columns-set
-                                        (gethash cand ctx-columns-set))
-                                   " [column]")
-                                  ((gethash cand columns-set) " [column]")
-                                  ((and dbs-set (gethash cand dbs-set))
-                                   " [database]")
-                                  (t "")))
-                          :exit-function
-                          (lambda (cand status)
-                            (when (eq status 'finished)
-                              (sql-datum--maybe-quote-completed
-                               cand comp-start dialect)
-                              ;; Resolve bare→qualified for routine paren check
-                              (let ((resolved-cand (if (and ds-prefix
-                                                            (not (string-match-p "\\." cand)))
-                                                       (concat ds-prefix cand)
-                                                     cand)))
-                                (when (sql-datum--routine-uses-parens-p
-                                       resolved-cand rtypes dialect)
-                                  (insert "()")
-                                  (backward-char)
-                                  (when-let ((msg (sql-datum-eldoc-function)))
-                                    (message "%s" msg))))))))))))))))))
+                       (comp-start start)
+                       ;; Shared state: the completion table stores fresh
+                       ;; hash sets here so the annotation function (called
+                       ;; per-candidate) can classify without rebuilding.
+                       (ann-state (make-hash-table :test #'eq)))
+                  ;; Trigger initial async fetches for uncached statement tables
+                  (when (and stmt-tables buf)
+                    (let ((ch (buffer-local-value 'sql-datum--columns buf))
+                          (ph (buffer-local-value 'sql-datum--columns-pending buf)))
+                      (when (and ch ph)
+                        (dolist (tbl stmt-tables)
+                          (unless (gethash (downcase tbl) ch)
+                            (sql-datum--fetch-columns-async tbl buf ch ph))))))
+                  (list start end
+                        (lambda (string pred action)
+                          (let* ((cur-tables (and buf (buffer-local-value 'sql-datum--tables buf)))
+                                 (cur-schemas (and buf (buffer-local-value 'sql-datum--schemas buf)))
+                                 (cur-routines (and buf (buffer-local-value 'sql-datum--routines buf)))
+                                 (cur-col-hash (and buf (buffer-local-value 'sql-datum--columns buf)))
+                                 (cur-columns (when cur-col-hash
+                                                (let (all)
+                                                  (maphash (lambda (_k v)
+                                                             (setq all (append v all)))
+                                                           cur-col-hash)
+                                                  (delete-dups all))))
+                                 (cur-dbs (and buf (buffer-local-value 'sql-datum--databases buf)))
+                                 (cur-dialect (and buf (buffer-local-value 'sql-datum--dialect buf)))
+                                 (bare-tables (when ds-prefix
+                                                (let (result)
+                                                  (dolist (tbl cur-tables)
+                                                    (when (string-prefix-p ds-prefix tbl t)
+                                                      (push (substring tbl (length ds-prefix)) result)))
+                                                  (nreverse result))))
+                                 (bare-routines (when ds-prefix
+                                                  (let (result)
+                                                    (dolist (r cur-routines)
+                                                      (when (string-prefix-p ds-prefix r t)
+                                                        (push (substring r (length ds-prefix)) result)))
+                                                    (nreverse result))))
+                                 ;; Re-check for async-fetched columns on every call
+                                 (cur-pending (and buf (buffer-local-value
+                                                         'sql-datum--columns-pending buf)))
+                                 (ctx-columns
+                                  (when (and stmt-tables cur-col-hash)
+                                    (let (result)
+                                      (dolist (tbl stmt-tables)
+                                        (let ((cols (gethash (downcase tbl) cur-col-hash)))
+                                          (if cols
+                                              (setq result (append cols result))
+                                            ;; Re-trigger fetch in case earlier attempt
+                                            ;; couldn't proceed (prompt not ready yet)
+                                            (when (and buf cur-pending)
+                                              (sql-datum--fetch-columns-async
+                                               tbl buf cur-col-hash cur-pending)))))
+                                      (delete-dups result))))
+                                 (effective-columns (or ctx-columns cur-columns))
+                                 (candidates (if ctx-columns
+                                                 (append ctx-columns cur-tables bare-tables cur-schemas
+                                                         cur-routines bare-routines
+                                                         (when (equal cur-dialect "mssql") cur-dbs))
+                                               (append cur-tables bare-tables cur-schemas
+                                                       cur-routines bare-routines
+                                                       effective-columns
+                                                       (when (equal cur-dialect "mssql") cur-dbs))))
+                                 ;; Build hash sets for annotation
+                                 (tables-set (sql-datum--make-hash-set
+                                              (append cur-tables bare-tables)))
+                                 (schemas-set (sql-datum--make-hash-set cur-schemas))
+                                 (routines-set (sql-datum--make-hash-set
+                                                (append cur-routines bare-routines)))
+                                 (columns-set (sql-datum--make-hash-set effective-columns))
+                                 (ctx-col-set (when ctx-columns
+                                                (sql-datum--make-hash-set ctx-columns)))
+                                 (dbs-set (when cur-dbs
+                                            (sql-datum--make-hash-set cur-dbs)))
+                                 (sort-fn (when effective-columns
+                                            (lambda (completions)
+                                              (let (cols others)
+                                                (dolist (c completions)
+                                                  (if (gethash c columns-set)
+                                                      (push c cols)
+                                                    (push c others)))
+                                                (nconc (nreverse cols) (nreverse others)))))))
+                            ;; Store hash sets for the annotation function
+                            (puthash 'tables tables-set ann-state)
+                            (puthash 'schemas schemas-set ann-state)
+                            (puthash 'routines routines-set ann-state)
+                            (puthash 'columns columns-set ann-state)
+                            (puthash 'ctx-columns ctx-col-set ann-state)
+                            (puthash 'dbs dbs-set ann-state)
+                            ;; Delegate to standard completion table
+                            (funcall (sql-datum--make-completion-table
+                                      candidates sort-fn ds-prefix)
+                                     string pred action)))
+                        :exclusive t
+                        :annotation-function
+                        (lambda (cand)
+                          (let ((ts (gethash 'tables ann-state))
+                                (ss (gethash 'schemas ann-state))
+                                (rs (gethash 'routines ann-state))
+                                (ccs (gethash 'ctx-columns ann-state))
+                                (cs (gethash 'columns ann-state))
+                                (ds (gethash 'dbs ann-state)))
+                            (cond ((and ts (gethash cand ts))   " [table]")
+                                  ((and ss (gethash cand ss))   " [schema]")
+                                  ((and rs (gethash cand rs))   " [routine]")
+                                  ((and ccs (gethash cand ccs)) " [column]")
+                                  ((and cs (gethash cand cs))   " [column]")
+                                  ((and ds (gethash cand ds))   " [database]")
+                                  (t ""))))
+                        :exit-function
+                        (lambda (cand status)
+                          (when (eq status 'finished)
+                            (sql-datum--maybe-quote-completed
+                             cand comp-start dialect)
+                            ;; Resolve bare→qualified for routine paren check
+                            (let* ((cur-rtypes (and buf (buffer-local-value
+                                                          'sql-datum--routine-types buf)))
+                                   (cur-dialect (and buf (buffer-local-value
+                                                           'sql-datum--dialect buf)))
+                                   (resolved-cand (if (and ds-prefix
+                                                           (not (string-match-p "\\." cand)))
+                                                      (concat ds-prefix cand)
+                                                    cand)))
+                              (when (sql-datum--routine-uses-parens-p
+                                     resolved-cand cur-rtypes cur-dialect)
+                                (insert "()")
+                                (backward-char)
+                                (when-let ((msg (sql-datum-eldoc-function)))
+                                  (message "%s" msg))))))))))))))))
 
 
 ;;; ---------------------------------------------------------------------------
