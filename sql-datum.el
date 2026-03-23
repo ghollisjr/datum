@@ -1162,11 +1162,10 @@ BUF is the SQLi process buffer.  COL-HASH is `sql-datum--columns',
 PENDING-HASH is `sql-datum--columns-pending'.
 Skips if TABLE is already cached or already in-flight.
 
-Note: this runs independently of the refresh chain and uses the
-same `sql-datum--prompt-suppressed' flag to detect completion.
+Note: this runs independently of the refresh chain.  The watcher
+detects completion by matching the envelope line in raw output.
 The `sql-datum--at-prompt-p' guard reduces but does not eliminate
-the race window with concurrent silent commands.  See the
-docstring of `sql-datum--prompt-suppressed' for details."
+the race window with concurrent silent commands."
   ;; All cache keys are downcased — normalize the lookup key.
   (let ((key (downcase table)))
     (unless (or (gethash key col-hash)
@@ -1175,7 +1174,6 @@ docstring of `sql-datum--prompt-suppressed' for details."
         (when (and proc (sql-datum--at-prompt-p buf))
           (with-current-buffer buf
             (puthash key t sql-datum--columns-pending)
-            (cl-incf sql-datum--suppress-prompt-count)
             (comint-send-string proc (format ":columns %s :silent\n" table)))
           (letrec ((watcher
                     (lambda (output)
@@ -1386,7 +1384,11 @@ Completing a FUNCTION name auto-inserts parentheses."
                          (string-match-p "\\." raw-prefix)
                          col-hash)
                 (let* ((parts (sql-datum--split-identifier raw-prefix))
-                       (tbl-part (sql-datum--unquote-part (car parts)))
+                       ;; Join all non-empty segments as the table reference.
+                       ;; For "dbo.users." parts is ["dbo" "users" ""],
+                       ;; so tbl-part becomes "dbo.users".
+                       (non-empty (cl-remove-if #'string-empty-p parts))
+                       (tbl-part (mapconcat #'sql-datum--unquote-part non-empty "."))
                        (aliases (sql-datum--table-aliases-in-statement))
                        ;; Resolve alias → table
                        (resolved (or (cdr (assoc tbl-part aliases
