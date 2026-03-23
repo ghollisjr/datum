@@ -609,16 +609,17 @@ or \"dbo.my col\" → \"dbo.[my col]\" for mssql."
 DIALECT determines quoting style.  If the user already typed an
 opening quote or bracket before START, it is consumed so the result
 doesn't get double-quoted."
-  (when (sql-datum--needs-quoting-p cand)
-    (let ((quoted (sql-datum--quote-identifier cand dialect))
-          (real-start start))
-      (unless (string= cand quoted)
-        ;; Check for a user-typed opening quote/bracket just before start
-        (when (> real-start (point-min))
-          (let ((prev-char (char-after (1- real-start))))
-            (when (or (and (eq prev-char ?\") (not (equal dialect "mssql")))
-                      (and (eq prev-char ?\[) (equal dialect "mssql")))
-              (setq real-start (1- real-start)))))
+  (let ((real-start start)
+        (has-leading-quote nil))
+    ;; Check for a user-typed opening quote/bracket just before start
+    (when (> real-start (point-min))
+      (let ((prev-char (char-after (1- real-start))))
+        (when (or (and (eq prev-char ?\") (not (equal dialect "mssql")))
+                  (and (eq prev-char ?\[) (equal dialect "mssql")))
+          (setq real-start (1- real-start))
+          (setq has-leading-quote t))))
+    (let ((quoted (sql-datum--quote-identifier cand dialect)))
+      (when (or has-leading-quote (not (string= cand quoted)))
         (let ((end (point)))
           (delete-region real-start end)
           (goto-char real-start)
@@ -698,18 +699,25 @@ Returns the new position."
         (forward-char direction)))
     (point)))
 
-(defun sql-datum--identifier-at-point ()
-  "Return the SQL identifier at point, including dotted and quoted names.
-Handles bracket quoting ([name]) and double-quote quoting (\"name\"),
-returning the bare (unquoted) identifier for lookup."
+(defun sql-datum--identifier-at-point-raw ()
+  "Return the raw SQL identifier at point, preserving quoting.
+Dotted segments that are double-quoted or bracket-quoted are kept
+as-is so the backend can distinguish `\"my.table\"` from `my.table`."
   (let (beg end)
     (save-excursion
       (setq beg (sql-datum--scan-quoted-identifier -1))
       (setq end (sql-datum--scan-quoted-identifier 1)))
     (when (> end beg)
-      (let ((raw (buffer-substring-no-properties beg end)))
-        (let ((parts (sql-datum--split-identifier raw)))
-          (mapconcat #'sql-datum--unquote-part parts "."))))))
+      (buffer-substring-no-properties beg end))))
+
+(defun sql-datum--identifier-at-point ()
+  "Return the SQL identifier at point, including dotted and quoted names.
+Handles bracket quoting ([name]) and double-quote quoting (\"name\"),
+returning the bare (unquoted) identifier for lookup."
+  (let ((raw (sql-datum--identifier-at-point-raw)))
+    (when raw
+      (let ((parts (sql-datum--split-identifier raw)))
+        (mapconcat #'sql-datum--unquote-part parts ".")))))
 
 (defvar sql-datum--definition-mode-map
   (let ((map (make-sparse-keymap)))
@@ -749,7 +757,7 @@ SQLI-BUF, if given, is wired as the sql-buffer for send-region etc."
 Pushes to the xref marker stack so M-, returns to the previous location.
 With no identifier at point, prompts for a name."
   (interactive
-   (let ((ident (sql-datum--identifier-at-point)))
+   (let ((ident (sql-datum--identifier-at-point-raw)))
      (list (if (and ident (not (string-empty-p ident)))
                ident
              (read-string "Definition of: ")))))

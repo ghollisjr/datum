@@ -353,9 +353,10 @@ def _build_ddl(table_name, col_types, driver=None):
 def _table_exists(cursor, table_name):
     """Check if a table exists. Works across MSSQL and PostgreSQL."""
     # Strip schema prefix for the check if present
-    parts = table_name.split(".")
-    table = parts[-1].strip("[]\"` ")
-    schema = parts[-2].strip("[]\"` ") if len(parts) > 1 else None
+    from .commands import _split_identifier
+    parts = _split_identifier(table_name)
+    table = parts[-1]
+    schema = parts[-2] if len(parts) > 1 else None
     try:
         if schema:
             cursor.execute("""
