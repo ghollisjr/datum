@@ -769,7 +769,8 @@ the `display-sort-function' in metadata."
       ('metadata
        (if sort-fn
            `(metadata (category . sql-datum-identifier)
-                      (display-sort-function . ,sort-fn))
+                      (display-sort-function . ,sort-fn)
+                      (cycle-sort-function . ,sort-fn))
          '(metadata (category . sql-datum-identifier))))
       ('t  ;; all-completions
        (let (result)
@@ -2051,11 +2052,24 @@ but detached, so they can be reused with a new connection."
 ;;; Query templates
 ;;; ---------------------------------------------------------------------------
 
+(defun sql-datum--prefetch-columns (table)
+  "Ensure columns for TABLE are being fetched for completion.
+Called by template commands so that column completion is ready
+by the time the user presses TAB."
+  (let* ((buf (sql-find-sqli-buffer 'datum))
+         (buf-obj (and buf (get-buffer buf))))
+    (when buf-obj
+      (let ((col-hash (buffer-local-value 'sql-datum--columns buf-obj))
+            (pending  (buffer-local-value 'sql-datum--columns-pending buf-obj)))
+        (when (and col-hash pending)
+          (sql-datum--fetch-columns-async table buf-obj col-hash pending))))))
+
 (defun sql-datum-insert-select (arg)
   "Insert a SELECT template, prompting for the table name.
 With prefix ARG, insert SELECT DISTINCT."
   (interactive "P")
   (let ((table (sql-datum--read-table "Select from table: ")))
+    (sql-datum--prefetch-columns table)
     (insert (if arg "SELECT DISTINCT" "SELECT") " * FROM " table " WHERE ")))
 
 (defun sql-datum-insert-update ()
@@ -2063,6 +2077,7 @@ With prefix ARG, insert SELECT DISTINCT."
 Point is left after SET on the SET line."
   (interactive)
   (let ((table (sql-datum--read-table "Update table: ")))
+    (sql-datum--prefetch-columns table)
     (insert "UPDATE " table "\nSET ")
     (save-excursion
       (insert "\nWHERE "))))
@@ -2071,6 +2086,7 @@ Point is left after SET on the SET line."
   "Insert a DELETE template, prompting for the table name."
   (interactive)
   (let ((table (sql-datum--read-table "Delete from table: ")))
+    (sql-datum--prefetch-columns table)
     (insert "DELETE FROM " table " WHERE ")))
 
 (defun sql-datum-insert-insert ()
@@ -2082,6 +2098,7 @@ If columns are cached for the table, includes them in the template."
          (col-hash (and buf (buffer-local-value 'sql-datum--columns
                                                 (get-buffer buf))))
          (cols (and col-hash (gethash table col-hash))))
+    (unless cols (sql-datum--prefetch-columns table))
     (if cols
         (progn
           (insert "INSERT INTO " table
@@ -2096,6 +2113,7 @@ Prompts for destination (free text) and source table (with completion)."
   (interactive)
   (let ((dest (read-string "Destination table: "))
         (source (sql-datum--read-table "Source table: ")))
+    (sql-datum--prefetch-columns source)
     (insert "SELECT *\nINTO " dest "\nFROM " source "\nWHERE ")))
 
 (defun sql-datum-insert-join (arg)
@@ -2108,6 +2126,7 @@ With prefix ARG, prompts for join type (LEFT, RIGHT, etc.)."
                                          '("LEFT" "RIGHT" "INNER" "FULL" "CROSS")
                                          nil t)
                       nil)))
+    (sql-datum--prefetch-columns table)
     (insert "\n" (if join-type (concat join-type " ") "") "JOIN " table " ON ")))
 
 ;;; ---------------------------------------------------------------------------
