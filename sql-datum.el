@@ -1558,9 +1558,10 @@ confirmation before overwriting."
       (user-error "Export cancelled"))
     (unless buf
       (user-error "No active datum buffer found"))
-    (let ((proc (get-buffer buf)))
-      (comint-send-string proc (format ":out %s%s\n" abs-path force-flag))
-      (comint-send-string proc (format "%s;;\n" query)))
+    (let ((buf-obj (get-buffer buf)))
+      (comint-send-string buf-obj (format ":out %s%s\n" abs-path force-flag))
+      (comint-send-string buf-obj (format "%s;;\n" query))
+      (sql-datum--scroll-to-end buf-obj))
     (message "datum: exporting to %s%s"
              abs-path (if force " (overwrite)" ""))))
 
@@ -1606,12 +1607,19 @@ defaults to `sql-datum-import-batch-size', overridden with \\[universal-argument
          (buf (sql-find-sqli-buffer 'datum)))
     (unless buf
       (user-error "No active datum buffer found"))
-    (comint-send-string (get-buffer buf)
-                        (format ":in %s %s%s%s\n"
-                                abs-path table-name mode-flag batch-flag))
+    (let ((buf-obj (get-buffer buf)))
+      (comint-send-string buf-obj
+                          (format ":in %s %s%s%s\n"
+                                  abs-path table-name mode-flag batch-flag))
+      (sql-datum--scroll-to-end buf-obj))
     (message "datum: importing %s into %s%s (batch size %d)"
              (file-name-nondirectory abs-path) table-name
              (or mode-flag " (default)") batch-size)))
+
+(defun sql-datum--scroll-to-end (buf-obj)
+  "Scroll all windows displaying BUF-OBJ to the end of the buffer."
+  (dolist (win (get-buffer-window-list buf-obj nil t))
+    (set-window-point win (with-current-buffer buf-obj (point-max)))))
 
 (defun sql-datum--send-command (cmd &optional silent)
   "Send CMD string to the active datum process.
@@ -1631,7 +1639,8 @@ When SILENT is non-nil, skip the echo and buffer display."
           (with-current-buffer buf-obj
             (goto-char (process-mark proc))
             (insert (format "\n>> %s\n" cmd))
-            (set-marker (process-mark proc) (point)))))
+            (set-marker (process-mark proc) (point))))
+        (sql-datum--scroll-to-end buf-obj))
       (when silent
         (with-current-buffer buf-obj
           (cl-incf sql-datum--suppress-prompt-count)))
@@ -1859,7 +1868,8 @@ to establish a new connection."
 
 (defun sql-datum-send-smart (&optional start end)
   "Send the active region, or the current paragraph if no region is active.
-Automatically ensures a live database connection first."
+Automatically ensures a live database connection first.
+Scrolls the SQLi buffer to the end so output is visible."
   (interactive
    (when mark-active
      (list (region-beginning) (region-end))))
@@ -1871,7 +1881,11 @@ Automatically ensures a live database connection first."
                           (end (progn (forward-paragraph) (point))))
                       (cons beg end)))))
       (when (> (cdr bounds) (car bounds))
-        (sql-send-paragraph)))))
+        (sql-send-paragraph))))
+  (when sql-buffer
+    (let ((buf-obj (get-buffer sql-buffer)))
+      (when buf-obj
+        (sql-datum--scroll-to-end buf-obj)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Introspection refresh
