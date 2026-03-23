@@ -80,14 +80,15 @@ and =M-,= your way back through the stack.
 
 ** Query Templates (=C-c i=)
 
-| Key       | Action                                          |
-|-----------+-------------------------------------------------|
-| =C-c i s= | Insert SELECT template (=C-u= for DISTINCT)     |
-| =C-c i u= | Insert UPDATE template                           |
-| =C-c i d= | Insert DELETE template                           |
+| Key       | Action                                           |
+|-----------+--------------------------------------------------|
+| =C-c i s= | Insert SELECT template (=C-u N= for top N rows)  |
+| =C-c i d= | Insert SELECT DISTINCT template                   |
+| =C-c i u= | Insert UPDATE template                            |
+| =C-c i D= | Insert DELETE template                            |
 | =C-c i i= | Insert INSERT INTO template (uses cached columns) |
-| =C-c i n= | Insert SELECT INTO template                      |
-| =C-c i j= | Insert JOIN template (=C-u= for type)            |
+| =C-c i n= | Insert SELECT INTO template                       |
+| =C-c i j= | Insert JOIN template (=C-u= for type)             |
 
 All template commands prompt for the table name with completion.
 Point is left at the most useful editing position after insertion.

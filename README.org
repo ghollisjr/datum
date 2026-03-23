@@ -478,14 +478,15 @@ convention.
 
 *** Query templates (=C-c i=)
 
-| Key       | Command                        | Description                                      |
-|-----------+--------------------------------+--------------------------------------------------|
-| =C-c i s= | =sql-datum-insert-select=      | Insert SELECT template (=C-u= for DISTINCT)      |
-| =C-c i u= | =sql-datum-insert-update=      | Insert UPDATE template                            |
-| =C-c i d= | =sql-datum-insert-delete=      | Insert DELETE template                            |
-| =C-c i i= | =sql-datum-insert-insert=      | Insert INSERT INTO (uses cached columns if known) |
-| =C-c i n= | =sql-datum-insert-select-into= | Insert SELECT INTO template                       |
-| =C-c i j= | =sql-datum-insert-join=        | Insert JOIN template (=C-u= for LEFT/RIGHT/etc.) |
+| Key       | Command                             | Description                                      |
+|-----------+-------------------------------------+--------------------------------------------------|
+| =C-c i s= | =sql-datum-insert-select=           | Insert SELECT template (=C-u N= for top N rows)  |
+| =C-c i d= | =sql-datum-insert-select-distinct=  | Insert SELECT DISTINCT template                   |
+| =C-c i u= | =sql-datum-insert-update=           | Insert UPDATE template                            |
+| =C-c i D= | =sql-datum-insert-delete=           | Insert DELETE template                            |
+| =C-c i i= | =sql-datum-insert-insert=           | Insert INSERT INTO (uses cached columns if known) |
+| =C-c i n= | =sql-datum-insert-select-into=      | Insert SELECT INTO template                       |
+| =C-c i j= | =sql-datum-insert-join=             | Insert JOIN template (=C-u= for LEFT/RIGHT/etc.) |
 
 Each command prompts for the table name with completion and leaves
 point at the most useful editing position.

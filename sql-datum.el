@@ -2066,11 +2066,23 @@ by the time the user presses TAB."
 
 (defun sql-datum-insert-select (arg)
   "Insert a SELECT template, prompting for the table name.
-With prefix ARG, insert SELECT DISTINCT."
+With prefix ARG N, limit to N rows (TOP N for MSSQL, LIMIT N for others)."
   (interactive "P")
-  (let ((table (sql-datum--read-table "Select from table: ")))
+  (let ((table (sql-datum--read-table "Select from table: "))
+        (n (and arg (prefix-numeric-value arg))))
     (sql-datum--prefetch-columns table)
-    (insert (if arg "SELECT DISTINCT" "SELECT") " * FROM " table " WHERE ")))
+    (if (and n (sql-datum--mssql-p))
+        (insert (format "SELECT TOP %d * FROM %s WHERE " n table))
+      (insert "SELECT * FROM " table " WHERE ")
+      (when n
+        (save-excursion (insert (format " LIMIT %d" n)))))))
+
+(defun sql-datum-insert-select-distinct ()
+  "Insert a SELECT DISTINCT template, prompting for the table name."
+  (interactive)
+  (let ((table (sql-datum--read-table "Select distinct from table: ")))
+    (sql-datum--prefetch-columns table)
+    (insert "SELECT DISTINCT * FROM " table " WHERE ")))
 
 (defun sql-datum-insert-update ()
   "Insert an UPDATE template, prompting for the table name.
@@ -2171,8 +2183,9 @@ With prefix ARG, prompts for join type (LEFT, RIGHT, etc.)."
   (define-key sql-mode-map (kbd "C-c s y") #'sql-datum-copy-last-result)
   ;; C-c i: query templates
   (define-key sql-mode-map (kbd "C-c i s") #'sql-datum-insert-select)
+  (define-key sql-mode-map (kbd "C-c i d") #'sql-datum-insert-select-distinct)
   (define-key sql-mode-map (kbd "C-c i u") #'sql-datum-insert-update)
-  (define-key sql-mode-map (kbd "C-c i d") #'sql-datum-insert-delete)
+  (define-key sql-mode-map (kbd "C-c i D") #'sql-datum-insert-delete)
   (define-key sql-mode-map (kbd "C-c i i") #'sql-datum-insert-insert)
   (define-key sql-mode-map (kbd "C-c i n") #'sql-datum-insert-select-into)
   (define-key sql-mode-map (kbd "C-c i j") #'sql-datum-insert-join)
