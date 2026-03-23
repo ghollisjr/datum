@@ -107,6 +107,11 @@ completion candidates up to date.  Set to nil to disable."
 (defvar-local sql-datum--dialect nil
   "Detected SQL dialect for this datum buffer (e.g. \"mssql\", \"postgres\").")
 
+(defvar-local sql-datum--default-schema nil
+  "Default schema for this connection (e.g. \"dbo\", \"public\").
+Nil for databases without schemas.  Set from the default-schema
+meta envelope at connect time.")
+
 (defvar-local sql-datum--meta (make-hash-table :test #'equal)
   "Metadata for this datum buffer: server, database, user, version.")
 
@@ -221,16 +226,27 @@ Handles partial envelope lines split across multiple filter calls."
                                       (match-string 2 line))
         (push line clean-lines)))
     (let ((result (string-join (nreverse clean-lines) "\n")))
-      ;; When silent commands are pending, suppress the prompt that follows
-      ;; each one.  The Python REPL emits "\n>" which, after envelope
-      ;; stripping, appears as whitespace + ">" in the remaining output.
-      ;; Set the suppressed flag so watchers can detect completion.
+      ;; When silent commands are pending, suppress the prompt and any
+      ;; echoed command text.  The pty echoes the command back (e.g.
+      ;; ":refresh-tables\r\n"), and Python emits "\n>" as the next
+      ;; prompt.  After envelope stripping these appear as residual text
+      ;; ending with ">".  We strip the trailing prompt when present and
+      ;; suppress all remaining text (echo/whitespace from silent cmd).
       (setq sql-datum--prompt-suppressed nil)
-      (when (and (> sql-datum--suppress-prompt-count 0)
-                 (string-match-p "\\`[\n\r ]*>\\'" result))
-        (setq result "")
-        (cl-decf sql-datum--suppress-prompt-count)
-        (setq sql-datum--prompt-suppressed t))
+      (when (> sql-datum--suppress-prompt-count 0)
+        (cond
+         ;; Result ends with the ">" prompt — suppress everything
+         ;; (the echoed command, whitespace, and the prompt itself).
+         ((string-match-p "[\n\r ]*>\\'" result)
+          (setq result "")
+          (cl-decf sql-datum--suppress-prompt-count)
+          (setq sql-datum--prompt-suppressed t))
+         ;; Prompt hasn't arrived yet (output was split across chunks).
+         ;; Suppress the echoed command text and whitespace so they
+         ;; don't leak into the buffer.  We know this output belongs
+         ;; to a silent command because suppress-prompt-count > 0.
+         ((string-match-p "\\`[^>]*\\'" result)
+          (setq result ""))))
       result)))
 
 (defvar sql-datum--running-timer nil
@@ -262,6 +278,8 @@ Handles partial envelope lines split across multiple filter calls."
              (val (match-string 2 payload)))
          (puthash key val sql-datum--meta)
          (sql-datum--update-mode-line)
+         (when (equal key "default-schema")
+           (setq sql-datum--default-schema val))
          ;; Database changed — clear stale completion state and refresh
          (when (equal key "database")
            (setq sql-datum--schemas nil)
@@ -818,26 +836,34 @@ and the completion framework passes the quote as part of the prefix."
     (dolist (x list) (puthash x t h))
     h))
 
-(defun sql-datum--completion-match-p (prefix candidate)
+(defun sql-datum--completion-match-p (prefix candidate &optional ds-prefix)
   "Return non-nil if PREFIX matches CANDIDATE.
 Strips leading quote characters from PREFIX before matching.
 Matches against the full name, or if PREFIX has no dot, also against
-the portion after the last dot (so \"Pat\" matches \"dbo.PatientDim\")."
+the portion after the last dot (so \"Pat\" matches \"dbo.PatientDim\").
+When DS-PREFIX is non-nil, skip the after-dot fallback for candidates
+that start with DS-PREFIX — their bare forms are already in the list."
   (let ((prefix (sql-datum--strip-leading-quotes prefix)))
     (or (string-prefix-p prefix candidate t)
         (and (not (string-match-p "\\." prefix))
              (string-match-p "\\." candidate)
+             ;; Skip after-dot match when candidate is in the default
+             ;; schema — the bare form is already a separate candidate.
+             (not (and ds-prefix (string-prefix-p ds-prefix candidate t)))
              (string-prefix-p
               prefix
               (car (last (split-string candidate "\\.")))
               t)))))
 
-(defun sql-datum--make-completion-table (candidates &optional sort-fn)
+(defun sql-datum--make-completion-table (candidates &optional sort-fn ds-prefix)
   "Build a completion table that also matches bare table name portions.
 For a prefix without a dot, a candidate like \"rempat.fmreport\" matches
 if the prefix matches either \"rempat.fmreport\" or \"fmreport\".
 CANDIDATES is the full list.  SORT-FN, when non-nil, is used as
-the `display-sort-function' in metadata."
+the `display-sort-function' in metadata.  DS-PREFIX, when non-nil,
+is the default schema prefix (e.g. \"public.\") — candidates starting
+with it are excluded from after-dot fallback matching since their
+bare forms are already in CANDIDATES."
   (lambda (string pred action)
     (pcase action
       ('metadata
@@ -849,13 +875,13 @@ the `display-sort-function' in metadata."
       ('t  ;; all-completions
        (let (result)
          (dolist (c candidates)
-           (when (and (sql-datum--completion-match-p string c)
+           (when (and (sql-datum--completion-match-p string c ds-prefix)
                       (or (null pred) (funcall pred c)))
              (push c result)))
          (nreverse result)))
       ('nil  ;; try-completion
        (let ((matches (funcall (sql-datum--make-completion-table
-                                candidates)
+                                candidates nil ds-prefix)
                                string pred 't)))
          (cond ((null matches) nil)
                ((= (length matches) 1)
@@ -1395,7 +1421,14 @@ Completing a FUNCTION name auto-inserts parentheses."
                                                  #'string-equal-ignore-case))
                                      tbl-part))
                        ;; Look up columns for the resolved table (keys are downcased)
-                       (resolved-key (downcase resolved))
+                       (default-schema (and buf (buffer-local-value 'sql-datum--default-schema buf)))
+                       (ds-prefix (and default-schema (concat default-schema ".")))
+                       (resolved-key (let ((key (downcase resolved)))
+                                       (if (and (not (gethash key col-hash))
+                                                ds-prefix
+                                                (not (string-match-p "\\." resolved)))
+                                           (downcase (concat ds-prefix resolved))
+                                         key)))
                        (tbl-cols (gethash resolved-key col-hash))
                        (tbl-details (and buf (buffer-local-value
                                               'sql-datum--column-details buf)))
@@ -1441,13 +1474,32 @@ Completing a FUNCTION name auto-inserts parentheses."
                                    cand comp-start dialect)))))
                     ;; Columns not cached — trigger async fetch, return nil.
                     ;; Next TAB will find the cached columns.
+                    ;; Use qualified name so cache key matches resolved-key.
                     (when (and buf pending-hash)
-                      (sql-datum--fetch-columns-async
-                       resolved buf col-hash pending-hash))
+                      (let ((fetch-name (if (and ds-prefix
+                                                 (not (string-match-p "\\." resolved)))
+                                            (concat ds-prefix resolved)
+                                          resolved)))
+                        (sql-datum--fetch-columns-async
+                         fetch-name buf col-hash pending-hash)))
                     nil)))
               ;; --- Normal identifier completion (fallback) ---
               (when (not xdb-result)
-                (let* ((stmt-tables (sql-datum--tables-in-statement))
+                (let* ((default-schema (and buf (buffer-local-value 'sql-datum--default-schema buf)))
+                       (ds-prefix (and default-schema (concat default-schema ".")))
+                       (bare-tables (when ds-prefix
+                                      (let (result)
+                                        (dolist (tbl tables)
+                                          (when (string-prefix-p ds-prefix tbl t)
+                                            (push (substring tbl (length ds-prefix)) result)))
+                                        (nreverse result))))
+                       (bare-routines (when ds-prefix
+                                        (let (result)
+                                          (dolist (r routines)
+                                            (when (string-prefix-p ds-prefix r t)
+                                              (push (substring r (length ds-prefix)) result)))
+                                          (nreverse result))))
+                       (stmt-tables (sql-datum--tables-in-statement))
                        (pending-hash (and buf (buffer-local-value
                                                'sql-datum--columns-pending buf)))
                        ;; Collect columns from tables found in statement
@@ -1456,27 +1508,37 @@ Completing a FUNCTION name auto-inserts parentheses."
                         (when (and stmt-tables col-hash)
                           (let (result)
                             (dolist (tbl stmt-tables)
-                              (let ((cols (gethash (downcase tbl) col-hash)))
+                              (let* ((key (downcase tbl))
+                                     (cols (or (gethash key col-hash)
+                                               (when (and ds-prefix (not (string-match-p "\\." key)))
+                                                 (gethash (downcase (concat ds-prefix key)) col-hash)))))
                                 (if cols
                                     (setq result (append cols result))
                                   ;; Not cached — trigger async fetch
+                                  ;; Pass qualified name so cache uses right key
                                   (when (and buf pending-hash)
-                                    (sql-datum--fetch-columns-async
-                                     tbl buf col-hash pending-hash)))))
+                                    (let ((fetch-name (if (and ds-prefix (not (string-match-p "\\." tbl)))
+                                                          (concat ds-prefix tbl)
+                                                        tbl)))
+                                      (sql-datum--fetch-columns-async
+                                       fetch-name buf col-hash pending-hash))))))
                             (delete-dups result))))
                        (effective-columns (or ctx-columns columns))
                        ;; Put columns first when we have context columns
                        (candidates (if ctx-columns
-                                       (append ctx-columns tables schemas routines
+                                       (append ctx-columns tables bare-tables schemas
+                                               routines bare-routines
                                                (when (equal dialect "mssql") dbs))
-                                     (append tables schemas routines effective-columns
+                                     (append tables bare-tables schemas
+                                             routines bare-routines
+                                             effective-columns
                                              (when (equal dialect "mssql") dbs))))
                        ;; Capture start for exit-function closure
                        (comp-start start))
                   (when candidates
-                    (let* ((tables-set   (sql-datum--make-hash-set tables))
+                    (let* ((tables-set   (sql-datum--make-hash-set (append tables bare-tables)))
                            (schemas-set  (sql-datum--make-hash-set schemas))
-                           (routines-set (sql-datum--make-hash-set routines))
+                           (routines-set (sql-datum--make-hash-set (append routines bare-routines)))
                            (columns-set  (sql-datum--make-hash-set
                                           effective-columns))
                            (dbs-set      (when dbs
@@ -1498,7 +1560,7 @@ Completing a FUNCTION name auto-inserts parentheses."
                                   (nconc (nreverse cols) (nreverse others)))))))
                     (list start end
                           (sql-datum--make-completion-table
-                           candidates sort-fn)
+                           candidates sort-fn ds-prefix)
                           :exclusive t
                           :annotation-function
                           (lambda (cand)
@@ -1517,12 +1579,17 @@ Completing a FUNCTION name auto-inserts parentheses."
                             (when (eq status 'finished)
                               (sql-datum--maybe-quote-completed
                                cand comp-start dialect)
-                              (when (sql-datum--routine-uses-parens-p
-                                     cand rtypes dialect)
-                                (insert "()")
-                                (backward-char)
-                                (when-let ((msg (sql-datum-eldoc-function)))
-                                  (message "%s" msg)))))))))))))))))
+                              ;; Resolve bare→qualified for routine paren check
+                              (let ((resolved-cand (if (and ds-prefix
+                                                            (not (string-match-p "\\." cand)))
+                                                       (concat ds-prefix cand)
+                                                     cand)))
+                                (when (sql-datum--routine-uses-parens-p
+                                       resolved-cand rtypes dialect)
+                                  (insert "()")
+                                  (backward-char)
+                                  (when-let ((msg (sql-datum-eldoc-function)))
+                                    (message "%s" msg))))))))))))))))))
 
 
 ;;; ---------------------------------------------------------------------------

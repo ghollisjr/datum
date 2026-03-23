@@ -54,6 +54,9 @@ def query_loop():
     # Emit metadata Emacs can use to populate the mode line.
     envelope.meta("server", connect.get_server_or_dsn())
     _emit_current_db_and_user()
+    # Send after database meta so it isn't cleared by the database handler.
+    if _driver.default_schema:
+        envelope.meta("default-schema", _driver.default_schema)
 
     query = prompt_for_query_or_command()
     row_count = 0
