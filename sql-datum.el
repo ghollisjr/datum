@@ -1464,9 +1464,12 @@ Completing a FUNCTION name auto-inserts parentheses."
                        (comp-start start))
                   (when candidates
                     (let ((sort-fn
-                           (when ctx-columns
+                           ;; Sort columns before other candidates.  When
+                           ;; ctx-columns exist they go first; otherwise all
+                           ;; cached columns are promoted.
+                           (when effective-columns
                              (let ((col-set (make-hash-table :test #'equal)))
-                               (dolist (c ctx-columns)
+                               (dolist (c effective-columns)
                                  (puthash c t col-set))
                                (lambda (completions)
                                  (let (cols others)

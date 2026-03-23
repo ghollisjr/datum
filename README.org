@@ -559,9 +559,10 @@ written), completion falls back to all cached columns.
 When contextual columns are available, they are sorted before tables,
 schemas, and other object types in the completion list.
 
-*Note:* Table aliases are not resolved in the current version.
-=FROM users u WHERE u.<TAB>= will not contextually filter -- it falls back
-to all columns.
+Qualified column completion is also supported: typing =table.<TAB>= or
+=alias.<TAB>= offers =table.column= candidates with type annotations.
+Table aliases are resolved automatically -- =FROM users u WHERE u.<TAB>=
+shows columns from the =users= table.
 
 *** Cross-database completion (MSSQL)
 

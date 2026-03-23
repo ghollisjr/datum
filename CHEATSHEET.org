@@ -115,8 +115,9 @@ Point is left at the most useful editing position after insertion.
 - Context columns are sorted before tables in the completion list
 - Identifiers with spaces are auto-quoted: ="my col"= (PostgreSQL), =[my col]= (MSSQL)
 - Typing ="che<TAB>= or =[che<TAB>= matches and quotes correctly
+- Qualified: =table.<TAB>= or =alias.<TAB>= offers =table.column= candidates
+- Aliases resolved: =FROM users u WHERE u.<TAB>= shows =users= columns
 - MSSQL cross-database: =otherdb.<TAB>= fetches that database's objects
-- Aliases not resolved in v1 (=FROM users u WHERE u.<TAB>= falls back)
 
 * Running Queries Buffer
 
