@@ -1405,7 +1405,8 @@ Completing a FUNCTION name auto-inserts parentheses."
                                                (puthash (concat tbl-part "." (nth 0 row))
                                                         (nth 1 row) h)))
                                            h))))
-                        (list start end qualified
+                        (list start end
+                              (completion-table-case-fold qualified)
                               :exclusive t
                               :annotation-function
                               (lambda (cand)
