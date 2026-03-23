@@ -1421,14 +1421,7 @@ Completing a FUNCTION name auto-inserts parentheses."
                                                  #'string-equal-ignore-case))
                                      tbl-part))
                        ;; Look up columns for the resolved table (keys are downcased)
-                       (default-schema (and buf (buffer-local-value 'sql-datum--default-schema buf)))
-                       (ds-prefix (and default-schema (concat default-schema ".")))
-                       (resolved-key (let ((key (downcase resolved)))
-                                       (if (and (not (gethash key col-hash))
-                                                ds-prefix
-                                                (not (string-match-p "\\." resolved)))
-                                           (downcase (concat ds-prefix resolved))
-                                         key)))
+                       (resolved-key (downcase resolved))
                        (tbl-cols (gethash resolved-key col-hash))
                        (tbl-details (and buf (buffer-local-value
                                               'sql-datum--column-details buf)))
@@ -1474,14 +1467,9 @@ Completing a FUNCTION name auto-inserts parentheses."
                                    cand comp-start dialect)))))
                     ;; Columns not cached — trigger async fetch, return nil.
                     ;; Next TAB will find the cached columns.
-                    ;; Use qualified name so cache key matches resolved-key.
                     (when (and buf pending-hash)
-                      (let ((fetch-name (if (and ds-prefix
-                                                 (not (string-match-p "\\." resolved)))
-                                            (concat ds-prefix resolved)
-                                          resolved)))
-                        (sql-datum--fetch-columns-async
-                         fetch-name buf col-hash pending-hash)))
+                      (sql-datum--fetch-columns-async
+                       resolved buf col-hash pending-hash))
                     nil)))
               ;; --- Normal identifier completion (fallback) ---
               (when (not xdb-result)
@@ -1508,20 +1496,13 @@ Completing a FUNCTION name auto-inserts parentheses."
                         (when (and stmt-tables col-hash)
                           (let (result)
                             (dolist (tbl stmt-tables)
-                              (let* ((key (downcase tbl))
-                                     (cols (or (gethash key col-hash)
-                                               (when (and ds-prefix (not (string-match-p "\\." key)))
-                                                 (gethash (downcase (concat ds-prefix key)) col-hash)))))
+                              (let ((cols (gethash (downcase tbl) col-hash)))
                                 (if cols
                                     (setq result (append cols result))
                                   ;; Not cached — trigger async fetch
-                                  ;; Pass qualified name so cache uses right key
                                   (when (and buf pending-hash)
-                                    (let ((fetch-name (if (and ds-prefix (not (string-match-p "\\." tbl)))
-                                                          (concat ds-prefix tbl)
-                                                        tbl)))
-                                      (sql-datum--fetch-columns-async
-                                       fetch-name buf col-hash pending-hash))))))
+                                    (sql-datum--fetch-columns-async
+                                     tbl buf col-hash pending-hash)))))
                             (delete-dups result))))
                        (effective-columns (or ctx-columns columns))
                        ;; Put columns first when we have context columns
