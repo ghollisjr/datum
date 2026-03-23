@@ -348,8 +348,11 @@ def _build_ddl(table_name, col_types, driver=None):
         if driver:
             return driver.quote_identifier(name)
         return f'"{name}"'  # ANSI fallback
+    quoted_table = ".".join(
+        _quote(seg) for seg in _split_identifier(table_name)
+    )
     cols = ",\n    ".join(f"{_quote(name)} {sql_type}" for name, sql_type in col_types)
-    return f"CREATE TABLE {table_name} (\n    {cols}\n)"
+    return f"CREATE TABLE {quoted_table} (\n    {cols}\n)"
 
 
 def _table_exists(cursor, table_name):

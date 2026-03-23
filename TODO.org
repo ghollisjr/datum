@@ -1,10 +1,11 @@
 #+TITLE: Datum TODO
 
-* TODO Qualified column autocomplete
-Right now, columns can be completed as-is once there's enough of a
-query that the table can be inferred, but <table>.<column> is not
-suggested nor autocompleted. This along with alias-qualified
-completion would be beneficial.
+* DONE Qualified column autocomplete
+Implemented in =sql-datum.el=: typing =table.<TAB>= or =alias.<TAB>=
+offers =table.column= candidates with type annotations from
+=sql-datum--column-details=.  Aliases are resolved via
+=sql-datum--table-aliases-in-statement= which parses =FROM=, =JOIN=,
+=UPDATE=, and =INTO= clauses.
 
 * TODO Scheduled job support for MySQL/MariaDB
 MySQL/MariaDB has no built-in job agent like SQL Server Agent, but does
@@ -34,6 +35,57 @@ and list jobs accordingly.  If neither is present, skip gracefully.
 - Detect pgAgent: check for =pgagent= schema
 - Could be a new =:jobs= or =:events= command
 - Show job name, schedule, last run, status
+
+* TODO Elisp ETL foundation: =datum-send-and-wait= and =datum-query-scalar=
+These functions provide the building blocks for scripting ETL workflows
+from Emacs Lisp (including =org-babel= source blocks).
+
+** TODO =datum-send-and-wait=
+Send a command string to the datum process and block until completion.
+
+- Uses =accept-process-output= loop with a timeout (default 120s)
+- Detects completion via =info= or =error= envelope, or next prompt
+- On =error= envelope, signals an Emacs error so callers can use
+  =condition-case=
+- Non-blocking variant =datum-send-async= with callback for cases
+  where waiting is unnecessary
+- Usable from =org-babel= source blocks for literate ETL scripts
+
+** TODO =datum-query-scalar=
+Send a query, wait for the result, return the first cell as an Elisp
+object.
+
+- Requires a dedicated =##DATUM:scalar:...##= envelope emitted by
+  Python when a query returns exactly one row and one column
+- Type coercion: numeric strings to integers or floats, NULL to nil,
+  otherwise string
+- Signals an error if query returns more than one row or column
+- Natural extension: =datum-query-column= returning a list of
+  first-column values for multi-row results, enabling iteration in
+  ETL loops
+
+** Example ETL patterns
+#+begin_src elisp
+;; Move rows between databases
+(datum-send-and-wait ":use source_db")
+(let ((ids (datum-query-column "SELECT id FROM pending_orders")))
+  (datum-send-and-wait ":use target_db")
+  (dolist (id ids)
+    (datum-send-and-wait
+     (format "INSERT INTO archive SELECT * FROM source.orders WHERE id = %s" id))))
+
+;; Conditional ETL with scalar check
+(let ((count (datum-query-scalar "SELECT COUNT(*) FROM staging")))
+  (when (> count 0)
+    (datum-send-and-wait "EXEC dbo.process_staging")
+    (message "Processed %d rows" count)))
+
+;; org-babel block
+;; #+begin_src elisp :results output
+;; (datum-send-and-wait ":use analytics")
+;; (message "Users: %s" (datum-query-scalar "SELECT COUNT(*) FROM users"))
+;; #+end_src
+#+end_src
 
 * TODO Neovim / Vim plugin
 The Python process and envelope protocol are editor-agnostic.

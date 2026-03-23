@@ -6,7 +6,7 @@
 ;; Author: Sebastian Monia <smonia@outlook.com>
 ;; Author: Gary Hollis <ghollisjr@gmail.com>
 ;; URL: https://github.com/ghollisjr/datum
-;; Package-Requires: ((emacs "27.1"))
+;; Package-Requires: ((emacs "28.1"))
 ;; Version: 2.0
 ;; Keywords: languages processes tools
 
@@ -123,15 +123,20 @@ completion candidates up to date.  Set to nil to disable."
   "List of routine names populated by :routines introspection.")
 
 (defvar-local sql-datum--columns (make-hash-table :test #'equal)
-  "Hash table mapping \"schema.table\" to list of column name strings.")
+  "Hash table mapping downcased table name to list of column name strings.
+Keys are always downcased, optionally schema-qualified: \"users\" or
+\"dbo.users\".  Always downcase lookup keys before calling gethash.
+The consistent keying is load-bearing — do not reintroduce maphash
+scans here without first breaking the normalization invariant.")
 
 (defvar-local sql-datum--column-details (make-hash-table :test #'equal)
-  "Hash table mapping \"schema.table\" to full column metadata rows.
-Each value is a list of [col_name type nullable default] vectors.")
+  "Hash table mapping downcased table name to full column metadata rows.
+Each value is a list of [col_name type nullable default] vectors.
+Keys follow the same downcased convention as `sql-datum--columns'.")
 
 (defvar-local sql-datum--columns-pending (make-hash-table :test #'equal)
   "Hash table tracking in-flight silent column fetches.
-Keys are table names, values are t.  Prevents duplicate fetch requests.")
+Keys are downcased table names, values are t.  Prevents duplicate fetch requests.")
 
 (defvar-local sql-datum--routine-signatures (make-hash-table :test #'equal)
   "Hash table mapping routine name to parameter signature string.
@@ -356,13 +361,15 @@ When `sql-datum-open-result-file' is non-nil, also offer to open the file."
                (puthash (nth 0 pair) (nth 1 pair)
                         sql-datum--routine-types))))
           ((pred (string-prefix-p "columns:"))
-           (let ((table (substring kind (length "columns:"))))
+           (let* ((raw-table (substring kind (length "columns:")))
+                  (canon-key (downcase raw-table)))
              ;; Items are now full rows [name, type, nullable, default].
              ;; Store just names for completion, full rows for metadata.
-             (puthash table (mapcar (lambda (row) (if (consp row) (car row) row))
-                                    items)
+             (puthash canon-key
+                      (mapcar (lambda (row) (if (consp row) (car row) row))
+                              items)
                       sql-datum--columns)
-             (puthash table items sql-datum--column-details)))
+             (puthash canon-key items sql-datum--column-details)))
           ((pred (string-prefix-p "xdb:"))
            (sql-datum--handle-xdb-introspect kind items))))
     (error (message "datum: failed to parse introspect payload: %s" err))))
@@ -391,13 +398,14 @@ When `sql-datum-open-result-file' is non-nil, also offer to open the file."
                (puthash (nth 0 pair) (nth 1 pair)
                         sql-datum--routine-types))))
           ((pred (string-prefix-p "columns:"))
-           (let* ((table (substring kind (length "columns:")))
-                  (existing-names (gethash table sql-datum--columns))
-                  (existing-details (gethash table sql-datum--column-details))
+           (let* ((raw-table (substring kind (length "columns:")))
+                  (canon-key (downcase raw-table))
+                  (existing-names (gethash canon-key sql-datum--columns))
+                  (existing-details (gethash canon-key sql-datum--column-details))
                   (new-names (mapcar (lambda (row) (if (consp row) (car row) row))
                                      items)))
-             (puthash table (append existing-names new-names) sql-datum--columns)
-             (puthash table (append existing-details items) sql-datum--column-details)))
+             (puthash canon-key (append existing-names new-names) sql-datum--columns)
+             (puthash canon-key (append existing-details items) sql-datum--column-details)))
           ((pred (string-prefix-p "xdb:"))
            (sql-datum--handle-xdb-introspect kind items))))
     (error (message "datum: failed to parse introspect+ payload: %s" err))))
@@ -650,31 +658,32 @@ Returns the new position."
   ;; the main loop sees the quote character and handles the segment.
   ;; sql-mode doesn't treat " as a string delimiter, so syntax-ppss
   ;; won't detect it — use manual search instead.
-  (let ((dq-open (save-excursion
-                   (search-backward "\"" (line-beginning-position) t))))
-    ;; We're inside double quotes if the nearest " behind us is an opener:
-    ;; there's an odd number of " chars before point on this line, or
-    ;; equivalently, searching forward from the found " finds a closing "
-    ;; at or past our position.
-    (when dq-open
-      (let* ((orig (point))
-             (has-close (save-excursion
-                          (goto-char (1+ dq-open))
-                          (and (search-forward "\"" nil t)
-                               (>= (point) orig)))))
-        (when has-close
-          (if (eq direction -1)
-              (goto-char dq-open)
-            (goto-char (1+ dq-open))
-            (search-forward "\"" nil t))))))
-  (let ((bracket-open (save-excursion
-                        (search-backward "[" (line-beginning-position) t)))
-        (bracket-close (save-excursion
-                         (search-backward "]" (line-beginning-position) t))))
-    (when (and bracket-open (or (null bracket-close) (> bracket-open bracket-close)))
+  ;; Both blocks verify point is genuinely *between* the delimiters to
+  ;; avoid misfiring on earlier quoted identifiers on the same line.
+  (let* ((dq-open (save-excursion
+                    (search-backward "\"" (line-beginning-position) t)))
+         (dq-close (when dq-open
+                     (save-excursion
+                       (goto-char (1+ dq-open))
+                       (search-forward "\"" (line-end-position) t)))))
+    (when (and dq-open dq-close
+               (< dq-open (point))
+               (>= dq-close (point)))
       (if (eq direction -1)
-          (goto-char bracket-open)       ; opening bracket
-        (search-forward "]" nil t))))    ; past closing bracket
+          (goto-char dq-open)
+        (goto-char dq-close))))
+  (let* ((bracket-open (save-excursion
+                         (search-backward "[" (line-beginning-position) t)))
+         (bracket-close (when bracket-open
+                          (save-excursion
+                            (goto-char (1+ bracket-open))
+                            (search-forward "]" (line-end-position) t)))))
+    (when (and bracket-open bracket-close
+               (< bracket-open (point))
+               (>= bracket-close (point)))
+      (if (eq direction -1)
+          (goto-char bracket-open)
+        (goto-char bracket-close))))
   (let ((keep-going t))
     (while keep-going
       (setq keep-going nil)
@@ -1140,43 +1149,29 @@ same `sql-datum--prompt-suppressed' flag to detect completion.
 The `sql-datum--at-prompt-p' guard reduces but does not eliminate
 the race window with concurrent silent commands.  See the
 docstring of `sql-datum--prompt-suppressed' for details."
-  ;; Check if already cached (try exact key match in col-hash)
-  (unless (or (gethash table col-hash)
-              (let ((found nil))
-                  (maphash (lambda (k _v)
-                             (when (or (string-equal-ignore-case k table)
-                                       (string-suffix-p (concat "." table) k t))
-                               (setq found t)))
-                           col-hash)
-                  found)
-                (gethash table pending-hash))
+  ;; All cache keys are downcased — normalize the lookup key.
+  (let ((key (downcase table)))
+    (unless (or (gethash key col-hash)
+                (gethash key pending-hash))
       (let ((proc (get-buffer-process buf)))
         (when (and proc (sql-datum--at-prompt-p buf))
           (with-current-buffer buf
-            (puthash table t sql-datum--columns-pending)
+            (puthash key t sql-datum--columns-pending)
             (cl-incf sql-datum--suppress-prompt-count)
             (comint-send-string proc (format ":columns %s :silent\n" table)))
           (letrec ((watcher
-                    (lambda (_output)
-                      ;; The preoutput filter runs before us and sets
-                      ;; prompt-suppressed when a silent command completes.
-                      ;; Use that as a cheap trigger, then do a direct O(1)
-                      ;; hash lookup instead of a full maphash scan.
-                      (when (and sql-datum--prompt-suppressed
-                                 (or (gethash table col-hash)
-                                     ;; Fallback: server may key as schema.table
-                                     (let ((found nil))
-                                       (maphash (lambda (k _v)
-                                                  (when (and (not found)
-                                                             (string-suffix-p
-                                                              (concat "." table) k t))
-                                                    (setq found t)))
-                                                col-hash)
-                                       found)))
+                    (lambda (output)
+                      ;; Detect completion by matching the envelope line
+                      ;; in the raw output.  Keys are downcased at write
+                      ;; time, so a direct gethash is sufficient.
+                      (when (string-match-p
+                             (concat "##DATUM:introspect:columns:"
+                                     (regexp-quote key) ":")
+                             output)
                         (remove-hook 'comint-output-filter-functions watcher t)
-                        (remhash table pending-hash)))))
+                        (remhash key pending-hash)))))
             (with-current-buffer buf
-              (add-hook 'comint-output-filter-functions watcher nil t)))))))
+              (add-hook 'comint-output-filter-functions watcher nil t))))))))
 
 (defun sql-datum--xdb-fetch-async (db buf xdb-cache callback)
   "Send :refresh-db DB asynchronously.  Call CALLBACK when cache entry is ready.
@@ -1363,32 +1358,13 @@ Completing a FUNCTION name auto-inserts parentheses."
                        (resolved (or (cdr (assoc tbl-part aliases
                                                  #'string-equal-ignore-case))
                                      tbl-part))
-                       ;; Look up columns for the resolved table
-                       (tbl-cols (or (gethash resolved col-hash)
-                                     (let ((found nil))
-                                       (maphash (lambda (k v)
-                                                  (when (and (not found)
-                                                             (or (string-equal-ignore-case
-                                                                  k resolved)
-                                                                 (string-suffix-p
-                                                                  (concat "." resolved) k t)))
-                                                    (setq found v)))
-                                                col-hash)
-                                       found)))
+                       ;; Look up columns for the resolved table (keys are downcased)
+                       (resolved-key (downcase resolved))
+                       (tbl-cols (gethash resolved-key col-hash))
                        (tbl-details (and buf (buffer-local-value
                                               'sql-datum--column-details buf)))
                        (detail-rows (when tbl-details
-                                      (or (gethash resolved tbl-details)
-                                          (let ((found nil))
-                                            (maphash (lambda (k v)
-                                                       (when (and (not found)
-                                                                  (or (string-equal-ignore-case
-                                                                       k resolved)
-                                                                      (string-suffix-p
-                                                                       (concat "." resolved) k t)))
-                                                         (setq found v)))
-                                                     tbl-details)
-                                            found))))
+                                      (gethash resolved-key tbl-details)))
                        (pending-hash (and buf (buffer-local-value
                                                'sql-datum--columns-pending buf))))
                   (if tbl-cols
@@ -1405,6 +1381,14 @@ Completing a FUNCTION name auto-inserts parentheses."
                                                (puthash (concat tbl-part "." (nth 0 row))
                                                         (nth 1 row) h)))
                                            h))))
+                        ;; Prefetch columns for other tables in the statement
+                        ;; so they're cached by the time the user completes them.
+                        (when (and buf pending-hash)
+                          (dolist (entry aliases)
+                            (let ((tbl (cdr entry)))
+                              (unless (string= (downcase tbl) resolved-key)
+                                (sql-datum--fetch-columns-async
+                                 tbl buf col-hash pending-hash)))))
                         (list start end
                               (completion-table-case-fold qualified)
                               :exclusive t
@@ -1419,7 +1403,8 @@ Completing a FUNCTION name auto-inserts parentheses."
                                 (when (eq status 'finished)
                                   (sql-datum--maybe-quote-completed
                                    cand comp-start dialect)))))
-                    ;; Columns not cached — trigger async fetch, return nil
+                    ;; Columns not cached — trigger async fetch, return nil.
+                    ;; Next TAB will find the cached columns.
                     (when (and buf pending-hash)
                       (sql-datum--fetch-columns-async
                        resolved buf col-hash pending-hash))
@@ -1430,27 +1415,15 @@ Completing a FUNCTION name auto-inserts parentheses."
                        (pending-hash (and buf (buffer-local-value
                                                'sql-datum--columns-pending buf)))
                        ;; Collect columns from tables found in statement
+                       ;; (cache keys are downcased — normalize before lookup)
                        (ctx-columns
                         (when (and stmt-tables col-hash)
                           (let (result)
                             (dolist (tbl stmt-tables)
-                              (let ((found nil))
-                                ;; Try exact key match (hash stores bare table names)
-                                (let ((exact (gethash tbl col-hash)))
-                                  (when exact
-                                    (setq found t)
-                                    (setq result (append exact result))))
-                                ;; Try suffix match for bare names against schema-qualified keys
-                                (unless found
-                                  (maphash (lambda (k v)
-                                             (when (or (string-equal-ignore-case k tbl)
-                                                       (string-suffix-p
-                                                        (concat "." tbl) k t))
-                                               (setq found t)
-                                               (setq result (append v result))))
-                                           col-hash))
-                                ;; Not cached — trigger async fetch
-                                (unless found
+                              (let ((cols (gethash (downcase tbl) col-hash)))
+                                (if cols
+                                    (setq result (append cols result))
+                                  ;; Not cached — trigger async fetch
                                   (when (and buf pending-hash)
                                     (sql-datum--fetch-columns-async
                                      tbl buf col-hash pending-hash)))))
@@ -2343,7 +2316,7 @@ If columns are cached for the table, includes them in the template."
          (buf (sql-find-sqli-buffer 'datum))
          (col-hash (and buf (buffer-local-value 'sql-datum--columns
                                                 (get-buffer buf))))
-         (cols (and col-hash (gethash table col-hash))))
+         (cols (and col-hash (gethash (downcase table) col-hash))))
     (unless cols (sql-datum--prefetch-columns table))
     (if cols
         (progn
