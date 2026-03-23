@@ -1,0 +1,63 @@
+I'm developing **datum**, a Python CLI database tool with an Emacs Lisp frontend (`sql-datum.el`) that connects to SQL databases via ODBC. I've just completed a major refactor and want to continue development.
+
+**Repo structure:**
+```
+datum/
+  __main__.py       # CLI entrypoint, docopt, --sql-type flag
+  datum.py          # REPL loop, wires everything together
+  connect.py        # pyodbc connection management
+  commands.py       # :command dispatch (:out, :in, :tables, etc.)
+  exporter.py       # :out export to csv/parquet/json via pyarrow
+  importer.py       # :in file→DB import via fast_executemany
+  envelope.py       # ##DATUM:type:payload## protocol for Emacs comms
+  printer.py        # tabular output formatting
+  environment.py    # config file and env var handling
+  drivers/
+    __init__.py     # dialect detection + print_list()
+    base.py         # abstract BaseDriver + AnsiDriver fallback
+    mssql.py        # MSSQL introspection SQL + type map
+    postgres.py     # PostgreSQL introspection SQL + type map
+sql-datum.el        # Emacs comint frontend, envelope filter, mode line
+```
+
+**Core architecture:**
+- Python is the engine, Emacs is a dumb terminal. All compute stays in Python.
+- datum communicates structured data to Emacs via envelope lines (`##DATUM:type:payload##`) which are stripped from the visible buffer by a `comint-preoutput-filter-functions` hook in `sql-datum.el` and acted on silently.
+- The connection is deferred (async from Emacs' perspective) — datum prints `Connecting...` immediately so Emacs doesn't block, then connects via pyodbc.
+- `sql-login-delay` is bound to `0` inside `sql-comint-datum` so sql.el's login spinner doesn't block on fresh buffers.
+
+**Envelope message types:**
+```
+##DATUM:info:<message>##
+##DATUM:warn:<message>##
+##DATUM:error:<message>##
+##DATUM:dialect:<mssql|postgres|ansi>##
+##DATUM:meta:<key>:<value>##          # server, database, user, version
+##DATUM:result-file:<path>:<fmt>##    # after :out export
+##DATUM:introspect:<kind>:<json>##    # after :databases/:tables/:schemas etc.
+```
+
+**New commands implemented:**
+- `:out <path> [:force]` — export next query to file, format inferred from extension (.csv/.parquet/.json)
+- `:in <path> <table> [:insert|:replace]` — import file into DB table with schema inference
+- `:type [dialect]` — show/set SQL dialect
+- `:databases`, `:schemas`, `:tables`, `:columns <table>`, `:running`, `:user`, `:version`, `:use <db>` — introspection commands that print to buffer and send introspect envelopes to Emacs
+
+**Emacs-side state populated by envelopes:**
+- `sql-datum--dialect` — current dialect, shown in mode line
+- `sql-datum--meta` — hash table of server/database/user/version
+- `sql-datum--tables`, `sql-datum--schemas`, `sql-datum--databases` — completion candidates
+- `sql-datum--columns` — per-table column cache
+- Mode line format: `[datum:mssql:mydb@myserver:dbo]`
+
+**Dependencies:**
+- Required: `pyodbc`, `docopt`
+- Optional: `pyarrow` (parquet/json export and import)
+- Optional: `polars` (reserved for future performance work)
+
+**Known gaps / next priorities:**
+1. The code has not been tested yet — first task should be a thorough read-through and smoke test, fixing any bugs found
+2. `printer.py` is untouched and may be slow for large result sets — profiling and optimization is a priority
+3. `sql-datum-completion-at-point` needs to be wired into `sql-mode` buffers automatically when a datum connection is active
+4. The `:running` introspect command opens a dedicated buffer but doesn't auto-refresh — a timer-based refresh would be useful
+5. Polars integration for the import/export pipeline hasn't been started

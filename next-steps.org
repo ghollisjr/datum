@@ -1,0 +1,26 @@
+from claude:
+
+Given the architecture and target audience, here are the features that would have the most impact:
+
+**Query history and replay**
+A searchable, persistent history that goes beyond comint's basic ring — queryable by date, connection, or database, with the ability to re-execute or yank a past query into the scratch buffer. Power users run variations on the same queries repeatedly and the current history is ephemeral. This is the feature that makes a tool feel like it *remembers* you.
+
+**Result buffer as a first-class object**
+Right now results are text in a comint buffer. If results rendered in a dedicated buffer with minor-mode keybindings — sort by column, filter rows, copy a column as a comma-separated list, export just the visible rows — that would be transformative for ad-hoc data work. The closest analogy is how Magit took git output and made it interactive. A "datum-result-mode" could do the same for query output.
+
+**Explain plan integration**
+`C-c t p` on a query (or the region) runs `EXPLAIN`/`EXPLAIN ANALYZE` (Postgres) or `SET STATISTICS` / execution plan (MSSQL) and opens the result in a readable buffer. Bonus: detect missing indexes or sequential scans and surface them as warnings. This is the feature that turns datum from a query tool into a development tool.
+
+**Connection bookmarks with context restoration**
+Save not just the connection parameters but the associated scratch buffers and their content, so reopening a connection restores your working state. Combined with Emacs's desktop.el or bookmark system this could mean your entire database working session persists across Emacs restarts. This is the "lives in Emacs" promise taken to its logical conclusion.
+
+**Schema diff**
+`:diff schema1 schema2` or `:diff connection1 connection2` — compare two schemas and report structural differences. Enormously useful for anyone managing migrations or keeping dev/staging/prod in sync. The introspection infrastructure you've already built makes this relatively achievable — you already know how to get the full schema, it's mostly a comparison and display problem.
+
+**Transaction management**
+Explicit `BEGIN`/`COMMIT`/`ROLLBACK` with visual state in the mode line — something like `[datum:postgres:mydb:TX]` when inside an open transaction. With a confirmation prompt if you try to close the buffer or switch connections while a transaction is open. This is a safety feature but it's one that professional users will genuinely care about.
+
+**ERD / relationship visualization**
+Given that you have foreign key information available through introspection, a `:diagram table` command that generates a simple ASCII or SVG entity-relationship diagram of a table and its immediate relationships would be distinctive. Not a full schema browser, just enough to understand what connects to what without leaving Emacs.
+
+Of these, **result buffer interactivity** and **explain plan integration** are probably the highest leverage — they're the features most likely to make someone switch from DBeaver permanently rather than keeping it around "just for query plans" or "just for viewing large result sets." The schema diff is the one most likely to get datum adopted by teams rather than just individuals.

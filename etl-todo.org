@@ -1,0 +1,97 @@
+* TODO datum-send-and-wait: sequential command execution from Elisp
+
+To enable ETL workflows and scripted automation from Emacs Lisp, datum needs
+a function that sends a command to the datum process and blocks until the
+command completes, so that a sequence of commands executes in order rather
+than all firing simultaneously.
+
+The implementation should use the envelope protocol rather than a raw timer:
+block until either a =##DATUM:info:...##= or =##DATUM:error:...##= envelope
+arrives (indicating command completion), or a new prompt appears in the
+buffer (indicating the REPL is ready for the next command).
+
+#+begin_src emacs-lisp
+(datum-send-and-wait buf ":out /tmp/extract.parquet :force")
+(datum-send-and-wait buf "SELECT * FROM orders WHERE date = TODAY();;")
+(datum-send-and-wait buf ":in /tmp/extract.parquet reporting.orders :replace")
+#+end_src
+
+** Design notes
+
+- Should accept a timeout argument (default e.g. 120s) to avoid hanging
+  indefinitely on a slow query.
+- Should signal an Emacs error (not just print a message) if an
+  =##DATUM:error:...##= envelope arrives, so callers can use
+  =condition-case= for error handling.
+- The blocking implementation should use =accept-process-output= in a loop
+  rather than =sit-for=, to remain responsive to process output without
+  freezing Emacs entirely.
+- A non-blocking variant =datum-send-async= with a callback argument would
+  complement this for cases where the caller doesn't need to wait.
+- Should be usable from =org-babel= source blocks so ETL steps can be
+  written as literate Org documents and executed with =C-c C-c=.
+
+** Example ETL pattern
+
+#+begin_src emacs-lisp
+(defun my-etl-daily-summary ()
+  "Extract yesterday's orders, transform via SQL, load into reporting DB."
+  (let ((buf (sql-find-sqli-buffer 'datum))
+        (extract-file "/tmp/orders-extract.parquet"))
+    (datum-send-and-wait buf (format ":out %s :force" extract-file))
+    (datum-send-and-wait buf
+      "SELECT * FROM orders WHERE order_date = CAST(GETDATE()-1 AS DATE);;")
+    (datum-send-and-wait buf ":use reporting_db")
+    (datum-send-and-wait buf
+      (format ":in %s dbo.orders_daily :replace" extract-file))))
+#+end_src
+
+
+* TODO datum-query-scalar: read a single value from a query result
+
+A companion to =datum-send-and-wait= that sends a query, waits for the
+result, and returns the value of the first cell as an Emacs Lisp object.
+This allows ETL control flow decisions to be made in Elisp based on live
+database state.
+
+#+begin_src emacs-lisp
+(let ((count (datum-query-scalar buf "SELECT COUNT(*) FROM staging.arrivals")))
+  (when (> count 0)
+    (my-etl-process-arrivals count)))
+#+end_src
+
+** Design notes
+
+- Should parse the result from the printer output in the comint buffer,
+  extracting the first data cell from the org-table pipe format the printer
+  already emits.  Alternatively, a dedicated =##DATUM:scalar:...##= envelope
+  type would be cleaner and more robust than buffer scraping.
+- The =##DATUM:scalar:...##= envelope approach is preferred: Python emits it
+  when a query returns exactly one row and one column, Emacs receives it via
+  the preoutput filter, and =datum-query-scalar= waits for it specifically.
+- Should attempt type coercion: numeric strings become Elisp integers or
+  floats, =NULL= becomes =nil=, everything else stays a string.
+- Should signal an error if the query returns more than one column or more
+  than one row, with a message guiding the user to use =datum-send-and-wait=
+  instead.
+- A =datum-query-column= variant returning a list of values from the first
+  column of a multi-row result would be a natural extension (useful for
+  e.g. fetching a list of table names to iterate over in an ETL).
+
+** Example control flow patterns
+
+#+begin_src emacs-lisp
+;; Conditional execution based on row count
+(when (> (datum-query-scalar buf "SELECT COUNT(*) FROM staging.new_data") 0)
+  (datum-send-and-wait buf ":out /tmp/new_data.parquet :force")
+  (datum-send-and-wait buf ":use warehouse")
+  (datum-send-and-wait buf ":in /tmp/new_data.parquet dbo.new_data :insert"))
+
+;; Iterate over a list of databases returned from a query
+(dolist (db (datum-query-column buf "SELECT name FROM sys.databases
+                                     WHERE name LIKE 'client_%'"))
+  (datum-send-and-wait buf (format ":use %s" db))
+  (datum-send-and-wait buf ":out /tmp/export.csv :force")
+  (datum-send-and-wait buf "SELECT * FROM dbo.summary;;")
+  (my-process-client-export db "/tmp/export.csv"))
+#+end_src

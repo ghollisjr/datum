@@ -1,0 +1,177 @@
+Another prompt from a session review:
+
+---
+
+I'm developing **datum**, a Python CLI database tool with an Emacs Lisp frontend (`sql-datum.el`). A code review identified several issues to fix. Work through them in order, reading the relevant files before making changes.
+
+---
+
+**1. `TODO.org` stale item**
+
+The "Qualified column autocomplete" item is still listed as TODO but has been implemented — alias-qualified completion is working in `sql-datum.el`. Update `TODO.org` to mark it done or remove it, and add a brief note about what was implemented (qualified `table.column` and `alias.column` completion with type annotations from `sql-datum--column-details`).
+
+---
+
+**2. `completion-table-case-fold` incompatible with declared minimum Emacs version**
+
+In `sql-datum.el`, `completion-table-case-fold` is used in the qualified column completion path:
+
+```elisp
+(completion-table-case-fold qualified)
+```
+
+`completion-table-case-fold` was introduced in Emacs 28.1, but `Package-Requires` declares `(emacs "27.1")`. This will produce a void-function error at completion time on Emacs 27, which is a silent runtime failure with no clear message to the user.
+
+Two options — pick whichever is more appropriate:
+
+- **Option A**: Bump `Package-Requires` to `(emacs "28.1")`. Emacs 28.1 was released in April 2022 and is widely deployed. Given the other features used (e.g. `letrec`, `cl-incf`, `xref`), 28.1 is a reasonable floor.
+- **Option B**: Replace the call with a case-insensitive completion table that works on 27.1+. A simple approach: use `completion-table-with-quoting` or just pass the list directly and set `completion-ignore-case` locally.
+
+After choosing, update the `Package-Requires` header and/or the completion call consistently throughout the file.
+
+---
+
+**3. `sql-datum--scan-quoted-identifier` forward scan misfires on multiple bracket-quoted identifiers**
+
+In `sql-datum.el`, the initial bracket-detection block at the top of `sql-datum--scan-quoted-identifier` runs unconditionally regardless of direction:
+
+```elisp
+(let ((bracket-open (save-excursion
+                      (search-backward "[" (line-beginning-position) t)))
+      (bracket-close (save-excursion
+                       (search-backward "]" (line-beginning-position) t))))
+  (when (and bracket-open (or (null bracket-close) (> bracket-open bracket-close)))
+    (if (eq direction -1)
+        (goto-char bracket-open)
+      (search-forward "]" nil t))))
+```
+
+When scanning forward (`direction=1`) in a line like `SELECT [col1], [col2] FROM [table]` with point between `,` and `[col2]`, this block finds the `[` from `[col1]` (which is behind point) and jumps forward past the `]` of `[col1]`, putting point in the wrong place before the main loop even starts.
+
+The fix is to restrict the initial bracket "inside a region" detection to the case where point is genuinely *between* the open and close brackets — i.e. `bracket-open` is before point *and* the corresponding close bracket is at or after point:
+
+```elisp
+(let* ((bracket-open (save-excursion
+                       (search-backward "[" (line-beginning-position) t)))
+       (bracket-close (when bracket-open
+                        (save-excursion
+                          (goto-char (1+ bracket-open))
+                          (search-forward "]" (line-end-position) t)))))
+  (when (and bracket-open bracket-close
+             (< bracket-open (point))
+             (>= bracket-close (point)))
+    (if (eq direction -1)
+        (goto-char bracket-open)
+      (goto-char bracket-close))))
+```
+
+Apply the same correction to the double-quote detection block immediately above it — verify the `has-close` check is using the same "point is between open and close" logic and fix if not.
+
+---
+
+**4. Normalize the column cache key to fix the `maphash` feedback loop**
+
+This is the most important fix in this session. There is a recurring bug cycle: the `maphash` fallback scan in `sql-datum--fetch-columns-async` and in the completion lookup code gets removed as a "performance fix," which breaks column completion for schema-qualified tables, which causes it to be restored, which causes it to be flagged again in the next review. The root cause is not the watcher — it is that `sql-datum--columns` and `sql-datum--column-details` use an inconsistent keying scheme. The same table's columns can be stored under `"users"`, `"dbo.users"`, or `"columns:users"` depending on which code path populated the cache, so every lookup must defensively scan the whole hash to compensate.
+
+**The fix has two parts:**
+
+**Part A — Normalize keys at write time in `sql-datum--handle-introspect` and `sql-datum--handle-introspect-append`.**
+
+When a `columns:TABLE` envelope arrives, the key used to store into `sql-datum--columns` and `sql-datum--column-details` must be canonicalized. Choose `downcase` of the raw table name as the canonical form (SQL identifiers are case-insensitive in practice):
+
+```elisp
+((pred (string-prefix-p "columns:"))
+ (let* ((raw-table (substring kind (length "columns:")))
+        (canon-key (downcase raw-table)))
+   (puthash canon-key
+            (mapcar (lambda (row) (if (consp row) (car row) row)) items)
+            sql-datum--columns)
+   (puthash canon-key items sql-datum--column-details)))
+```
+
+Do the same in `sql-datum--handle-introspect-append` for the append path.
+
+**Part B — Normalize keys at every lookup site.**
+
+Audit every place in `sql-datum.el` that reads from `sql-datum--columns` or `sql-datum--column-details` and ensure the lookup key is also downcased. The primary sites are:
+
+- The qualified column completion path in `sql-datum-completion-at-point` where `tbl-cols` and `detail-rows` are looked up
+- The context-column gathering loop that iterates `stmt-tables`
+- The `sql-datum--fetch-columns-async` cache-hit check that decides whether to skip the fetch
+
+Once all write and read sites use the same canonical key, the `maphash` fallback scans are genuinely unnecessary. Replace each one with a direct `gethash` on the normalized key. Add a comment at the `defvar-local` declaration of `sql-datum--columns` documenting the key format:
+
+```elisp
+(defvar-local sql-datum--columns (make-hash-table :test #'equal)
+  "Hash table mapping downcased table name to list of column name strings.
+Keys are always downcased, optionally schema-qualified: \"users\" or
+\"dbo.users\".  Always downcase lookup keys before calling gethash.
+The consistent keying is load-bearing — do not reintroduce maphash
+scans here without first breaking the normalization invariant.")
+```
+
+Add the same kind of comment to `sql-datum--column-details`.
+
+**Part C — Simplify `sql-datum--fetch-columns-async` watcher.**
+
+Once the keying is normalized, the watcher no longer needs to scan the hash. Replace the watcher body with a direct string match against the raw output:
+
+```elisp
+(letrec ((watcher
+          (lambda (output)
+            (when (string-match-p
+                   (concat "##DATUM:introspect:columns:"
+                           (regexp-quote (downcase table)) ":")
+                   output)
+              (remove-hook 'comint-output-filter-functions watcher t)
+              (remhash (downcase table) pending-hash)))))
+  ...)
+```
+
+Also remove the `cl-incf sql-datum--suppress-prompt-count` call paired with this watcher — it is no longer needed since the watcher now triggers on the envelope string itself rather than on prompt suppression.
+
+---
+
+**5. `_build_ddl` doesn't quote the table name**
+
+In `datum/importer.py`, `_build_ddl` calls `driver.quote_identifier()` for column names but leaves the table name unquoted:
+
+```python
+return f"CREATE TABLE {table_name} (\n    {cols}\n)"
+```
+
+If `table_name` contains spaces, special characters, or is a reserved word, this produces invalid DDL with no error message — it just fails at execution time with a cryptic database error.
+
+Fix by quoting each dotted segment of the table name using `driver.quote_identifier()`. `split_identifier` is already imported from `utils` in this file:
+
+```python
+def _build_ddl(table_name, col_types, driver=None):
+    quoted_table = ".".join(
+        driver.quote_identifier(seg) if driver else f'"{seg}"'
+        for seg in split_identifier(table_name)
+    )
+    ...
+    return f"CREATE TABLE {quoted_table} (\n    {cols}\n)"
+```
+
+---
+
+**6. Add `datum-send-and-wait` and `datum-query-scalar` to `TODO.org`**
+
+These two functions were designed as the foundation for ETL workflows from Emacs Lisp. They are not yet implemented. Add them to `TODO.org` covering:
+
+**`datum-send-and-wait`:**
+- Sends a command and blocks until an `info` or `error` envelope arrives, or the next prompt appears
+- Uses `accept-process-output` loop with a timeout argument (default 120s)
+- Signals an Emacs error on `error` envelope so callers can use `condition-case`
+- Non-blocking variant `datum-send-async` with callback for cases where waiting isn't needed
+- Intended to be usable from `org-babel` source blocks
+
+**`datum-query-scalar`:**
+- Sends a query, waits for result, returns first cell as an Elisp object
+- Preferred implementation: dedicated `##DATUM:scalar:...##` envelope emitted by Python when a query returns exactly one row and one column
+- Type coercion: numeric strings → integers or floats, NULL → nil, otherwise string
+- Should error if query returns more than one row or column
+- Natural extension: `datum-query-column` returning a list of first-column values for multi-row results, enabling iteration over query results in ETL loops
+
+Include example ETL patterns in the TODO as documentation of the intended use.

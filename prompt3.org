@@ -1,0 +1,66 @@
+Another prompt from a review session:
+
+---
+
+I'm developing **datum**, a Python CLI database tool with an Emacs Lisp frontend (`sql-datum.el`). A code review identified two issues to fix. Read the relevant files before making changes.
+
+---
+
+**1. Qualified column completion breaks for schema-qualified table names**
+
+This is the primary bug. When `sql-datum--tables` contains only schema-qualified names like `dbo.users` (the "always qualified" model used for MSSQL and postgres), the qualified column completion path misfires when the user types `dbo.users.` to trigger column completion.
+
+The problem is in `sql-datum-completion-at-point` in the qualified column completion block:
+
+```elisp
+(let* ((parts (sql-datum--split-identifier raw-prefix))
+       (tbl-part (sql-datum--unquote-part (car parts)))
+       ...)
+```
+
+When `raw-prefix` is `"dbo.users."`, `sql-datum--split-identifier` produces `["dbo" "users" ""]` and `(car parts)` gives `"dbo"` — the schema name — not the table. This causes:
+
+- `resolved` = `"dbo"` (schema, not a table)
+- `resolved-key` = `"dbo"` → `gethash` returns nil (no columns cached under a schema name)
+- The async fetch fires with `"dbo"` as the table name
+- Python receives `:columns dbo :silent` and queries for a table literally named `"dbo"` which doesn't exist
+
+The fix is to treat all non-empty segments joined together as `tbl-part`, so that `"dbo.users."` correctly identifies `"dbo.users"` as the table reference:
+
+```elisp
+(let* ((parts (sql-datum--split-identifier raw-prefix))
+       ;; Remove the trailing empty segment produced by a trailing dot,
+       ;; then rejoin all remaining segments as the full table reference.
+       ;; This correctly handles schema-qualified names like "dbo.users."
+       ;; where car parts would otherwise give just the schema "dbo".
+       (non-empty (seq-filter (lambda (p) (not (string-empty-p p))) parts))
+       (tbl-part (mapconcat #'sql-datum--unquote-part non-empty "."))
+       (aliases (sql-datum--table-aliases-in-statement))
+       (resolved (or (cdr (assoc tbl-part aliases #'string-equal-ignore-case))
+                     tbl-part))
+       (resolved-key (downcase resolved))
+       ...)
+```
+
+When building qualified candidates, `tbl-part` is already the full prefix (e.g. `"dbo.users"`), so the candidate construction `(concat tbl-part "." c)` produces `"dbo.users.column_name"` which is correct.
+
+Also verify that the async fetch triggered on cache miss passes `resolved` (the full table name, e.g. `"dbo.users"`) rather than a bare segment. When Python's `:columns` command receives `dbo.users`, it correctly splits on `.` to get schema=`"dbo"`, table=`"users"` and queries `INFORMATION_SCHEMA.COLUMNS` with both parts — so the fetch itself is fine as long as the right name is sent.
+
+After fixing, also check `sql-datum--table-aliases-in-statement`: when the user writes `FROM dbo.users u`, the scanner should record the alias mapping as `("u" . "dbo.users")` so that `u.` also triggers correct column lookup. Verify this works end-to-end with the new `tbl-part` extraction.
+
+---
+
+**2. Stale `cl-incf suppress-prompt-count` in `sql-datum--fetch-columns-async`**
+
+In `sql-datum.el`, `sql-datum--fetch-columns-async` still increments `sql-datum--suppress-prompt-count` even though the watcher was switched to the string-match approach which does not need prompt suppression:
+
+```elisp
+(with-current-buffer buf
+  (puthash key t sql-datum--columns-pending)
+  (cl-incf sql-datum--suppress-prompt-count)   ; ← no longer needed
+  (comint-send-string proc (format ":columns %s :silent\n" table)))
+```
+
+The string-match watcher fires on the raw envelope string directly and removes itself without any interaction with `sql-datum--prompt-suppressed`. The `cl-incf` call means every background column fetch unnecessarily increments the suppression counter, which can suppress a real prompt the user needs to see when the fetch completes near a normal command.
+
+Remove the `cl-incf sql-datum--suppress-prompt-count` call from `sql-datum--fetch-columns-async`. Verify that no corresponding `cl-decf` or counter adjustment exists elsewhere that would be left unbalanced by this removal — the counter is only decremented in the preoutput filter when it suppresses a prompt, so removing the increment means the counter simply won't be disturbed by background column fetches, which is the correct behavior.

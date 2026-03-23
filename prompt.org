@@ -1,0 +1,125 @@
+A separate session gave a prompt for more work:
+
+---
+
+I'm developing **datum**, a Python CLI database tool with an Emacs Lisp frontend (`sql-datum.el`). A code review identified several issues to fix and one new feature to begin. Work through them in order, reading the relevant files before making changes.
+
+---
+
+**1. `sql-datum--fetch-columns-async` watcher still uses `maphash`**
+
+In `sql-datum.el`, the watcher installed by `sql-datum--fetch-columns-async` fires on every piece of process output and does a full `maphash` scan over `sql-datum--columns` to check whether the table has been populated. This is O(n) per output chunk for each in-flight fetch.
+
+Replace the `maphash` scan in the watcher with a direct string match against the raw output:
+
+```elisp
+(letrec ((watcher
+          (lambda (output)
+            (when (string-match-p
+                   (concat "##DATUM:introspect:columns:"
+                           (regexp-quote table) ":")
+                   output)
+              (remove-hook 'comint-output-filter-functions watcher t)
+              (remhash table pending-hash)))))
+  ...)
+```
+
+The preoutput filter runs before `comint-output-filter-functions`, so by the time the watcher fires the envelope has already been processed and the column cache populated. Matching on the raw envelope string in the watcher is both faster and more precise — it fires exactly once on the relevant output chunk without any hash scanning.
+
+---
+
+**2. `_split_identifier` should live in a shared utility module**
+
+In `datum/importer.py`, `_table_exists` imports `_split_identifier` from `commands.py` at call time:
+
+```python
+from .commands import _split_identifier
+```
+
+This is a deferred circular import that works but is fragile — `_split_identifier` is a pure string utility with no dependencies and does not belong in `commands.py`. Move it to a new `datum/utils.py` module and update all callers:
+
+- `datum/commands.py` — import from utils instead of defining it
+- `datum/importer.py` — import from utils instead of the deferred in-function import
+- Add a module docstring to `utils.py` noting it contains shared pure utilities
+
+---
+
+**3. `quote_identifier` method on `BaseDriver`**
+
+In `datum/importer.py`, `_build_ddl` uses a hardcoded check for postgres vs. everyone-else to decide how to quote column names:
+
+```python
+if driver and driver.dialect_name == "postgres":
+    cols = f'"{name}"...'
+else:
+    cols = f"[{name}]..."
+```
+
+Square bracket quoting is MSSQL-specific. MySQL requires backticks, Oracle uses double-quotes, SQLite accepts double-quotes or no quoting. Add a `quote_identifier(name)` method to `BaseDriver` and override it in each driver:
+
+- `base.py` / `AnsiDriver` — double-quote: `f'"{name}"'`
+- `mssql.py` — square bracket: `f'[{name}]'`
+- `postgres.py` — double-quote: `f'"{name}"'`
+- `mysql.py` — backtick: `f'`{name}`'`
+- `oracle.py` — double-quote: `f'"{name}"'`
+- `sqlite.py` — double-quote: `f'"{name}"'`
+
+Update `_build_ddl` to call `driver.quote_identifier(name)` for each column, falling back to double-quote when `driver` is `None`. Also audit any other place in `importer.py` or `commands.py` that hardcodes identifier quoting and update those to use the method.
+
+---
+
+**4. `sql-datum--prompt-suppressed` race condition comment**
+
+In `sql-datum.el`, `sql-datum--prompt-suppressed` is a single buffer-local boolean used by both the refresh chain and `sql-datum--fetch-columns-async` to detect command completion. If both are in flight simultaneously, the first suppressed prompt sets the flag, and a watcher belonging to the *other* command may see it and consider itself done prematurely.
+
+This is a subtle correctness issue that is difficult to fix fully without Python-side changes (e.g. a correlation token per command). For now, add a clearly written comment at the `defvar-local` declaration of `sql-datum--prompt-suppressed` explaining:
+
+- What the flag is for
+- Why it's a single boolean rather than a counter or queue
+- The known race condition with concurrent silent commands
+- What a full fix would require (correlation tokens, or serializing all silent commands through the refresh chain mechanism)
+
+Also add a comment in `sql-datum--fetch-columns-async` noting that it runs independently of the refresh chain and is therefore susceptible to the race in practice, and that the `sql-datum--at-prompt-p` guard reduces but does not eliminate the window.
+
+---
+
+**5. `sql-datum--refresh-in-progress` silent no-op**
+
+In `sql-datum.el`, `sql-datum--refresh-async` silently does nothing if a refresh chain is already running:
+
+```elisp
+(unless sql-datum--refresh-in-progress
+  ...)
+```
+
+Change this to emit a message so the user knows why nothing happened:
+
+```elisp
+(if sql-datum--refresh-in-progress
+    (message "datum: refresh already in progress")
+  ...)
+```
+
+Also apply the same treatment to `sql-datum-refresh` (the interactive command) — if it calls `sql-datum--refresh-async` and the chain is already running, the user should be told rather than left wondering why nothing happened.
+
+---
+
+**6. Qualified column autocomplete (`table.column`)**
+
+The infrastructure for this feature is now in place: `sql-datum--column-details` stores full column metadata per table, `sql-datum--tables-in-statement` identifies referenced tables, and `sql-datum--fetch-columns-async` populates the cache on demand. What's missing is the completion path that offers `table.column` candidates.
+
+Add support in `sql-datum-completion-at-point` for the case where the user has typed a prefix containing a dot and the part before the dot matches a known table name:
+
+- Detect that `prefix` contains a dot and the portion before the last dot matches a table in `sql-datum--tables` or the current statement's tables
+- Extract the column names for that table from `sql-datum--columns` (keyed as `"columns:TABLE"`)
+- If the column cache is empty for that table, trigger `sql-datum--fetch-columns-async` and return nil (user retries after cache populates)
+- Return a completion spec offering `table.column` candidates, annotated with `[column]`
+- The annotation function should also show the data type from `sql-datum--column-details` if available, e.g. `[column: int]`
+
+This should integrate naturally with the existing xdb completion path — check for xdb prefix first, then qualified local completion, then the existing fallback.
+
+Also add alias-qualified completion: if the statement contains `FROM orders o`, then `o.` should offer the same columns as `orders.`. This requires extending `sql-datum--tables-in-statement` to also return alias mappings `((alias . table) ...)`, and using that map when resolving the prefix before the dot.
+
+---
+
+**After all fixes:** update `setup.cfg` version from `0.0.84` to `0.1.0`. The codebase has changed substantially enough from the original to warrant it.
