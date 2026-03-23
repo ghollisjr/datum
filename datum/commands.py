@@ -418,8 +418,7 @@ def tables(args):
         column_widths, print_ready = printer.format_rows(column_names, rows)
         print()
         printer.print_rows(column_widths, print_ready)
-        # Send both bare and schema-qualified names for default schema,
-        # schema-qualified only for other schemas.
+        # Send schema-qualified names only; bare names for schema-less databases.
         default_schema = _driver.default_schema
         items = []
         for row in rows:
@@ -428,7 +427,7 @@ def tables(args):
             qname = _quote_name(table_name)
             if schema:
                 items.append(f"{schema}.{qname}")
-                if default_schema is None or schema == default_schema:
+                if default_schema is None:
                     items.append(qname)
             else:
                 items.append(qname)
@@ -467,7 +466,7 @@ def routines(args):
             qname = _quote_name(routine_name)
             if schema:
                 items.append(f"{schema}.{qname}")
-                if default_schema is None or schema == default_schema:
+                if default_schema is None:
                     items.append(qname)
             else:
                 items.append(qname)
@@ -481,7 +480,7 @@ def routines(args):
             qname = _quote_name(routine_name)
             if schema:
                 type_pairs.append([f"{schema}.{qname}", routine_type])
-                if default_schema is None or schema == default_schema:
+                if default_schema is None:
                     type_pairs.append([qname, routine_type])
             else:
                 type_pairs.append([qname, routine_type])
@@ -498,7 +497,7 @@ def routines(args):
                     rname = str(sig_row[1])
                     sig = str(sig_row[2]) if sig_row[2] is not None else ""
                     pairs.append([f"{schema}.{rname}", sig])
-                    if default_schema is None or schema == default_schema:
+                    if default_schema is None:
                         pairs.append([rname, sig])
                 envelope.introspect("routine-sigs", pairs)
         except Exception:
@@ -858,7 +857,7 @@ def refresh_tables(args):
                 qname = _quote_name(table_name)
                 if schema:
                     items.append(f"{schema}.{qname}")
-                    if default_schema is None or schema == default_schema:
+                    if default_schema is None:
                         items.append(qname)
                 else:
                     items.append(qname)
@@ -885,7 +884,7 @@ def refresh_routines(args):
                 qname = _quote_name(routine_name)
                 if schema:
                     items.append(f"{schema}.{qname}")
-                    if default_schema is None or schema == default_schema:
+                    if default_schema is None:
                         items.append(qname)
                 else:
                     items.append(qname)
@@ -899,7 +898,7 @@ def refresh_routines(args):
                 qname = _quote_name(routine_name)
                 if schema:
                     type_pairs.append([f"{schema}.{qname}", routine_type])
-                    if default_schema is None or schema == default_schema:
+                    if default_schema is None:
                         type_pairs.append([qname, routine_type])
                 else:
                     type_pairs.append([qname, routine_type])
@@ -917,7 +916,7 @@ def refresh_routines(args):
                         sig = str(sig_row[2]) if sig_row[2] is not None else ""
                         qrname = _quote_name(rname)
                         pairs.append([f"{schema}.{qrname}", sig])
-                        if default_schema is None or schema == default_schema:
+                        if default_schema is None:
                             pairs.append([qrname, sig])
                     envelope.introspect("routine-sigs", pairs)
             except Exception:

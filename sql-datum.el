@@ -139,12 +139,14 @@ Keys follow the same downcased convention as `sql-datum--columns'.")
 Keys are downcased table names, values are t.  Prevents duplicate fetch requests.")
 
 (defvar-local sql-datum--routine-signatures (make-hash-table :test #'equal)
-  "Hash table mapping routine name to parameter signature string.
+  "Hash table mapping downcased routine name to parameter signature string.
+Keys are always downcased for consistent lookup.
 Populated by the routine-sigs introspect envelope.")
 
 (defvar-local sql-datum--routine-types (make-hash-table :test #'equal)
-  "Hash table mapping routine name to type string (\"FUNCTION\" or \"PROCEDURE\").
-Populated by the routine-types introspect envelope.")
+  "Hash table mapping downcased routine name to type string.
+Values are \"FUNCTION\" or \"PROCEDURE\".  Keys are always downcased
+for consistent lookup.  Populated by the routine-types introspect envelope.")
 
 (defvar-local sql-datum--xdb-cache (make-hash-table :test #'equal)
   "Cross-database completion cache for MSSQL.
@@ -352,13 +354,13 @@ When `sql-datum-open-result-file' is non-nil, also offer to open the file."
            (clrhash sql-datum--routine-signatures)
            (dolist (pair items)
              (when (and (consp pair) (>= (length pair) 2))
-               (puthash (nth 0 pair) (nth 1 pair)
+               (puthash (downcase (nth 0 pair)) (nth 1 pair)
                         sql-datum--routine-signatures))))
           ("routine-types"
            (clrhash sql-datum--routine-types)
            (dolist (pair items)
              (when (and (consp pair) (>= (length pair) 2))
-               (puthash (nth 0 pair) (nth 1 pair)
+               (puthash (downcase (nth 0 pair)) (nth 1 pair)
                         sql-datum--routine-types))))
           ((pred (string-prefix-p "columns:"))
            (let* ((raw-table (substring kind (length "columns:")))
@@ -390,12 +392,12 @@ When `sql-datum-open-result-file' is non-nil, also offer to open the file."
           ("routine-sigs"
            (dolist (pair items)
              (when (and (consp pair) (>= (length pair) 2))
-               (puthash (nth 0 pair) (nth 1 pair)
+               (puthash (downcase (nth 0 pair)) (nth 1 pair)
                         sql-datum--routine-signatures))))
           ("routine-types"
            (dolist (pair items)
              (when (and (consp pair) (>= (length pair) 2))
-               (puthash (nth 0 pair) (nth 1 pair)
+               (puthash (downcase (nth 0 pair)) (nth 1 pair)
                         sql-datum--routine-types))))
           ((pred (string-prefix-p "columns:"))
            (let* ((raw-table (substring kind (length "columns:")))
@@ -440,14 +442,14 @@ When APPEND is non-nil, append to existing lists instead of replacing."
                        (make-hash-table :test #'equal))))
            (dolist (pair items)
              (when (and (consp pair) (>= (length pair) 2))
-               (puthash (nth 0 pair) (nth 1 pair) ht)))
+               (puthash (downcase (nth 0 pair)) (nth 1 pair) ht)))
            (setq entry (plist-put entry :routine-types ht))))
         ("routine-sigs"
          (let ((ht (or (plist-get entry :routine-sigs)
                        (make-hash-table :test #'equal))))
            (dolist (pair items)
              (when (and (consp pair) (>= (length pair) 2))
-               (puthash (nth 0 pair) (nth 1 pair) ht)))
+               (puthash (downcase (nth 0 pair)) (nth 1 pair) ht)))
            (setq entry (plist-put entry :routine-sigs ht))))
         ("done"
          (setq entry (plist-put entry :pending nil))))
@@ -810,6 +812,12 @@ and the completion framework passes the quote as part of the prefix."
       (substring s 1)
     s))
 
+(defun sql-datum--make-hash-set (list)
+  "Return a hash table mapping each element of LIST to t."
+  (let ((h (make-hash-table :test #'equal :size (length list))))
+    (dolist (x list) (puthash x t h))
+    h))
+
 (defun sql-datum--completion-match-p (prefix candidate)
   "Return non-nil if PREFIX matches CANDIDATE.
 Strips leading quote characters from PREFIX before matching.
@@ -824,7 +832,7 @@ the portion after the last dot (so \"Pat\" matches \"dbo.PatientDim\")."
               (car (last (split-string candidate "\\.")))
               t)))))
 
-(defun sql-datum--make-completion-table (candidates _tables &optional sort-fn)
+(defun sql-datum--make-completion-table (candidates &optional sort-fn)
   "Build a completion table that also matches bare table name portions.
 For a prefix without a dot, a candidate like \"rempat.fmreport\" matches
 if the prefix matches either \"rempat.fmreport\" or \"fmreport\".
@@ -847,7 +855,7 @@ the `display-sort-function' in metadata."
          (nreverse result)))
       ('nil  ;; try-completion
        (let ((matches (funcall (sql-datum--make-completion-table
-                                candidates nil)
+                                candidates)
                                string pred 't)))
          (cond ((null matches) nil)
                ((= (length matches) 1)
@@ -874,9 +882,11 @@ E.g. \"@Table_name varchar(128), @Other int\" → (\"@Table_name\" \"@Other\")."
 
 (defun sql-datum--sigs-canonical-key (name sigs)
   "Return the canonical key in SIGS that matches NAME, or nil.
-Tries exact match first, then bare name against qualified keys,
-then strips the schema prefix from a qualified NAME to match a bare key."
+Keys in SIGS are downcased.  Tries exact match first, then bare name
+against qualified keys, then strips the schema prefix from a qualified
+NAME to match a bare key."
   (when (and name (stringp name))
+    (let ((name (downcase name)))
     (cond
      ((gethash name sigs) name)
    ;; Bare name → check if any schema.name key matches
@@ -893,7 +903,7 @@ then strips the schema prefix from a qualified NAME to match a bare key."
    ;; Qualified name → try just the bare part
    (t
     (let ((bare (car (last (split-string name "\\.")))))
-      (when (gethash bare sigs) bare))))))
+      (when (gethash bare sigs) bare)))))))
 
 (defun sql-datum--at-new-param-p (routine-name sigs)
   "Return non-nil if point is where a new @parameter name is expected.
@@ -971,7 +981,7 @@ or nil otherwise.  Checks three cases:
   "Return non-nil if ROUTINE-NAME should use parenthesized call syntax.
 Functions always use parens.  On PostgreSQL, procedures also use
 parens (CALL proc(args)), unlike MSSQL which uses EXEC proc @p=val."
-  (let ((rtype (and rtypes (gethash routine-name rtypes))))
+  (let ((rtype (and rtypes (gethash (downcase routine-name) rtypes))))
     (or (equal rtype "FUNCTION")
         (and (equal rtype "PROCEDURE")
              (equal dialect "postgres")))))
@@ -1247,7 +1257,7 @@ Returns a completion spec or nil if PREFIX is not a known database."
                                       (push c filtered)))
                                   (nreverse filtered))))
                     (funcall
-                     (sql-datum--make-completion-table cands (or tables '()))
+                     (sql-datum--make-completion-table cands)
                      string pred action)))
                 :exclusive t
                 :annotation-function
@@ -1265,14 +1275,15 @@ Returns a completion spec or nil if PREFIX is not a known database."
                     (sql-datum--maybe-quote-completed cand start "mssql")
                     (let* ((cur (gethash db-match xdb-cache))
                            (xrtypes (plist-get cur :routine-types))
-                           (xsigs   (plist-get cur :routine-sigs)))
+                           (xsigs   (plist-get cur :routine-sigs))
+                           (dc (downcase cand)))
                       (when (and xrtypes
-                                 (equal (gethash cand xrtypes) "FUNCTION"))
+                                 (equal (gethash dc xrtypes) "FUNCTION"))
                         (insert "()")
                         (backward-char)
-                        (when (and xsigs (gethash cand xsigs))
+                        (when (and xsigs (gethash dc xsigs))
                           (message "%s(%s)" cand
-                                   (gethash cand xsigs)))))))))))))
+                                   (gethash dc xsigs)))))))))))))
 
 
 (defun sql-datum-completion-at-point ()
@@ -1356,8 +1367,6 @@ Completing a FUNCTION name auto-inserts parentheses."
                         (point)))
                (raw-prefix (buffer-substring-no-properties start end))
                ;; Strip quotes from prefix so it matches bare candidates
-               (_prefix (let ((parts (sql-datum--split-identifier raw-prefix)))
-                          (mapconcat #'sql-datum--unquote-part parts ".")))
                (dialect (and buf (buffer-local-value 'sql-datum--dialect buf)))
                (dbs     (and buf (buffer-local-value 'sql-datum--databases buf)))
                (xdb-cache (and buf (buffer-local-value 'sql-datum--xdb-cache buf)))
@@ -1463,34 +1472,43 @@ Completing a FUNCTION name auto-inserts parentheses."
                        ;; Capture start for exit-function closure
                        (comp-start start))
                   (when candidates
-                    (let ((sort-fn
-                           ;; Sort columns before other candidates.  When
-                           ;; ctx-columns exist they go first; otherwise all
-                           ;; cached columns are promoted.
-                           (when effective-columns
-                             (let ((col-set (make-hash-table :test #'equal)))
-                               (dolist (c effective-columns)
-                                 (puthash c t col-set))
-                               (lambda (completions)
-                                 (let (cols others)
-                                   (dolist (c completions)
-                                     (if (gethash c col-set)
-                                         (push c cols)
-                                       (push c others)))
-                                   (nconc (nreverse cols) (nreverse others))))))))
+                    (let* ((tables-set   (sql-datum--make-hash-set tables))
+                           (schemas-set  (sql-datum--make-hash-set schemas))
+                           (routines-set (sql-datum--make-hash-set routines))
+                           (columns-set  (sql-datum--make-hash-set
+                                          effective-columns))
+                           (dbs-set      (when dbs
+                                          (sql-datum--make-hash-set dbs)))
+                           (ctx-columns-set (when ctx-columns
+                                             (sql-datum--make-hash-set
+                                              ctx-columns)))
+                           (sort-fn
+                            ;; Sort columns before other candidates.  When
+                            ;; ctx-columns exist they go first; otherwise all
+                            ;; cached columns are promoted.
+                            (when effective-columns
+                              (lambda (completions)
+                                (let (cols others)
+                                  (dolist (c completions)
+                                    (if (gethash c columns-set)
+                                        (push c cols)
+                                      (push c others)))
+                                  (nconc (nreverse cols) (nreverse others)))))))
                     (list start end
                           (sql-datum--make-completion-table
-                           candidates tables sort-fn)
+                           candidates sort-fn)
                           :exclusive t
                           :annotation-function
                           (lambda (cand)
-                            (cond ((member cand tables)   " [table]")
-                                  ((member cand schemas)  " [schema]")
-                                  ((member cand routines) " [routine]")
-                                  ((and ctx-columns (member cand ctx-columns))
+                            (cond ((gethash cand tables-set)   " [table]")
+                                  ((gethash cand schemas-set)  " [schema]")
+                                  ((gethash cand routines-set) " [routine]")
+                                  ((and ctx-columns-set
+                                        (gethash cand ctx-columns-set))
                                    " [column]")
-                                  ((member cand effective-columns) " [column]")
-                                  ((and dbs (member cand dbs)) " [database]")
+                                  ((gethash cand columns-set) " [column]")
+                                  ((and dbs-set (gethash cand dbs-set))
+                                   " [database]")
                                   (t "")))
                           :exit-function
                           (lambda (cand status)
