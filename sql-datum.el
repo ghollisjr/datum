@@ -633,6 +633,35 @@ doesn't get double-quoted."
 Handles bare identifiers, bracket-quoted [name with spaces], and
 double-quoted \"name with spaces\", connected by dots.
 Returns the new position."
+  ;; If point is inside a quoted region, jump to the boundary first so
+  ;; the main loop sees the quote character and handles the segment.
+  ;; sql-mode doesn't treat " as a string delimiter, so syntax-ppss
+  ;; won't detect it — use manual search instead.
+  (let ((dq-open (save-excursion
+                   (search-backward "\"" (line-beginning-position) t))))
+    ;; We're inside double quotes if the nearest " behind us is an opener:
+    ;; there's an odd number of " chars before point on this line, or
+    ;; equivalently, searching forward from the found " finds a closing "
+    ;; at or past our position.
+    (when dq-open
+      (let* ((orig (point))
+             (has-close (save-excursion
+                          (goto-char (1+ dq-open))
+                          (and (search-forward "\"" nil t)
+                               (>= (point) orig)))))
+        (when has-close
+          (if (eq direction -1)
+              (goto-char dq-open)
+            (goto-char (1+ dq-open))
+            (search-forward "\"" nil t))))))
+  (let ((bracket-open (save-excursion
+                        (search-backward "[" (line-beginning-position) t)))
+        (bracket-close (save-excursion
+                         (search-backward "]" (line-beginning-position) t))))
+    (when (and bracket-open (or (null bracket-close) (> bracket-open bracket-close)))
+      (if (eq direction -1)
+          (goto-char bracket-open)       ; opening bracket
+        (search-forward "]" nil t))))    ; past closing bracket
   (let ((keep-going t))
     (while keep-going
       (setq keep-going nil)
@@ -658,8 +687,8 @@ Returns the new position."
        ;; Bare identifier segment
        (t
         (if (eq direction 1)
-            (skip-chars-forward "a-zA-Z0-9_#@")
-          (skip-chars-backward "a-zA-Z0-9_#@"))
+            (skip-chars-forward "a-zA-Z0-9_#@$")
+          (skip-chars-backward "a-zA-Z0-9_#@$"))
         (setq keep-going
               (if (eq direction 1)
                   (eq (char-after) ?.)

@@ -19,7 +19,7 @@ class OracleDriver(BaseDriver):
 
     @property
     def sql_list_databases(self):
-        return "SELECT name FROM V$DATABASE"
+        return "SELECT SYS_CONTEXT('USERENV', 'DB_NAME') AS name FROM DUAL"
 
     @property
     def sql_current_database(self):
@@ -56,7 +56,7 @@ class OracleDriver(BaseDriver):
 
     @property
     def sql_server_version(self):
-        return "SELECT banner FROM V$VERSION WHERE ROWNUM = 1"
+        return "SELECT version_full AS banner FROM PRODUCT_COMPONENT_VERSION WHERE ROWNUM = 1"
 
     @property
     def sql_running_queries(self):
@@ -66,15 +66,15 @@ class OracleDriver(BaseDriver):
                    s.status,
                    s.last_call_et                 AS duration_secs,
                    SUBSTR(q.sql_text, 1, 200)     AS sql_text
-            FROM V$SESSION s
-            JOIN V$SQL q ON s.sql_id = q.sql_id
+            FROM GV$SESSION s
+            JOIN GV$SQL q ON s.sql_id = q.sql_id AND s.inst_id = q.inst_id
             WHERE s.username IS NOT NULL
               AND s.sid != SYS_CONTEXT('USERENV', 'SID')
         """
 
     def sql_list_databases_like(self, pattern):
-        return ("SELECT name FROM V$DATABASE WHERE name LIKE ? "
-                "ORDER BY name", [pattern])
+        return ("SELECT name FROM (SELECT SYS_CONTEXT('USERENV', 'DB_NAME') AS name FROM DUAL) "
+                "WHERE name LIKE ? ORDER BY name", [pattern])
 
     def sql_list_schemas_like(self, pattern):
         return ("SELECT username FROM ALL_USERS WHERE username LIKE ? "
@@ -232,9 +232,9 @@ class OracleDriver(BaseDriver):
 
     def sql_check_database(self, name):
         return ("""
-            SELECT name, created, log_mode, open_mode
-            FROM V$DATABASE
-            WHERE name = ?
+            SELECT SYS_CONTEXT('USERENV', 'DB_NAME') AS name
+            FROM DUAL
+            WHERE SYS_CONTEXT('USERENV', 'DB_NAME') = ?
         """, [name.upper()])
 
     def sql_check_schema(self, name):
