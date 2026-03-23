@@ -16,6 +16,7 @@ import os
 import time
 
 from . import envelope
+from .utils import split_identifier as _split_identifier
 
 # polars is optional (preferred)
 try:
@@ -343,17 +344,17 @@ def _arrow_type_str(arrow_type):
 
 def _build_ddl(table_name, col_types, driver=None):
     """Build a CREATE TABLE statement from (name, sql_type) pairs."""
-    if driver and driver.dialect_name == "postgres":
-        cols = ",\n    ".join(f'"{name}" {sql_type}' for name, sql_type in col_types)
-    else:
-        cols = ",\n    ".join(f"[{name}] {sql_type}" for name, sql_type in col_types)
+    def _quote(name):
+        if driver:
+            return driver.quote_identifier(name)
+        return f'"{name}"'  # ANSI fallback
+    cols = ",\n    ".join(f"{_quote(name)} {sql_type}" for name, sql_type in col_types)
     return f"CREATE TABLE {table_name} (\n    {cols}\n)"
 
 
 def _table_exists(cursor, table_name):
     """Check if a table exists. Works across MSSQL and PostgreSQL."""
     # Strip schema prefix for the check if present
-    from .commands import _split_identifier
     parts = _split_identifier(table_name)
     table = parts[-1]
     schema = parts[-2] if len(parts) > 1 else None

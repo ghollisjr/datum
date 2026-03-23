@@ -149,6 +149,17 @@ class BaseDriver(ABC):
         """
         raise NotImplementedError
 
+    # --- Identifier quoting ---
+
+    def quote_identifier(self, name):
+        """Quote a SQL identifier using the dialect's quoting style.
+
+        Default uses ANSI double-quoting.  Subclasses override for
+        dialect-specific quoting (e.g. square brackets for MSSQL,
+        backticks for MySQL).
+        """
+        return f'"{name}"'
+
     # --- Type mapping for :in imports ---
 
     def python_type_to_sql(self, python_type):

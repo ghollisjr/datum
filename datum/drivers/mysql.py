@@ -232,6 +232,9 @@ class MySQLDriver(BaseDriver):
             WHERE SCHEMA_NAME = ?
         """, [name])
 
+    def quote_identifier(self, name):
+        return f"`{name}`"
+
     def python_type_to_sql(self, python_type):
         return _MYSQL_TYPE_MAP.get(python_type, "TEXT")
 

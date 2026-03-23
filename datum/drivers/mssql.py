@@ -328,6 +328,9 @@ class MSSQLDriver(BaseDriver):
             ORDER BY s.name, o.name
         """
 
+    def quote_identifier(self, name):
+        return f"[{name}]"
+
     def python_type_to_sql(self, python_type):
         return _MSSQL_TYPE_MAP.get(python_type, "NVARCHAR(MAX)")
 

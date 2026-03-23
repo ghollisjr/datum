@@ -153,7 +153,19 @@ Incremented by silent commands (e.g. M-. definition, background refresh).")
 (defvar-local sql-datum--prompt-suppressed nil
   "Set to t by the preoutput filter when a prompt was just suppressed.
 Read and cleared by watchers that detect command completion without
-needing to see `>' in the output text.")
+needing to see `>' in the output text.
+
+This is a single boolean rather than a counter or per-command token.
+If multiple silent commands are in flight simultaneously (e.g. the
+refresh chain and a `sql-datum--fetch-columns-async' fetch), the
+flag being set for one command may cause a watcher belonging to
+the *other* command to consider itself done prematurely.  A full
+fix would require correlation tokens (e.g. a unique ID per silent
+command echoed back in the response envelope) or serializing all
+silent commands through the refresh chain mechanism.  In practice
+the window is small: `sql-datum--fetch-columns-async' guards on
+`sql-datum--at-prompt-p' and only fires when no other command is
+in progress, but the race is not fully eliminated.")
 
 (defvar-local sql-datum--refresh-in-progress nil
   "Non-nil while an async refresh chain is running.
@@ -1013,6 +1025,100 @@ tables are found."
                       (setq continue nil)))))))))
       (delete-dups (nreverse tables)))))
 
+(defun sql-datum--table-aliases-in-statement ()
+  "Return an alist of (NAME . TABLE) for tables in the current statement.
+Each table gets an entry mapping its own name to itself.  If an alias
+follows the table name (e.g. FROM orders o, JOIN users AS u), an
+additional entry maps the alias to the table."
+  (save-excursion
+    (let* ((stmt-start (save-excursion
+                         (or (and (search-backward ";"
+                                                   (if (derived-mode-p 'sql-interactive-mode)
+                                                       (comint-line-beginning-position)
+                                                     (point-min))
+                                                   t)
+                                  (1+ (point)))
+                             (if (derived-mode-p 'sql-interactive-mode)
+                                 (comint-line-beginning-position)
+                               (point-min)))))
+           (stmt-end (save-excursion
+                       (or (and (search-forward ";" nil t)
+                                (1- (point)))
+                           (point-max))))
+           (table-kw-re (concat "\\<\\("
+                                "FROM\\|"
+                                "\\(?:LEFT\\|RIGHT\\|INNER\\|FULL\\|CROSS\\|OUTER\\|NATURAL\\)?[ \t]*JOIN\\|"
+                                "UPDATE\\|"
+                                "INTO"
+                                "\\)\\>"))
+           (stop-kw-re (concat "\\<\\("
+                                "WHERE\\|ON\\|SET\\|ORDER\\|GROUP\\|HAVING\\|"
+                                "LIMIT\\|UNION\\|VALUES\\|SELECT\\|"
+                                "LEFT\\|RIGHT\\|INNER\\|FULL\\|CROSS\\|OUTER\\|NATURAL\\|"
+                                "JOIN\\|FROM\\|INTO\\|UPDATE"
+                                "\\)\\>"))
+           (alias-kw-re "\\<AS\\>")
+           (result nil))
+      (goto-char stmt-start)
+      (while (re-search-forward table-kw-re stmt-end t)
+        (skip-chars-forward " \t\n")
+        (let ((continue t))
+          (while (and continue (<= (point) stmt-end))
+            (skip-chars-forward " \t\n")
+            (when (>= (point) stmt-end)
+              (setq continue nil))
+            (when continue
+              (if (looking-at stop-kw-re)
+                  (setq continue nil)
+                (let ((id-start (point)))
+                  (sql-datum--scan-quoted-identifier 1)
+                  (if (= (point) id-start)
+                      (setq continue nil)
+                    (let* ((raw (buffer-substring-no-properties id-start (point)))
+                           (cleaned (mapconcat
+                                     #'sql-datum--unquote-part
+                                     (sql-datum--split-identifier raw)
+                                     ".")))
+                      (unless (string-empty-p cleaned)
+                        (push (cons cleaned cleaned) result)
+                        ;; Look for alias: optional AS keyword then identifier
+                        (skip-chars-forward " \t\n")
+                        (when (looking-at alias-kw-re)
+                          (goto-char (match-end 0))
+                          (skip-chars-forward " \t\n"))
+                        ;; Next token might be an alias (if not a keyword or comma)
+                        (unless (or (looking-at stop-kw-re)
+                                    (looking-at ",")
+                                    (>= (point) stmt-end))
+                          (let ((alias-start (point)))
+                            (sql-datum--scan-quoted-identifier 1)
+                            (unless (= (point) alias-start)
+                              (let* ((alias-raw (buffer-substring-no-properties
+                                                 alias-start (point)))
+                                     (alias (mapconcat
+                                             #'sql-datum--unquote-part
+                                             (sql-datum--split-identifier alias-raw)
+                                             ".")))
+                                (unless (or (string-empty-p alias)
+                                            (string-equal-ignore-case alias "ON")
+                                            (string-equal-ignore-case alias "WHERE")
+                                            (string-equal-ignore-case alias "SET")
+                                            (string-equal-ignore-case alias "JOIN")
+                                            (string-equal-ignore-case alias "LEFT")
+                                            (string-equal-ignore-case alias "RIGHT")
+                                            (string-equal-ignore-case alias "INNER")
+                                            (string-equal-ignore-case alias "FULL")
+                                            (string-equal-ignore-case alias "CROSS")
+                                            (string-equal-ignore-case alias "OUTER")
+                                            (string-equal-ignore-case alias "NATURAL"))
+                                  (push (cons alias cleaned) result))))))))
+                    ;; Check for comma to continue list
+                    (skip-chars-forward " \t\n")
+                    (if (and (< (point) stmt-end) (eq (char-after) ?,))
+                        (forward-char 1)
+                      (setq continue nil)))))))))
+      (nreverse result))))
+
 (defun sql-datum--at-prompt-p (buf)
   "Return non-nil if BUF appears to be at a datum prompt.
 Checks whether the last non-whitespace character before `point-max' is `>'."
@@ -1027,7 +1133,13 @@ Checks whether the last non-whitespace character before `point-max' is `>'."
   "Fetch columns for TABLE silently in the background.
 BUF is the SQLi process buffer.  COL-HASH is `sql-datum--columns',
 PENDING-HASH is `sql-datum--columns-pending'.
-Skips if TABLE is already cached or already in-flight."
+Skips if TABLE is already cached or already in-flight.
+
+Note: this runs independently of the refresh chain and uses the
+same `sql-datum--prompt-suppressed' flag to detect completion.
+The `sql-datum--at-prompt-p' guard reduces but does not eliminate
+the race window with concurrent silent commands.  See the
+docstring of `sql-datum--prompt-suppressed' for details."
   ;; Check if already cached (try exact key match in col-hash)
   (unless (or (gethash table col-hash)
               (let ((found nil))
@@ -1045,17 +1157,21 @@ Skips if TABLE is already cached or already in-flight."
             (comint-send-string proc (format ":columns %s :silent\n" table)))
           (letrec ((watcher
                     (lambda (_output)
-                      ;; Check if columns have been populated by the preoutput
-                      ;; filter's envelope handler (which runs before us).
-                      (when (or (gethash table col-hash)
-                                (let ((found nil))
-                                  (maphash (lambda (k _v)
-                                             (when (or (string-equal-ignore-case k table)
-                                                       (string-suffix-p
-                                                        (concat "." table) k t))
-                                               (setq found t)))
-                                           col-hash)
-                                  found))
+                      ;; The preoutput filter runs before us and sets
+                      ;; prompt-suppressed when a silent command completes.
+                      ;; Use that as a cheap trigger, then do a direct O(1)
+                      ;; hash lookup instead of a full maphash scan.
+                      (when (and sql-datum--prompt-suppressed
+                                 (or (gethash table col-hash)
+                                     ;; Fallback: server may key as schema.table
+                                     (let ((found nil))
+                                       (maphash (lambda (k _v)
+                                                  (when (and (not found)
+                                                             (string-suffix-p
+                                                              (concat "." table) k t))
+                                                    (setq found t)))
+                                                col-hash)
+                                       found)))
                         (remove-hook 'comint-output-filter-functions watcher t)
                         (remhash table pending-hash)))))
             (with-current-buffer buf
@@ -1228,12 +1344,86 @@ Completing a FUNCTION name auto-inserts parentheses."
                (xdb-cache (and buf (buffer-local-value 'sql-datum--xdb-cache buf)))
                ;; Check for cross-database prefix (mssql only)
                (xdb-result (when (and (equal dialect "mssql")
-                                      (string-match-p "\\." prefix)
+                                      (string-match-p "\\." raw-prefix)
                                       dbs)
                              (sql-datum--xdb-completion
                               prefix start end buf dbs xdb-cache))))
           (or xdb-result
-              (when (not xdb-result)  ; nil means not xdb — allow fallback
+              ;; --- Qualified column completion (table.col or alias.col) ---
+              ;; Use raw-prefix for the dot check because prefix strips
+              ;; trailing dots (e.g. "checking." → "checking").
+              (when (and (not xdb-result)
+                         (string-match-p "\\." raw-prefix)
+                         col-hash)
+                (let* ((parts (sql-datum--split-identifier raw-prefix))
+                       (tbl-part (sql-datum--unquote-part (car parts)))
+                       (aliases (sql-datum--table-aliases-in-statement))
+                       ;; Resolve alias → table
+                       (resolved (or (cdr (assoc tbl-part aliases
+                                                 #'string-equal-ignore-case))
+                                     tbl-part))
+                       ;; Look up columns for the resolved table
+                       (tbl-cols (or (gethash resolved col-hash)
+                                     (let ((found nil))
+                                       (maphash (lambda (k v)
+                                                  (when (and (not found)
+                                                             (or (string-equal-ignore-case
+                                                                  k resolved)
+                                                                 (string-suffix-p
+                                                                  (concat "." resolved) k t)))
+                                                    (setq found v)))
+                                                col-hash)
+                                       found)))
+                       (tbl-details (and buf (buffer-local-value
+                                              'sql-datum--column-details buf)))
+                       (detail-rows (when tbl-details
+                                      (or (gethash resolved tbl-details)
+                                          (let ((found nil))
+                                            (maphash (lambda (k v)
+                                                       (when (and (not found)
+                                                                  (or (string-equal-ignore-case
+                                                                       k resolved)
+                                                                      (string-suffix-p
+                                                                       (concat "." resolved) k t)))
+                                                         (setq found v)))
+                                                     tbl-details)
+                                            found))))
+                       (pending-hash (and buf (buffer-local-value
+                                               'sql-datum--columns-pending buf))))
+                  (if tbl-cols
+                      ;; Build table.column candidates
+                      (let* ((qualified (mapcar (lambda (c)
+                                                 (concat tbl-part "." c))
+                                               tbl-cols))
+                             (comp-start start)
+                             ;; Build type annotation map
+                             (type-map (when detail-rows
+                                         (let ((h (make-hash-table :test #'equal)))
+                                           (dolist (row detail-rows)
+                                             (when (and (consp row) (>= (length row) 2))
+                                               (puthash (concat tbl-part "." (nth 0 row))
+                                                        (nth 1 row) h)))
+                                           h))))
+                        (list start end qualified
+                              :exclusive t
+                              :annotation-function
+                              (lambda (cand)
+                                (let ((dtype (and type-map (gethash cand type-map))))
+                                  (if dtype
+                                      (format " [column: %s]" dtype)
+                                    " [column]")))
+                              :exit-function
+                              (lambda (cand status)
+                                (when (eq status 'finished)
+                                  (sql-datum--maybe-quote-completed
+                                   cand comp-start dialect)))))
+                    ;; Columns not cached — trigger async fetch, return nil
+                    (when (and buf pending-hash)
+                      (sql-datum--fetch-columns-async
+                       resolved buf col-hash pending-hash))
+                    nil)))
+              ;; --- Normal identifier completion (fallback) ---
+              (when (not xdb-result)
                 (let* ((stmt-tables (sql-datum--tables-in-statement))
                        (pending-hash (and buf (buffer-local-value
                                                'sql-datum--columns-pending buf)))
@@ -1964,7 +2154,8 @@ Sends the 4 refresh sub-commands one at a time, yielding to the
 REPL between each so user input is not blocked."
   (when (buffer-live-p buf)
     (with-current-buffer buf
-      (unless sql-datum--refresh-in-progress
+      (if sql-datum--refresh-in-progress
+          (message "datum: refresh already in progress")
         (setq sql-datum--refresh-in-progress t)
         (sql-datum--refresh-chain
          '(":refresh-databases"
@@ -2002,6 +2193,7 @@ Also re-fetches any cross-database caches built during this session."
                    (length dbs-to-refresh))))))
   (unless (derived-mode-p 'sql-interactive-mode)
     (message "datum: refreshing introspection...")))
+
 
 (defun sql-datum-toggle-auto-refresh (interval)
   "Toggle periodic introspection refresh.
@@ -2176,7 +2368,7 @@ With prefix ARG, prompts for join type (LEFT, RIGHT, etc.)."
                                          nil t)
                       nil)))
     (sql-datum--prefetch-columns table)
-    (insert "\n" (if join-type (concat join-type " ") "") "JOIN " table " ON ")))
+    (insert (if join-type (concat join-type " ") "") "JOIN " table " ON ")))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Keybindings

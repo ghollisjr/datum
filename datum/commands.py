@@ -22,45 +22,7 @@ def _quote_name(name):
     return name
 
 
-def _split_identifier(raw):
-    """Split a dotted SQL identifier, respecting double-quote and bracket quoting.
-
-    Dots inside \"quoted.name\" or [bracket.name] are preserved.
-    Each returned part has surrounding quotes/brackets stripped.
-
-    >>> _split_identifier('DVF.\"F$DB.INST\"')
-    ['DVF', 'F$DB.INST']
-    >>> _split_identifier('[my.schema].[my.table]')
-    ['my.schema', 'my.table']
-    >>> _split_identifier('dbo.users')
-    ['dbo', 'users']
-    """
-    parts = []
-    current = []
-    in_dquote = False
-    in_bracket = False
-    for ch in raw:
-        if in_dquote:
-            if ch == '"':
-                in_dquote = False
-            else:
-                current.append(ch)
-        elif in_bracket:
-            if ch == ']':
-                in_bracket = False
-            else:
-                current.append(ch)
-        elif ch == '"':
-            in_dquote = True
-        elif ch == '[':
-            in_bracket = True
-        elif ch == '.':
-            parts.append(''.join(current))
-            current = []
-        else:
-            current.append(ch)
-    parts.append(''.join(current))
-    return parts
+from .utils import split_identifier as _split_identifier
 
 _help_text = """
 --Available commands--
