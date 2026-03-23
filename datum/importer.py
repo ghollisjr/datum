@@ -356,12 +356,17 @@ def _build_ddl(table_name, col_types, driver=None):
 
 
 def _table_exists(cursor, table_name):
-    """Check if a table exists. Works across MSSQL and PostgreSQL."""
-    # Strip schema prefix for the check if present
+    """Check if a table exists. Works across MSSQL, PostgreSQL, and temp tables."""
     parts = _split_identifier(table_name)
     table = parts[-1]
     schema = parts[-2] if len(parts) > 1 else None
     try:
+        # SQL Server temp tables (names starting with #) aren't in
+        # INFORMATION_SCHEMA — check via OBJECT_ID in tempdb instead.
+        if table.startswith("#"):
+            cursor.execute(
+                "SELECT OBJECT_ID('tempdb..' + ?)", table)
+            return cursor.fetchone()[0] is not None
         if schema:
             cursor.execute("""
                 SELECT 1 FROM INFORMATION_SCHEMA.TABLES

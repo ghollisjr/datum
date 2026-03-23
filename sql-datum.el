@@ -407,12 +407,13 @@ When `sql-datum-open-result-file' is non-nil, also offer to open the file."
              (puthash canon-key (append existing-names new-names) sql-datum--columns)
              (puthash canon-key (append existing-details items) sql-datum--column-details)))
           ((pred (string-prefix-p "xdb:"))
-           (sql-datum--handle-xdb-introspect kind items))))
+           (sql-datum--handle-xdb-introspect kind items t))))
     (error (message "datum: failed to parse introspect+ payload: %s" err))))
 
-(defun sql-datum--handle-xdb-introspect (kind items)
+(defun sql-datum--handle-xdb-introspect (kind items &optional append)
   "Route an xdb:<db>:<subkind> introspect envelope into `sql-datum--xdb-cache'.
-KIND is the full \"xdb:dbname:subkind\" string; ITEMS is the parsed payload."
+KIND is the full \"xdb:dbname:subkind\" string; ITEMS is the parsed payload.
+When APPEND is non-nil, append to existing lists instead of replacing."
   (when (string-match "^xdb:\\([^:]+\\):\\(.*\\)$" kind)
     (let* ((db (match-string 1 kind))
            (subkind (match-string 2 kind))
@@ -420,11 +421,20 @@ KIND is the full \"xdb:dbname:subkind\" string; ITEMS is the parsed payload."
                       (list :pending nil))))
       (pcase subkind
         ("schemas"
-         (setq entry (plist-put entry :schemas items)))
+         (setq entry (plist-put entry :schemas
+                                (if append
+                                    (append (plist-get entry :schemas) items)
+                                  items))))
         ("tables"
-         (setq entry (plist-put entry :tables items)))
+         (setq entry (plist-put entry :tables
+                                (if append
+                                    (append (plist-get entry :tables) items)
+                                  items))))
         ("routines"
-         (setq entry (plist-put entry :routines items)))
+         (setq entry (plist-put entry :routines
+                                (if append
+                                    (append (plist-get entry :routines) items)
+                                  items))))
         ("routine-types"
          (let ((ht (or (plist-get entry :routine-types)
                        (make-hash-table :test #'equal))))
@@ -804,9 +814,7 @@ and the completion framework passes the quote as part of the prefix."
   "Return non-nil if PREFIX matches CANDIDATE.
 Strips leading quote characters from PREFIX before matching.
 Matches against the full name, or if PREFIX has no dot, also against
-the portion after the last dot (so \"Pat\" matches \"dbo.PatientDim\").
-When PREFIX has a dot (e.g. \"dbo.MSr\"), also matches bare candidates
-against the part after the last dot (so \"dbo.MSr\" matches \"MSreplication\")."
+the portion after the last dot (so \"Pat\" matches \"dbo.PatientDim\")."
   (let ((prefix (sql-datum--strip-leading-quotes prefix)))
     (or (string-prefix-p prefix candidate t)
         (and (not (string-match-p "\\." prefix))
@@ -1213,43 +1221,58 @@ Returns a completion spec or nil if PREFIX is not a known database."
                         (car (sql-datum--member-ignore-case
                               db-part dbs)))))
     (when db-match
-      ;; Fetch asynchronously if not cached yet; return nil this time
+      ;; Fetch asynchronously if not cached yet
       (unless (gethash db-match xdb-cache)
         (sql-datum--xdb-fetch-async db-match buf xdb-cache nil))
-      (let* ((entry (gethash db-match xdb-cache))
-             (tables   (plist-get entry :tables))
-             (routines (plist-get entry :routines))
-             (xrtypes  (plist-get entry :routine-types))
-             (xsigs    (plist-get entry :routine-sigs))
-             ;; Pre-filter: only candidates belonging to this database
-             (db-prefix (concat db-match "."))
-             (all-raw (append tables routines))
-             (candidates (let (filtered)
-                           (dolist (c all-raw)
-                             (when (string-prefix-p db-prefix c t)
-                               (push c filtered)))
-                           (nreverse filtered))))
-        (when candidates
+      (let ((entry (gethash db-match xdb-cache)))
+        ;; If still pending, tell the user to TAB again
+        (when (plist-get entry :pending)
+          (message "datum: fetching %s, TAB again shortly" db-match))
+        ;; Return a completion spec with a *dynamic* table that reads
+        ;; from xdb-cache on every query.  This is critical because
+        ;; Emacs caches the completion table returned by the capf —
+        ;; if we close over a snapshot of candidates taken while the
+        ;; fetch is still pending, the table stays empty forever.
+        (let ((db-key db-match)
+              (cache xdb-cache))
           (list start end
-                (sql-datum--make-completion-table candidates tables)
+                (lambda (string pred action)
+                  (let* ((cur (gethash db-key cache))
+                         (tables   (plist-get cur :tables))
+                         (routines (plist-get cur :routines))
+                         (db-pfx   (concat db-key "."))
+                         (cands (let (filtered)
+                                  (dolist (c (append tables routines))
+                                    (when (string-prefix-p db-pfx c t)
+                                      (push c filtered)))
+                                  (nreverse filtered))))
+                    (funcall
+                     (sql-datum--make-completion-table cands (or tables '()))
+                     string pred action)))
                 :exclusive t
                 :annotation-function
                 (lambda (cand)
-                  (cond ((member cand tables)   " [table]")
-                        ((member cand routines) " [routine]")
-                        (t "")))
+                  (let* ((cur (gethash db-match xdb-cache))
+                         (tables   (plist-get cur :tables))
+                         (routines (plist-get cur :routines)))
+                    (cond ((member cand tables)   " [table]")
+                          ((member cand routines) " [routine]")
+                          (t ""))))
                 :exit-function
                 (lambda (cand status)
                   (when (eq status 'finished)
                     ;; MSSQL always uses brackets
                     (sql-datum--maybe-quote-completed cand start "mssql")
-                    (when (and xrtypes
-                               (equal (gethash cand xrtypes) "FUNCTION"))
-                      (insert "()")
-                      (backward-char)
-                      (when (and xsigs (gethash cand xsigs))
-                        (message "%s(%s)" cand
-                                 (gethash cand xsigs))))))))))))
+                    (let* ((cur (gethash db-match xdb-cache))
+                           (xrtypes (plist-get cur :routine-types))
+                           (xsigs   (plist-get cur :routine-sigs)))
+                      (when (and xrtypes
+                                 (equal (gethash cand xrtypes) "FUNCTION"))
+                        (insert "()")
+                        (backward-char)
+                        (when (and xsigs (gethash cand xsigs))
+                          (message "%s(%s)" cand
+                                   (gethash cand xsigs)))))))))))))
 
 
 (defun sql-datum-completion-at-point ()
@@ -1333,17 +1356,19 @@ Completing a FUNCTION name auto-inserts parentheses."
                         (point)))
                (raw-prefix (buffer-substring-no-properties start end))
                ;; Strip quotes from prefix so it matches bare candidates
-               (prefix (let ((parts (sql-datum--split-identifier raw-prefix)))
-                         (mapconcat #'sql-datum--unquote-part parts ".")))
+               (_prefix (let ((parts (sql-datum--split-identifier raw-prefix)))
+                          (mapconcat #'sql-datum--unquote-part parts ".")))
                (dialect (and buf (buffer-local-value 'sql-datum--dialect buf)))
                (dbs     (and buf (buffer-local-value 'sql-datum--databases buf)))
                (xdb-cache (and buf (buffer-local-value 'sql-datum--xdb-cache buf)))
-               ;; Check for cross-database prefix (mssql only)
+               ;; Check for cross-database prefix (mssql only).
+               ;; Use raw-prefix so trailing dots are preserved
+               ;; (e.g. "CDW_NEW." keeps the dot for db-part extraction).
                (xdb-result (when (and (equal dialect "mssql")
                                       (string-match-p "\\." raw-prefix)
                                       dbs)
                              (sql-datum--xdb-completion
-                              prefix start end buf dbs xdb-cache))))
+                              raw-prefix start end buf dbs xdb-cache))))
           (or xdb-result
               ;; --- Qualified column completion (table.col or alias.col) ---
               ;; Use raw-prefix for the dot check because prefix strips
