@@ -2048,6 +2048,69 @@ but detached, so they can be reused with a new connection."
       (message "datum: session disconnected"))))
 
 ;;; ---------------------------------------------------------------------------
+;;; Query templates
+;;; ---------------------------------------------------------------------------
+
+(defun sql-datum-insert-select (arg)
+  "Insert a SELECT template, prompting for the table name.
+With prefix ARG, insert SELECT DISTINCT."
+  (interactive "P")
+  (let ((table (sql-datum--read-table "Select from table: ")))
+    (insert (if arg "SELECT DISTINCT" "SELECT") " * FROM " table " WHERE ")))
+
+(defun sql-datum-insert-update ()
+  "Insert an UPDATE template, prompting for the table name.
+Point is left after SET on the SET line."
+  (interactive)
+  (let ((table (sql-datum--read-table "Update table: ")))
+    (insert "UPDATE " table "\nSET ")
+    (save-excursion
+      (insert "\nWHERE "))))
+
+(defun sql-datum-insert-delete ()
+  "Insert a DELETE template, prompting for the table name."
+  (interactive)
+  (let ((table (sql-datum--read-table "Delete from table: ")))
+    (insert "DELETE FROM " table " WHERE ")))
+
+(defun sql-datum-insert-insert ()
+  "Insert an INSERT INTO template, prompting for the table name.
+If columns are cached for the table, includes them in the template."
+  (interactive)
+  (let* ((table (sql-datum--read-table "Insert into table: "))
+         (buf (sql-find-sqli-buffer 'datum))
+         (col-hash (and buf (buffer-local-value 'sql-datum--columns
+                                                (get-buffer buf))))
+         (cols (and col-hash (gethash table col-hash))))
+    (if cols
+        (progn
+          (insert "INSERT INTO " table
+                  " (" (mapconcat #'identity cols ", ") ") VALUES (")
+          (save-excursion (insert ")")))
+      (insert "INSERT INTO " table " (")
+      (save-excursion (insert ") VALUES ()")))))
+
+(defun sql-datum-insert-select-into ()
+  "Insert a SELECT INTO template.
+Prompts for destination (free text) and source table (with completion)."
+  (interactive)
+  (let ((dest (read-string "Destination table: "))
+        (source (sql-datum--read-table "Source table: ")))
+    (insert "SELECT *\nINTO " dest "\nFROM " source "\nWHERE ")))
+
+(defun sql-datum-insert-join (arg)
+  "Insert a JOIN template, prompting for the table name.
+With prefix ARG, prompts for join type (LEFT, RIGHT, etc.)."
+  (interactive "P")
+  (let* ((table (sql-datum--read-table "Join table: "))
+         (join-type (if arg
+                        (completing-read "Join type: "
+                                         '("LEFT" "RIGHT" "INNER" "FULL" "CROSS")
+                                         nil t)
+                      nil)))
+    (insert "\n" (if join-type (concat join-type " ") "") "JOIN " table " ON ")))
+
+;;; ---------------------------------------------------------------------------
 ;;; Keybindings
 ;;; ---------------------------------------------------------------------------
 
@@ -2087,6 +2150,13 @@ but detached, so they can be reused with a new connection."
   (define-key sql-mode-map (kbd "C-c C-x C-d") #'sql-datum-disconnect)
   ;; C-c s y: copy last result
   (define-key sql-mode-map (kbd "C-c s y") #'sql-datum-copy-last-result)
+  ;; C-c i: query templates
+  (define-key sql-mode-map (kbd "C-c i s") #'sql-datum-insert-select)
+  (define-key sql-mode-map (kbd "C-c i u") #'sql-datum-insert-update)
+  (define-key sql-mode-map (kbd "C-c i d") #'sql-datum-insert-delete)
+  (define-key sql-mode-map (kbd "C-c i i") #'sql-datum-insert-insert)
+  (define-key sql-mode-map (kbd "C-c i n") #'sql-datum-insert-select-into)
+  (define-key sql-mode-map (kbd "C-c i j") #'sql-datum-insert-join)
   ;; C-c C-c: smart send (region or paragraph, auto-connect)
   (define-key sql-mode-map (kbd "C-c C-c") #'sql-datum-send-smart))
 
