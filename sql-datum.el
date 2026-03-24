@@ -1578,15 +1578,17 @@ Completing a FUNCTION name auto-inserts parentheses."
                               raw-prefix start end buf dbs xdb-cache))))
           (or xdb-result
               ;; --- Qualified column completion (table.col or alias.col) ---
-              ;; Use raw-prefix for the dot check because prefix strips
-              ;; trailing dots (e.g. "checking." → "checking").
+              ;; Only enter this path when the prefix ends with a dot
+              ;; (e.g. "users." or "dbo.users.") indicating the user is
+              ;; starting a column name.  A dot in the middle of a
+              ;; schema-qualified table (e.g. "dbo.users") must NOT trigger
+              ;; column completion — that is a normal identifier.
               (when (and (not xdb-result)
-                         (string-match-p "\\." raw-prefix)
+                         (string-suffix-p "." raw-prefix)
                          col-hash)
                 (let* ((parts (sql-datum--split-identifier raw-prefix))
-                       ;; Join all non-empty segments as the table reference.
                        ;; For "dbo.users." parts is ["dbo" "users" ""],
-                       ;; so tbl-part becomes "dbo.users".
+                       ;; so non-empty becomes ["dbo" "users"] → tbl-part.
                        (non-empty (cl-remove-if #'string-empty-p parts))
                        (tbl-part (mapconcat #'sql-datum--unquote-part non-empty "."))
                        (aliases (sql-datum--table-aliases-in-statement))
