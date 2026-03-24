@@ -1069,7 +1069,8 @@ def definition(args):
             if not row or not row[0]:
                 envelope.error(f":definition — no source found for {display_name}")
                 return
-            text = str(row[0]).rstrip().rstrip(";\r\n \t").rstrip() + ";"
+            text = str(row[0]).replace("\r\n", "\n").replace("\r", "\n")
+            text = text.rstrip().rstrip(";\n \t").rstrip() + ";"
             if effective_db:
                 text = f"-- Database: {effective_db}\n{text}"
 
