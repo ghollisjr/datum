@@ -16,9 +16,12 @@ _driver = None
 
 
 def _quote_name(name):
-    """Bracket-quote a SQL identifier if it contains dots or spaces."""
+    """Quote a SQL identifier if it contains special characters.
+    Uses bracket quoting for MSSQL, double-quote quoting otherwise."""
     if '.' in name or ' ' in name:
-        return f"[{name}]"
+        if _driver and _driver.dialect_name == "mssql":
+            return f"[{name}]"
+        return f'"{name}"'
     return name
 
 
@@ -690,12 +693,21 @@ def _args_to_abspath(args):
     return (filename, os.path.exists(filename))
 
 
-def _synthesize_create_table(schema, name, column_rows):
+def _synthesize_create_table(schema, name, column_rows, dialect=None):
     """Build a CREATE TABLE statement from INFORMATION_SCHEMA column rows.
 
     Each row: (column_name, data_type, is_nullable,
                char_max_length, numeric_precision, numeric_scale, column_default)
+    dialect controls identifier quoting (brackets for mssql, double-quotes otherwise).
     """
+    def _qi(n):
+        """Quote identifier only if it needs quoting (spaces, special chars)."""
+        if ' ' in n or '-' in n:
+            if dialect == "mssql":
+                return f"[{n}]"
+            return f'"{n}"'
+        return n
+
     lines = []
     for row in column_rows:
         col_name = str(row[0])
@@ -720,7 +732,7 @@ def _synthesize_create_table(schema, name, column_rows):
         lines.append(f"    {col_name} {type_str} {null_str}{default_str}")
 
     cols = ",\n".join(lines)
-    return f"CREATE TABLE [{schema}].[{name}] (\n{cols}\n);"
+    return f"CREATE TABLE {_qi(schema)}.{_qi(name)} (\n{cols}\n);"
 
 
 def refresh_db(args):
@@ -1026,7 +1038,8 @@ def definition(args):
             if not rows:
                 envelope.error(f":definition — no columns found for {display_name}")
                 return
-            text = _synthesize_create_table(schema, name, rows)
+            text = _synthesize_create_table(schema, name, rows,
+                                               dialect=_driver.dialect_name)
         else:
             row = cursor.fetchone()
             if not row or not row[0]:
