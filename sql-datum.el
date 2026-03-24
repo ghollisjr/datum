@@ -1012,6 +1012,27 @@ parens (CALL proc(args)), unlike MSSQL which uses EXEC proc @p=val."
         (and (equal rtype "PROCEDURE")
              (equal dialect "postgres")))))
 
+(defun sql-datum--statement-bounds ()
+  "Return (START . END) for the SQL statement around point.
+In sql-interactive-mode, the statement is bounded by semicolons or
+the current input line.  In other modes (scratch buffers), the
+statement is bounded by semicolons or the current paragraph (blank
+lines), matching `sql-datum-send-smart' behavior."
+  (let ((fallback-start (if (derived-mode-p 'sql-interactive-mode)
+                            (comint-line-beginning-position)
+                          (save-excursion (backward-paragraph) (point))))
+        (fallback-end (if (derived-mode-p 'sql-interactive-mode)
+                          (point-max)
+                        (save-excursion (forward-paragraph) (point)))))
+    (cons (save-excursion
+            (or (and (search-backward ";" fallback-start t)
+                     (1+ (point)))
+                fallback-start))
+          (save-excursion
+            (or (and (search-forward ";" fallback-end t)
+                     (1- (point)))
+                fallback-end)))))
+
 (defun sql-datum--tables-in-statement ()
   "Return list of table names referenced in the current SQL statement.
 Scans both before and after point for FROM, JOIN, UPDATE, INTO keywords
@@ -1019,20 +1040,9 @@ and collects the table identifiers that follow them.  Handles
 comma-separated table lists (e.g. FROM t1, t2).  Returns nil if no
 tables are found."
   (save-excursion
-    (let* ((stmt-start (save-excursion
-                         (or (and (search-backward ";"
-                                                   (if (derived-mode-p 'sql-interactive-mode)
-                                                       (comint-line-beginning-position)
-                                                     (point-min))
-                                                   t)
-                                  (1+ (point)))
-                             (if (derived-mode-p 'sql-interactive-mode)
-                                 (comint-line-beginning-position)
-                               (point-min)))))
-           (stmt-end (save-excursion
-                       (or (and (search-forward ";" nil t)
-                                (1- (point)))
-                           (point-max))))
+    (let* ((bounds (sql-datum--statement-bounds))
+           (stmt-start (car bounds))
+           (stmt-end (cdr bounds))
            (table-kw-re (concat "\\<\\("
                                 "FROM\\|"
                                 "\\(?:LEFT\\|RIGHT\\|INNER\\|FULL\\|CROSS\\|OUTER\\|NATURAL\\)?[ \t]*JOIN\\|"
@@ -1084,20 +1094,9 @@ Each table gets an entry mapping its own name to itself.  If an alias
 follows the table name (e.g. FROM orders o, JOIN users AS u), an
 additional entry maps the alias to the table."
   (save-excursion
-    (let* ((stmt-start (save-excursion
-                         (or (and (search-backward ";"
-                                                   (if (derived-mode-p 'sql-interactive-mode)
-                                                       (comint-line-beginning-position)
-                                                     (point-min))
-                                                   t)
-                                  (1+ (point)))
-                             (if (derived-mode-p 'sql-interactive-mode)
-                                 (comint-line-beginning-position)
-                               (point-min)))))
-           (stmt-end (save-excursion
-                       (or (and (search-forward ";" nil t)
-                                (1- (point)))
-                           (point-max))))
+    (let* ((bounds (sql-datum--statement-bounds))
+           (stmt-start (car bounds))
+           (stmt-end (cdr bounds))
            (table-kw-re (concat "\\<\\("
                                 "FROM\\|"
                                 "\\(?:LEFT\\|RIGHT\\|INNER\\|FULL\\|CROSS\\|OUTER\\|NATURAL\\)?[ \t]*JOIN\\|"
