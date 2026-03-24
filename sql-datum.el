@@ -190,6 +190,96 @@ envelope from Python) rather than this flag.")
 Prevents overlapping refresh chains.")
 
 ;;; ---------------------------------------------------------------------------
+;;; Command queue
+;;; ---------------------------------------------------------------------------
+
+(defvar-local sql-datum--command-queue nil
+  "FIFO queue of pending command transactions.
+Each element is a plist with keys :commands :silent :setup-fn :done-fn :priority.")
+
+(defvar-local sql-datum--queue-current nil
+  "The currently in-flight transaction plist, or nil.")
+
+(defvar-local sql-datum--queue-remaining nil
+  "Remaining command strings in the current in-flight transaction.")
+
+(defun sql-datum--enqueue (transaction)
+  "Append TRANSACTION plist to the command queue and pump.
+TRANSACTION is a plist with keys :commands :silent :setup-fn :done-fn :priority.
+:priority defaults to :normal.  :low priority transactions are inserted
+after all :normal ones."
+  (let ((priority (or (plist-get transaction :priority) :normal)))
+    (if (eq priority :low)
+        ;; Insert after last :normal transaction
+        (let ((pos 0)
+              (q sql-datum--command-queue))
+          (while (and q (eq (or (plist-get (car q) :priority) :normal) :normal))
+            (setq pos (1+ pos)
+                  q (cdr q)))
+          (if (= pos (length sql-datum--command-queue))
+              (setq sql-datum--command-queue
+                    (append sql-datum--command-queue (list transaction)))
+            (let ((before (seq-take sql-datum--command-queue pos))
+                  (after (seq-drop sql-datum--command-queue pos)))
+              (setq sql-datum--command-queue
+                    (append before (list transaction) after)))))
+      (setq sql-datum--command-queue
+            (append sql-datum--command-queue (list transaction)))))
+  (sql-datum--queue-pump))
+
+(defun sql-datum--enqueue-one (cmd &rest args)
+  "Enqueue a single-command transaction for CMD.
+ARGS are keyword args: :silent :done-fn :priority."
+  (let ((silent (plist-get args :silent))
+        (done-fn (plist-get args :done-fn))
+        (priority (plist-get args :priority)))
+    (sql-datum--enqueue
+     (list :commands (list cmd)
+           :silent silent
+           :done-fn done-fn
+           :priority (or priority :normal)))))
+
+(defun sql-datum--queue-pump ()
+  "If no transaction is in-flight and the queue is non-empty, start the next one."
+  (when (and (null sql-datum--queue-current)
+             sql-datum--command-queue
+             sql-datum--ready)
+    (let ((txn (pop sql-datum--command-queue)))
+      (setq sql-datum--queue-current txn
+            sql-datum--queue-remaining (plist-get txn :commands))
+      (when-let ((setup (plist-get txn :setup-fn)))
+        (funcall setup))
+      (sql-datum--queue-send-next))))
+
+(defun sql-datum--queue-send-next ()
+  "Send the next command in the current in-flight transaction."
+  (when (and sql-datum--queue-current sql-datum--queue-remaining)
+    (let ((cmd (pop sql-datum--queue-remaining))
+          (proc (get-buffer-process (current-buffer))))
+      (when proc
+        (setq sql-datum--ready nil)
+        (when (plist-get sql-datum--queue-current :silent)
+          (cl-incf sql-datum--suppress-prompt-count))
+        (comint-send-string proc (concat cmd "\n"))))))
+
+(defun sql-datum--queue-advance ()
+  "Called when a `ready' envelope arrives.  Advance the queue state."
+  (cond
+   ;; Current transaction has more commands — send next
+   (sql-datum--queue-remaining
+    (sql-datum--queue-send-next))
+   ;; Current transaction is done — call done-fn and pump next
+   (sql-datum--queue-current
+    (let ((done-fn (plist-get sql-datum--queue-current :done-fn)))
+      (setq sql-datum--queue-current nil
+            sql-datum--queue-remaining nil)
+      (when done-fn (funcall done-fn))
+      (sql-datum--queue-pump)))
+   ;; Nothing in-flight — pump in case something queued while busy
+   (t
+    (sql-datum--queue-pump))))
+
+;;; ---------------------------------------------------------------------------
 ;;; Envelope protocol
 ;;; ---------------------------------------------------------------------------
 
@@ -327,7 +417,8 @@ Handles partial envelope lines split across multiple filter calls."
              (sql-datum--running-start-timer))))))
     ("ready"
      (sql-datum--trace "READY envelope received, setting sql-datum--ready=t")
-     (setq sql-datum--ready t))
+     (setq sql-datum--ready t)
+     (sql-datum--queue-advance))
     ("definition"
      ;; Payload is JSON: {"name": ..., "text": ...}
      (let* ((parsed (json-parse-string payload :object-type 'alist))
@@ -554,11 +645,8 @@ When DISPLAY is non-nil, pop up the buffer; otherwise just update it."
                  (let ((b (sql-find-sqli-buffer 'datum)))
                    (and b (get-buffer b))))))
     (if (and buf (get-buffer-process buf))
-        (progn
-          (with-current-buffer buf
-            (setq sql-datum--ready nil)
-            (cl-incf sql-datum--suppress-prompt-count))
-          (comint-send-string (get-buffer-process buf) ":running\n"))
+        (with-current-buffer buf
+          (sql-datum--enqueue-one ":running" :silent t :priority :low))
       (message "datum: no active connection for refresh"))))
 
 (defun sql-datum--running-start-timer ()
@@ -1224,29 +1312,8 @@ tables).  For completion-time fetches, prefer the synchronous
                 (gethash key pending-hash))
       (let ((proc (get-buffer-process buf)))
         (when proc
-          (if (buffer-local-value 'sql-datum--ready buf)
-              ;; Process is ready — send the command now.
-              (sql-datum--fetch-columns-send table key buf proc pending-hash)
-            ;; Not ready (refresh still running).  Install a one-shot
-            ;; watcher that sends the command once the ready envelope
-            ;; fires.
-            (sql-datum--trace "fetch-columns-async: DEFERRED (not ready)")
-            (puthash key 'deferred pending-hash)
-            (letrec ((retry-watcher
-                      (lambda (_output)
-                        (when (buffer-local-value 'sql-datum--ready buf)
-                          (sql-datum--trace "retry-watcher: ready now, key=%s pending=%s"
-                                            key (gethash key pending-hash))
-                          (remove-hook 'comint-output-filter-functions
-                                       retry-watcher t)
-                          (if (eq (gethash key pending-hash) 'deferred)
-                              (sql-datum--fetch-columns-send
-                               table key buf proc pending-hash)
-                            ;; Already fetched by another path — clean up.
-                            (remhash key pending-hash))))))
-              (with-current-buffer buf
-                (add-hook 'comint-output-filter-functions
-                          retry-watcher nil t)))))))))
+          ;; The queue handles ordering — just enqueue the fetch.
+          (sql-datum--fetch-columns-send table key buf proc pending-hash))))))
 
 (defvar sql-datum-column-fetch-timeout 2.0
   "Maximum seconds to wait for column data during completion.
@@ -1270,7 +1337,9 @@ Returns t if all columns are cached, nil if timed out."
          (col-hash (buffer-local-value 'sql-datum--columns buf))
          (pending-hash (buffer-local-value 'sql-datum--columns-pending buf))
          (needed nil))
-    (when (and proc col-hash pending-hash)
+    ;; Cannot safely send direct commands while a queued transaction is in-flight.
+    (when (and proc col-hash pending-hash
+              (not (buffer-local-value 'sql-datum--queue-current buf)))
       ;; Identify which tables need fetching.
       (dolist (tbl tables)
         (let ((key (downcase tbl)))
@@ -1316,33 +1385,28 @@ Returns t if all columns are cached, nil if timed out."
 (defun sql-datum--fetch-columns-send (table key buf proc pending-hash)
   "Send the :columns command for TABLE to PROC.
 KEY is the downcased cache key.  BUF is the SQLi buffer.
-PENDING-HASH tracks in-flight requests."
+PENDING-HASH tracks in-flight requests.  PROC is kept for API compat."
+  (ignore proc)
   (sql-datum--trace "fetch-columns-send: SENDING :columns %s :silent" table)
   (with-current-buffer buf
     (puthash key t pending-hash)
-    (setq sql-datum--ready nil)
-    (cl-incf sql-datum--suppress-prompt-count)
-    (comint-send-string proc (format ":columns %s :silent\n" table))))
+    (sql-datum--enqueue-one (format ":columns %s :silent" table)
+                            :silent t :priority :low)))
 
 (defun sql-datum--xdb-fetch-async (db buf xdb-cache callback)
   "Send :refresh-db DB asynchronously.  Call CALLBACK when cache entry is ready.
 BUF is the SQLi process buffer, XDB-CACHE the cross-db hash."
+  (ignore xdb-cache)
   (let ((proc (get-buffer-process buf)))
     (when proc
       (message "datum: fetching objects for %s..." db)
       (with-current-buffer buf
         (puthash db (list :pending t) sql-datum--xdb-cache)
-        (setq sql-datum--ready nil)
-        (cl-incf sql-datum--suppress-prompt-count)
-        (comint-send-string proc (format ":refresh-db %s\n" db)))
-      (letrec ((watcher
-                (lambda (_output)
-                  (unless (plist-get (gethash db xdb-cache) :pending)
-                    (remove-hook 'comint-output-filter-functions watcher t)
-                    (message "datum: %s ready" db)
-                    (when callback (funcall callback))))))
-        (with-current-buffer buf
-          (add-hook 'comint-output-filter-functions watcher nil t))))))
+        (sql-datum--enqueue-one (format ":refresh-db %s" db)
+                                :silent t :priority :low
+                                :done-fn (lambda ()
+                                           (message "datum: %s ready" db)
+                                           (when callback (funcall callback))))))))
 
 (defun sql-datum--member-ignore-case (elt list)
   "Like `member' but uses case-insensitive comparison.
@@ -2021,8 +2085,10 @@ confirmation before overwriting."
     (unless buf
       (user-error "No active datum buffer found"))
     (let ((buf-obj (get-buffer buf)))
-      (comint-send-string buf-obj (format ":out %s%s\n" abs-path force-flag))
-      (comint-send-string buf-obj (format "%s;;\n" query))
+      (with-current-buffer buf-obj
+        (sql-datum--enqueue
+         (list :commands (list (format ":out %s%s" abs-path force-flag)
+                               (format "%s;;" query)))))
       (sql-datum--scroll-to-end buf-obj))
     (message "datum: exporting to %s%s"
              abs-path (if force " (overwrite)" ""))))
@@ -2074,9 +2140,9 @@ defaults to `sql-datum-import-batch-size', overridden with \\[universal-argument
     (unless buf
       (user-error "No active datum buffer found"))
     (let ((buf-obj (get-buffer buf)))
-      (comint-send-string buf-obj
-                          (format ":in %s %s%s%s\n"
-                                  abs-path table-name mode-flag batch-flag))
+      (with-current-buffer buf-obj
+        (sql-datum--enqueue-one
+         (format ":in %s %s%s%s" abs-path table-name mode-flag batch-flag)))
       (sql-datum--scroll-to-end buf-obj))
     (message "datum: importing %s into %s%s (batch size %d)"
              (file-name-nondirectory abs-path) table-name
@@ -2108,11 +2174,7 @@ When SILENT is non-nil, skip the echo and buffer display."
             (set-marker (process-mark proc) (point))))
         (sql-datum--scroll-to-end buf-obj))
       (with-current-buffer buf-obj
-        (setq sql-datum--ready nil))
-      (when silent
-        (with-current-buffer buf-obj
-          (cl-incf sql-datum--suppress-prompt-count)))
-      (comint-send-string buf-obj (concat cmd "\n")))))
+        (sql-datum--enqueue-one cmd :silent silent)))))
 
 (defun sql-datum--get-dialect ()
   "Return the SQL dialect string from the active datum SQLi buffer."
@@ -2365,34 +2427,20 @@ Scrolls the SQLi buffer to the end so output is visible."
 ;;; ---------------------------------------------------------------------------
 
 (defun sql-datum--refresh-chain (commands buf)
-  "Send COMMANDS one at a time to BUF, yielding to the event loop between each.
+  "Send COMMANDS one at a time to BUF via the command queue.
 COMMANDS is a list of strings (e.g. \":refresh-databases\").
-After sending each command, installs a watcher that detects completion
-via `sql-datum--ready' (set by the `ready' envelope from Python), then
-defers the next step via `run-at-time' so Emacs can process pending
-user input before the next sub-command runs.  When the list is
-exhausted, clears `sql-datum--refresh-in-progress'."
-  (if (null commands)
-      (when (buffer-live-p buf)
-        (with-current-buffer buf
-          (setq sql-datum--refresh-in-progress nil)))
-    (let ((proc (and (buffer-live-p buf) (get-buffer-process buf))))
-      (when proc
-        (with-current-buffer buf
-          (setq sql-datum--ready nil)
-          (cl-incf sql-datum--suppress-prompt-count))
-        (comint-send-string proc (concat (car commands) "\n"))
-        (letrec ((watcher
-                  (lambda (_output)
-                    (when (buffer-local-value 'sql-datum--ready buf)
-                      (with-current-buffer buf
-                        (remove-hook 'comint-output-filter-functions watcher t))
-                      ;; Defer to the event loop so pending user input
-                      ;; (keystrokes, window commands) is processed first.
-                      (run-at-time 0 nil #'sql-datum--refresh-chain
-                                   (cdr commands) buf)))))
-          (with-current-buffer buf
-            (add-hook 'comint-output-filter-functions watcher nil t)))))))
+The queue sends each command in order, waiting for `ready' between
+each.  When the list is exhausted, clears `sql-datum--refresh-in-progress'."
+  (when (and (buffer-live-p buf) commands)
+    (with-current-buffer buf
+      (sql-datum--enqueue
+       (list :commands commands
+             :silent t
+             :priority :low
+             :done-fn (lambda ()
+                        (when (buffer-live-p buf)
+                          (with-current-buffer buf
+                            (setq sql-datum--refresh-in-progress nil)))))))))
 
 (defun sql-datum--refresh-async (buf)
   "Start a non-blocking refresh chain in BUF.
@@ -2502,7 +2550,11 @@ but detached, so they can be reused with a new connection."
         (setq sql-datum--refresh-timer nil))
       (when sql-datum--running-timer
         (sql-datum--running-stop-timer))
-      ;; Send :exit to cleanly shut down
+      ;; Clear command queue and send :exit directly to force shutdown
+      (with-current-buffer sqli-buf
+        (setq sql-datum--command-queue nil
+              sql-datum--queue-current nil
+              sql-datum--queue-remaining nil))
       (let ((proc (get-buffer-process sqli-buf)))
         (when (and proc (process-live-p proc))
           (comint-send-string proc ":exit\n")
