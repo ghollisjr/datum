@@ -158,26 +158,19 @@ for consistent lookup.  Populated by the routine-types introspect envelope.")
 Hash: database name -> plist with keys :tables :schemas :routines
 :routine-types :routine-sigs :pending.")
 
+(defvar-local sql-datum--ready nil
+  "Non-nil when the Python process is idle and ready for a command.
+Set by the `ready' envelope, cleared when a command is sent.")
+
 (defvar-local sql-datum--suppress-prompt-count 0
   "Number of upcoming prompts to suppress in the preoutput filter.
 Incremented by silent commands (e.g. M-. definition, background refresh).")
 
 (defvar-local sql-datum--prompt-suppressed nil
   "Set to t by the preoutput filter when a prompt was just suppressed.
-Read and cleared by watchers that detect command completion without
-needing to see `>' in the output text.
-
-This is a single boolean rather than a counter or per-command token.
-If multiple silent commands are in flight simultaneously (e.g. the
-refresh chain and a `sql-datum--fetch-columns-async' fetch), the
-flag being set for one command may cause a watcher belonging to
-the *other* command to consider itself done prematurely.  A full
-fix would require correlation tokens (e.g. a unique ID per silent
-command echoed back in the response envelope) or serializing all
-silent commands through the refresh chain mechanism.  In practice
-the window is small: `sql-datum--fetch-columns-async' guards on
-`sql-datum--at-prompt-p' and only fires when no other command is
-in progress, but the race is not fully eliminated.")
+Used internally by the preoutput filter's prompt-suppression logic.
+Readiness detection now uses `sql-datum--ready' (set by the `ready'
+envelope from Python) rather than this flag.")
 
 (defvar-local sql-datum--refresh-in-progress nil
   "Non-nil while an async refresh chain is running.
@@ -319,6 +312,8 @@ Handles partial envelope lines split across multiple filter calls."
            (sql-datum--show-running-queries text initial)
            (when initial
              (sql-datum--running-start-timer))))))
+    ("ready"
+     (setq sql-datum--ready t))
     ("definition"
      ;; Payload is JSON: {"name": ..., "text": ...}
      (let* ((parsed (json-parse-string payload :object-type 'alist))
@@ -545,7 +540,11 @@ When DISPLAY is non-nil, pop up the buffer; otherwise just update it."
                  (let ((b (sql-find-sqli-buffer 'datum)))
                    (and b (get-buffer b))))))
     (if (and buf (get-buffer-process buf))
-        (comint-send-string (get-buffer-process buf) ":running\n")
+        (progn
+          (with-current-buffer buf
+            (setq sql-datum--ready nil)
+            (cl-incf sql-datum--suppress-prompt-count))
+          (comint-send-string (get-buffer-process buf) ":running\n"))
       (message "datum: no active connection for refresh"))))
 
 (defun sql-datum--running-start-timer ()
@@ -1171,16 +1170,6 @@ additional entry maps the alias to the table."
                       (setq continue nil)))))))))
       (nreverse result))))
 
-(defun sql-datum--at-prompt-p (buf)
-  "Return non-nil if BUF appears to be at a datum prompt.
-Checks whether the last non-whitespace character before `point-max' is `>'."
-  (with-current-buffer buf
-    (save-excursion
-      (goto-char (point-max))
-      (skip-chars-backward " \t\n\r")
-      (and (> (point) (point-min))
-           (eq (char-before) ?>)))))
-
 (defun sql-datum--fetch-columns-async (table buf col-hash pending-hash)
   "Fetch columns for TABLE silently in the background.
 BUF is the SQLi process buffer.  COL-HASH is `sql-datum--columns',
@@ -1189,24 +1178,24 @@ Skips if TABLE is already cached or already in-flight.
 
 Note: this runs independently of the refresh chain.  The watcher
 detects completion by matching the envelope line in raw output.
-The `sql-datum--at-prompt-p' guard reduces but does not eliminate
-the race window with concurrent silent commands."
+The `sql-datum--ready' guard ensures the process is idle before
+sending."
   ;; All cache keys are downcased — normalize the lookup key.
   (let ((key (downcase table)))
     (unless (or (gethash key col-hash)
                 (gethash key pending-hash))
       (let ((proc (get-buffer-process buf)))
         (when proc
-          (if (sql-datum--at-prompt-p buf)
-              ;; Prompt is ready — send the command now.
+          (if (buffer-local-value 'sql-datum--ready buf)
+              ;; Process is ready — send the command now.
               (sql-datum--fetch-columns-send table key buf proc pending-hash)
-            ;; Prompt not ready (refresh still running).  Install a
-            ;; one-shot watcher that sends the command once we see a
-            ;; prompt character, so the fetch isn't silently lost.
+            ;; Not ready (refresh still running).  Install a one-shot
+            ;; watcher that sends the command once the ready envelope
+            ;; fires.
             (puthash key 'deferred pending-hash)
             (letrec ((retry-watcher
                       (lambda (_output)
-                        (when (sql-datum--at-prompt-p buf)
+                        (when (buffer-local-value 'sql-datum--ready buf)
                           (remove-hook 'comint-output-filter-functions
                                        retry-watcher t)
                           (if (eq (gethash key pending-hash) 'deferred)
@@ -1224,6 +1213,8 @@ KEY is the downcased cache key.  BUF is the SQLi buffer.
 PENDING-HASH tracks in-flight requests."
   (with-current-buffer buf
     (puthash key t pending-hash)
+    (setq sql-datum--ready nil)
+    (cl-incf sql-datum--suppress-prompt-count)
     (comint-send-string proc (format ":columns %s :silent\n" table)))
   (letrec ((watcher
             (lambda (output)
@@ -1244,6 +1235,8 @@ BUF is the SQLi process buffer, XDB-CACHE the cross-db hash."
       (message "datum: fetching objects for %s..." db)
       (with-current-buffer buf
         (puthash db (list :pending t) sql-datum--xdb-cache)
+        (setq sql-datum--ready nil)
+        (cl-incf sql-datum--suppress-prompt-count)
         (comint-send-string proc (format ":refresh-db %s\n" db)))
       (letrec ((watcher
                 (lambda (_output)
@@ -1997,6 +1990,8 @@ When SILENT is non-nil, skip the echo and buffer display."
             (insert (format "\n>> %s\n" cmd))
             (set-marker (process-mark proc) (point))))
         (sql-datum--scroll-to-end buf-obj))
+      (with-current-buffer buf-obj
+        (setq sql-datum--ready nil))
       (when silent
         (with-current-buffer buf-obj
           (cl-incf sql-datum--suppress-prompt-count)))
@@ -2251,7 +2246,7 @@ Scrolls the SQLi buffer to the end so output is visible."
   "Send COMMANDS one at a time to BUF, yielding to the event loop between each.
 COMMANDS is a list of strings (e.g. \":refresh-databases\").
 After sending each command, installs a watcher that detects completion
-via `sql-datum--prompt-suppressed' (set by the preoutput filter), then
+via `sql-datum--ready' (set by the `ready' envelope from Python), then
 defers the next step via `run-at-time' so Emacs can process pending
 user input before the next sub-command runs.  When the list is
 exhausted, clears `sql-datum--refresh-in-progress'."
@@ -2262,11 +2257,12 @@ exhausted, clears `sql-datum--refresh-in-progress'."
     (let ((proc (and (buffer-live-p buf) (get-buffer-process buf))))
       (when proc
         (with-current-buffer buf
+          (setq sql-datum--ready nil)
           (cl-incf sql-datum--suppress-prompt-count))
         (comint-send-string proc (concat (car commands) "\n"))
         (letrec ((watcher
                   (lambda (_output)
-                    (when (buffer-local-value 'sql-datum--prompt-suppressed buf)
+                    (when (buffer-local-value 'sql-datum--ready buf)
                       (with-current-buffer buf
                         (remove-hook 'comint-output-filter-functions watcher t))
                       ;; Defer to the event loop so pending user input

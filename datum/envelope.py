@@ -129,6 +129,11 @@ def dialect(name):
     _send("dialect", name)
 
 
+def ready():
+    """Signal that the Python process is idle and ready for a command."""
+    _send("ready", "")
+
+
 def meta(key, value):
     """Send a key/value metadata pair to Emacs (db, schema, user, version)."""
     _send("meta", f"{key}:{value}")

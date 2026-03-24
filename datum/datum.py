@@ -117,6 +117,7 @@ def prompt_for_query_or_command():
     global config
     lines = []
     prompt = "csv>" if config["csv_path"] else ">"
+    envelope.ready()
     print(f"\n{prompt}", flush=True, end="")
     lines.append(input())
     while True:
