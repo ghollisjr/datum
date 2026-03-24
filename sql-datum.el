@@ -2203,7 +2203,14 @@ known table, it is offered as the default."
                                                 'sql-datum--default-schema buf-obj))))
                           (when ds
                             (cl-find (concat ds "." ident) tables
-                                     :test #'string-equal-ignore-case)))))))
+                                     :test #'string-equal-ignore-case)))
+                        ;; 3-part name (db.schema.table) — try schema.table suffix.
+                        (let ((parts (split-string ident "\\." t)))
+                          (when (>= (length parts) 3)
+                            (let ((schema-table (mapconcat #'identity
+                                                           (last parts 2) ".")))
+                              (cl-find schema-table tables
+                                       :test #'string-equal-ignore-case))))))))
     (completing-read (if default
                          (format "%s(default %s) " prompt default)
                        prompt)
