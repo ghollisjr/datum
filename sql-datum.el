@@ -2191,30 +2191,44 @@ When SILENT is non-nil, skip the echo and buffer display."
 (defun sql-datum--read-table (prompt)
   "Read a table name with completion from the introspection cache.
 PROMPT is displayed to the user.  If the identifier at point is a
-known table, it is offered as the default."
+known table, it is offered as the default.  Handles cross-database
+three-part names by consulting the xdb-cache and including them
+in the candidate list."
   (let* ((buf (sql-find-sqli-buffer 'datum))
          (buf-obj (and buf (get-buffer buf)))
          (tables (and buf-obj (buffer-local-value 'sql-datum--tables buf-obj)))
+         (xdb-cache (and buf-obj (buffer-local-value 'sql-datum--xdb-cache buf-obj)))
+         ;; Collect cross-database tables (already stored as db.schema.table).
+         (xdb-tables
+          (when (and xdb-cache (> (hash-table-count xdb-cache) 0))
+            (let (result)
+              (maphash (lambda (_db entry)
+                         (dolist (tbl (plist-get entry :tables))
+                           (push tbl result)))
+                       xdb-cache)
+              result)))
+         (all-tables (if xdb-tables (append tables xdb-tables) tables))
          (ident (sql-datum--identifier-at-point))
-         (default (when (and ident tables)
-                    (or (cl-find ident tables :test #'string-equal-ignore-case)
-                        ;; Bare name may need the default schema prefix to match.
-                        (let ((ds (and buf-obj (buffer-local-value
-                                                'sql-datum--default-schema buf-obj))))
-                          (when ds
-                            (cl-find (concat ds "." ident) tables
-                                     :test #'string-equal-ignore-case)))
-                        ;; 3-part name (db.schema.table) — try schema.table suffix.
-                        (let ((parts (split-string ident "\\." t)))
-                          (when (>= (length parts) 3)
-                            (let ((schema-table (mapconcat #'identity
-                                                           (last parts 2) ".")))
-                              (cl-find schema-table tables
-                                       :test #'string-equal-ignore-case))))))))
+         (parts (and ident (split-string ident "\\." t)))
+         (default
+          (when (and ident all-tables)
+            (or (cl-find ident all-tables :test #'string-equal-ignore-case)
+                ;; Bare name may need the default schema prefix to match.
+                (let ((ds (and buf-obj (buffer-local-value
+                                        'sql-datum--default-schema buf-obj))))
+                  (when ds
+                    (cl-find (concat ds "." ident) all-tables
+                             :test #'string-equal-ignore-case)))
+                ;; 3-part name (db.schema.table) — try schema.table in current db.
+                (when (>= (length parts) 3)
+                  (let ((schema-table (mapconcat #'identity
+                                                 (last parts 2) ".")))
+                    (cl-find schema-table all-tables
+                             :test #'string-equal-ignore-case)))))))
     (completing-read (if default
                          (format "%s(default %s) " prompt default)
                        prompt)
-                     tables nil nil nil nil default)))
+                     all-tables nil nil nil nil default)))
 
 (defun sql-datum--mssql-p ()
   "Return non-nil if the current dialect is MSSQL."
