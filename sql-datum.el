@@ -1043,10 +1043,15 @@ NAME to match a bare key."
                    (setq found k)))
                sigs)
       found))
-   ;; Qualified name → try just the bare part
+   ;; Qualified name → try schema.name suffix, then bare name
    (t
-    (let ((bare (car (last (split-string name "\\.")))))
-      (when (gethash bare sigs) bare)))))))
+    (let* ((parts (split-string name "\\."))
+           ;; For 3+-part names, try the last two segments (schema.name)
+           (schema-name (when (>= (length parts) 3)
+                          (mapconcat #'identity (last parts 2) ".")))
+           (bare (car (last parts))))
+      (or (and schema-name (gethash schema-name sigs) schema-name)
+          (when (gethash bare sigs) bare))))))))
 
 (defun sql-datum--at-new-param-p (routine-name sigs)
   "Return non-nil if point is where a new @parameter name is expected.
