@@ -1997,12 +1997,16 @@ defaults to `sql-datum-import-batch-size', overridden with \\[universal-argument
                                   (or (file-directory-p f)
                                       (string-match-p "\\.\\(csv\\|parquet\\|json\\)\\'" f)))))
           (buf  (sql-find-sqli-buffer 'datum))
-          (tables (and buf (buffer-local-value 'sql-datum--tables
-                                               (get-buffer buf))))
+          (buf-obj (and buf (get-buffer buf)))
+          (tables (and buf-obj (buffer-local-value 'sql-datum--tables buf-obj)))
           (ident (sql-datum--identifier-at-point))
-          (default (and ident tables
-                        (cl-find ident tables :test #'string-equal-ignore-case)
-                        ident))
+          (default (when (and ident tables)
+                    (or (cl-find ident tables :test #'string-equal-ignore-case)
+                        (let ((ds (and buf-obj (buffer-local-value
+                                                'sql-datum--default-schema buf-obj))))
+                          (when ds
+                            (cl-find (concat ds "." ident) tables
+                                     :test #'string-equal-ignore-case))))))
           (table (completing-read (if default
                                       (format "Into table: (default %s) " default)
                                     "Into table: ")
@@ -2081,12 +2085,17 @@ When SILENT is non-nil, skip the echo and buffer display."
 PROMPT is displayed to the user.  If the identifier at point is a
 known table, it is offered as the default."
   (let* ((buf (sql-find-sqli-buffer 'datum))
-         (tables (and buf (buffer-local-value 'sql-datum--tables
-                                              (get-buffer buf))))
+         (buf-obj (and buf (get-buffer buf)))
+         (tables (and buf-obj (buffer-local-value 'sql-datum--tables buf-obj)))
          (ident (sql-datum--identifier-at-point))
-         (default (and ident tables
-                       (cl-find ident tables :test #'string-equal-ignore-case)
-                       ident)))
+         (default (when (and ident tables)
+                    (or (cl-find ident tables :test #'string-equal-ignore-case)
+                        ;; Bare name may need the default schema prefix to match.
+                        (let ((ds (and buf-obj (buffer-local-value
+                                                'sql-datum--default-schema buf-obj))))
+                          (when ds
+                            (cl-find (concat ds "." ident) tables
+                                     :test #'string-equal-ignore-case)))))))
     (completing-read (if default
                          (format "%s(default %s) " prompt default)
                        prompt)
