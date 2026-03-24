@@ -162,6 +162,24 @@ Hash: database name -> plist with keys :tables :schemas :routines
   "Non-nil when the Python process is idle and ready for a command.
 Set by the `ready' envelope, cleared when a command is sent.")
 
+(defvar sql-datum--trace-enabled nil
+  "When non-nil, log diagnostic messages to `*datum-trace*' buffer.")
+
+(defun sql-datum--trace (fmt &rest args)
+  "When tracing is enabled, log a timestamped message to `*datum-trace*'."
+  (when sql-datum--trace-enabled
+    (let ((msg (apply #'format fmt args))
+          (ts (format-time-string "%H:%M:%S.%3N")))
+      (with-current-buffer (get-buffer-create "*datum-trace*")
+        (goto-char (point-max))
+        (insert (format "[%s] %s\n" ts msg))))))
+
+(defvar-local sql-datum--column-callbacks nil
+  "Alist of (KEY . CALLBACK) for pending column fetches.
+When `handle-introspect' receives a columns:KEY envelope, it calls
+CALLBACK and removes the entry.  This replaces output-matching
+watchers, which cannot see envelope lines (stripped by preoutput).")
+
 (defvar-local sql-datum--suppress-prompt-count 0
   "Number of upcoming prompts to suppress in the preoutput filter.
 Incremented by silent commands (e.g. M-. definition, background refresh).")
@@ -313,6 +331,7 @@ Handles partial envelope lines split across multiple filter calls."
            (when initial
              (sql-datum--running-start-timer))))))
     ("ready"
+     (sql-datum--trace "READY envelope received, setting sql-datum--ready=t")
      (setq sql-datum--ready t))
     ("definition"
      ;; Payload is JSON: {"name": ..., "text": ...}
@@ -384,7 +403,14 @@ When `sql-datum-open-result-file' is non-nil, also offer to open the file."
                       (mapcar (lambda (row) (if (consp row) (car row) row))
                               items)
                       sql-datum--columns)
-             (puthash canon-key items sql-datum--column-details)))
+             (puthash canon-key items sql-datum--column-details)
+             ;; Fire and remove any registered callback for this key.
+             (let ((cb (assoc canon-key sql-datum--column-callbacks)))
+               (when cb
+                 (sql-datum--trace "handle-introspect: firing callback for %s" canon-key)
+                 (setq sql-datum--column-callbacks
+                       (delq cb sql-datum--column-callbacks))
+                 (funcall (cdr cb))))))
           ((pred (string-prefix-p "xdb:"))
            (sql-datum--handle-xdb-introspect kind items))))
     (error (message "datum: failed to parse introspect payload: %s" err))))
@@ -1040,6 +1066,10 @@ comma-separated table lists (e.g. FROM t1, t2).  Returns nil if no
 tables are found."
   (save-excursion
     (let* ((bounds (sql-datum--statement-bounds))
+           (_trace-bounds (sql-datum--trace "tables-in-statement: bounds=(%d . %d) text=|%s|"
+                                            (car bounds) (cdr bounds)
+                                            (buffer-substring-no-properties
+                                             (car bounds) (cdr bounds))))
            (stmt-start (car bounds))
            (stmt-end (cdr bounds))
            (table-kw-re (concat "\\<\\("
@@ -1182,6 +1212,11 @@ The `sql-datum--ready' guard ensures the process is idle before
 sending."
   ;; All cache keys are downcased — normalize the lookup key.
   (let ((key (downcase table)))
+    (sql-datum--trace "fetch-columns-async: table=%s key=%s cached=%s pending=%s ready=%s"
+                      table key
+                      (if (gethash key col-hash) "yes" "no")
+                      (gethash key pending-hash)
+                      (buffer-local-value 'sql-datum--ready buf))
     (unless (or (gethash key col-hash)
                 (gethash key pending-hash))
       (let ((proc (get-buffer-process buf)))
@@ -1192,10 +1227,13 @@ sending."
             ;; Not ready (refresh still running).  Install a one-shot
             ;; watcher that sends the command once the ready envelope
             ;; fires.
+            (sql-datum--trace "fetch-columns-async: DEFERRED (not ready)")
             (puthash key 'deferred pending-hash)
             (letrec ((retry-watcher
                       (lambda (_output)
                         (when (buffer-local-value 'sql-datum--ready buf)
+                          (sql-datum--trace "retry-watcher: ready now, key=%s pending=%s"
+                                            key (gethash key pending-hash))
                           (remove-hook 'comint-output-filter-functions
                                        retry-watcher t)
                           (if (eq (gethash key pending-hash) 'deferred)
@@ -1211,21 +1249,50 @@ sending."
   "Send the :columns command for TABLE to PROC and install a completion watcher.
 KEY is the downcased cache key.  BUF is the SQLi buffer.
 PENDING-HASH tracks in-flight requests."
+  (sql-datum--trace "fetch-columns-send: SENDING :columns %s :silent" table)
   (with-current-buffer buf
     (puthash key t pending-hash)
     (setq sql-datum--ready nil)
     (cl-incf sql-datum--suppress-prompt-count)
-    (comint-send-string proc (format ":columns %s :silent\n" table)))
-  (letrec ((watcher
-            (lambda (output)
-              (when (string-match-p
-                     (concat "##DATUM:introspect:columns:"
-                             (regexp-quote key) ":")
-                     output)
-                (remove-hook 'comint-output-filter-functions watcher t)
-                (remhash key pending-hash)))))
-    (with-current-buffer buf
-      (add-hook 'comint-output-filter-functions watcher nil t))))
+    ;; Register a callback invoked by handle-introspect when the
+    ;; columns:KEY envelope arrives (inside the preoutput filter).
+    (let ((sqli-name (buffer-name buf)))
+      (push (cons key
+                  (lambda ()
+                    (sql-datum--trace "column-callback: columns arrived for key=%s" key)
+                    (remhash key pending-hash)
+                    ;; Columns ready — trigger completion in visible
+                    ;; sql-mode windows.  A fallback backend may own
+                    ;; the current session, so cancel first, then
+                    ;; restart in the next event-loop turn.
+                    (when (fboundp 'company-manual-begin)
+                      (run-at-time
+                       0 nil
+                       (lambda ()
+                         (sql-datum--trace "auto-trigger: scanning windows")
+                         (dolist (win (window-list))
+                           (with-selected-window win
+                             (sql-datum--trace "  win=%s buf=%s sql-mode=%s"
+                                               win (buffer-name) (derived-mode-p 'sql-mode))
+                             (when (and (derived-mode-p 'sql-mode)
+                                        (or (equal sql-buffer sqli-name)
+                                            (equal (sql-find-sqli-buffer 'datum)
+                                                   sqli-name))
+                                        (bound-and-true-p company-mode))
+                               (when (and (fboundp 'company-cancel)
+                                          (bound-and-true-p company-candidates))
+                                 (sql-datum--trace "  -> cancelling fallback session")
+                                 (company-cancel))
+                               (let ((w win))
+                                 (run-at-time
+                                  0 nil
+                                  (lambda ()
+                                    (when (window-live-p w)
+                                      (with-selected-window w
+                                        (sql-datum--trace "  -> company-manual-begin")
+                                        (company-manual-begin))))))))))))))
+            sql-datum--column-callbacks))
+    (comint-send-string proc (format ":columns %s :silent\n" table))))
 
 (defun sql-datum--xdb-fetch-async (db buf xdb-cache callback)
   "Send :refresh-db DB asynchronously.  Call CALLBACK when cache entry is ready.
@@ -1333,6 +1400,9 @@ When point is in a parameter context (inside function parens, right
 after a routine name, or on the same line as a procedure call),
 offers parameter name completion instead of normal identifiers.
 Completing a FUNCTION name auto-inserts parentheses."
+  (sql-datum--trace "capf: called, populate=%s sql-buffer=%s"
+                    sql-datum-populate-completion
+                    (if (boundp 'sql-buffer) sql-buffer "unbound"))
   (when (and sql-datum-populate-completion
              ;; Suppress inside single-quoted strings only.  Double quotes
              ;; are SQL identifier quotes and should still complete.
@@ -1430,6 +1500,7 @@ Completing a FUNCTION name auto-inserts parentheses."
                                                'sql-datum--columns-pending buf)))
                        (comp-start start))
                   ;; Trigger async fetch if not cached
+                  ;; Fetch if not cached; defer completion until ready.
                   (unless (gethash resolved-key col-hash)
                     (when (and buf pending-hash)
                       (sql-datum--fetch-columns-async
@@ -1441,8 +1512,10 @@ Completing a FUNCTION name auto-inserts parentheses."
                         (unless (string= (downcase tbl) resolved-key)
                           (sql-datum--fetch-columns-async
                            tbl buf col-hash pending-hash)))))
-                  ;; Dynamic table: re-reads col-hash on every query so
-                  ;; async-fetched columns appear without re-invoking capf.
+                  ;; Only show completions if the primary table's
+                  ;; columns are cached; otherwise the callback in
+                  ;; fetch-columns-send will auto-trigger completion.
+                  (when (gethash resolved-key col-hash)
                   (list start end
                         (lambda (string pred action)
                           (let* ((cur-col-hash (and buf (buffer-local-value
@@ -1479,7 +1552,7 @@ Completing a FUNCTION name auto-inserts parentheses."
                         (lambda (cand status)
                           (when (eq status 'finished)
                             (sql-datum--maybe-quote-completed
-                             cand comp-start dialect))))))
+                             cand comp-start dialect)))))))
               ;; --- Normal identifier completion (fallback) ---
               ;; Returns a DYNAMIC completion table that re-reads live
               ;; state from the SQLi buffer on every query.  This is
@@ -1496,14 +1569,24 @@ Completing a FUNCTION name auto-inserts parentheses."
                        ;; hash sets here so the annotation function (called
                        ;; per-candidate) can classify without rebuilding.
                        (ann-state (make-hash-table :test #'eq)))
-                  ;; Trigger initial async fetches for uncached statement tables
-                  (when (and stmt-tables buf)
-                    (let ((ch (buffer-local-value 'sql-datum--columns buf))
-                          (ph (buffer-local-value 'sql-datum--columns-pending buf)))
-                      (when (and ch ph)
-                        (dolist (tbl stmt-tables)
-                          (unless (gethash (downcase tbl) ch)
-                            (sql-datum--fetch-columns-async tbl buf ch ph))))))
+                  ;; Check if all statement tables have columns cached.
+                  ;; If not, trigger async fetches and return nil — the
+                  ;; callback in fetch-columns-send will auto-trigger
+                  ;; completion once the data arrives.
+                  (sql-datum--trace "capf: normal-completion stmt-tables=%s buf=%s"
+                                    stmt-tables buf)
+                  (let ((columns-pending nil))
+                    (when (and stmt-tables buf)
+                      (let ((ch (buffer-local-value 'sql-datum--columns buf))
+                            (ph (buffer-local-value 'sql-datum--columns-pending buf)))
+                        (when (and ch ph)
+                          (dolist (tbl stmt-tables)
+                            (unless (gethash (downcase tbl) ch)
+                              (sql-datum--fetch-columns-async tbl buf ch ph)
+                              (setq columns-pending t))))))
+                    (when columns-pending
+                      (sql-datum--trace "capf: columns not ready, deferring"))
+                    (unless columns-pending
                   (list start end
                         (lambda (string pred action)
                           (let* ((cur-tables (and buf (buffer-local-value 'sql-datum--tables buf)))
@@ -1620,7 +1703,7 @@ Completing a FUNCTION name auto-inserts parentheses."
                                 (insert "()")
                                 (backward-char)
                                 (when-let ((msg (sql-datum-eldoc-function)))
-                                  (message "%s" msg))))))))))))))))
+                                  (message "%s" msg))))))))))))))))))
 
 
 ;;; ---------------------------------------------------------------------------
@@ -1753,20 +1836,34 @@ for the `comint' buffer."
                            'delete-char
                            'completion-at-point))
       ;; Watch for the first prompt to confirm connection.
-      (letrec ((watcher
-                (lambda (output)
-                  (when (string-match-p (rx bol (* nonl) ">") output)
-                    (message "datum: connected.")
-                    (remove-hook 'comint-output-filter-functions watcher t)
-                    (when sql-datum-auto-introspect
-                      (sql-datum--refresh-async (current-buffer)))
-                    (when (and sql-datum-refresh-interval
-                               (not sql-datum--refresh-timer))
-                      (setq sql-datum--refresh-timer
-                            (run-with-timer sql-datum-refresh-interval
-                                            sql-datum-refresh-interval
-                                            #'sql-datum--refresh-tick)))))))
-        (add-hook 'comint-output-filter-functions watcher nil t))
+      (let ((sqli-buf (current-buffer)))
+        (letrec ((watcher
+                  (lambda (output)
+                    (when (string-match-p (rx bol (* nonl) ">") output)
+                      (message "datum: connected.")
+                      (remove-hook 'comint-output-filter-functions watcher t)
+                      ;; Associate orphan scratch buffers with this connection.
+                      (let ((sqli-name (buffer-name sqli-buf)))
+                        (sql-datum--trace "connection-watcher: adopting scratch buffers for %s" sqli-name)
+                        (dolist (b (buffer-list))
+                          (when (and (buffer-live-p b)
+                                     (with-current-buffer b
+                                       (and (derived-mode-p 'sql-mode)
+                                            (null sql-buffer)
+                                            (string-match-p "\\*datum-scratch"
+                                                            (buffer-name b)))))
+                            (sql-datum--trace "  adopted: %s" (buffer-name b))
+                            (with-current-buffer b
+                              (setq-local sql-buffer sqli-name)))))
+                      (when sql-datum-auto-introspect
+                        (sql-datum--refresh-async (current-buffer)))
+                      (when (and sql-datum-refresh-interval
+                                 (not sql-datum--refresh-timer))
+                        (setq sql-datum--refresh-timer
+                              (run-with-timer sql-datum-refresh-interval
+                                              sql-datum-refresh-interval
+                                              #'sql-datum--refresh-tick)))))))
+          (add-hook 'comint-output-filter-functions watcher nil t)))
       (message "datum: connecting in background..."))))
 
 ;;; ---------------------------------------------------------------------------
