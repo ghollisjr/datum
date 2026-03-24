@@ -2332,12 +2332,25 @@ With a prefix argument, prompt for a filter pattern."
 
 (defun sql-datum-use-database (db)
   "Switch to database DB via :use.
-Prompts with completion from the cached database list."
+Prompts with completion from the cached database list.
+If the identifier at point starts with a known database name,
+it is offered as the default."
   (interactive
    (let* ((buf (sql-find-sqli-buffer 'datum))
-          (databases (and buf (buffer-local-value 'sql-datum--databases
-                                                  (get-buffer buf)))))
-     (list (completing-read "Switch to database: " databases nil nil))))
+          (buf-obj (and buf (get-buffer buf)))
+          (databases (and buf-obj (buffer-local-value 'sql-datum--databases
+                                                      buf-obj)))
+          (ident (sql-datum--identifier-at-point))
+          ;; Extract the first dotted segment as a potential database name.
+          (first-seg (when ident
+                       (car (split-string ident "\\." t))))
+          (default (when (and first-seg databases)
+                     (cl-find first-seg databases
+                              :test #'string-equal-ignore-case))))
+     (list (completing-read (if default
+                                (format "Switch to database: (default %s) " default)
+                              "Switch to database: ")
+                            databases nil nil nil nil default))))
   (let ((buf (sql-find-sqli-buffer 'datum)))
     (when buf
       (with-current-buffer (get-buffer buf)

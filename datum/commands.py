@@ -1027,6 +1027,17 @@ def definition(args):
             # Default schema
             schema = _driver.default_schema
 
+        # Determine effective database for context comment
+        effective_db = database
+        if not effective_db:
+            try:
+                cursor.execute(_driver.sql_current_database)
+                db_row = cursor.fetchone()
+                if db_row:
+                    effective_db = str(db_row[0])
+            except Exception:
+                pass
+
         # Resolve object type
         sql, params = _driver.sql_resolve_object_type(schema, name,
                                                       database=database)
@@ -1052,13 +1063,15 @@ def definition(args):
                 return
             text = _synthesize_create_table(schema, name, rows,
                                                dialect=_driver.dialect_name,
-                                               database=database)
+                                               database=effective_db)
         else:
             row = cursor.fetchone()
             if not row or not row[0]:
                 envelope.error(f":definition — no source found for {display_name}")
                 return
             text = str(row[0]).rstrip().rstrip(";\r\n \t").rstrip() + ";"
+            if effective_db:
+                text = f"-- Database: {effective_db}\n{text}"
 
         envelope.definition(display_name, text)
 
