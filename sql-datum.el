@@ -1245,8 +1245,56 @@ sending."
                 (add-hook 'comint-output-filter-functions
                           retry-watcher nil t)))))))))
 
+(defvar sql-datum-column-fetch-timeout 2.0
+  "Maximum seconds to wait for column data during completion.
+If columns don't arrive within this time, completion proceeds
+without them and a warning is shown.")
+
+(defun sql-datum--fetch-columns-sync (tables buf)
+  "Fetch columns for TABLES synchronously, waiting until all arrive or timeout.
+BUF is the SQLi process buffer.  Sends :columns TABLE :silent for each
+uncached table, then waits for process output until all columns are in
+the cache or `sql-datum-column-fetch-timeout' expires.
+Returns t if all columns are cached, nil if timed out."
+  (let* ((proc (get-buffer-process buf))
+         (col-hash (buffer-local-value 'sql-datum--columns buf))
+         (pending-hash (buffer-local-value 'sql-datum--columns-pending buf))
+         (needed nil))
+    (when (and proc col-hash pending-hash)
+      ;; Identify which tables need fetching.
+      (dolist (tbl tables)
+        (let ((key (downcase tbl)))
+          (unless (gethash key col-hash)
+            (push key needed)
+            ;; Send the command if not already in-flight.
+            (unless (gethash key pending-hash)
+              (sql-datum--trace "fetch-columns-sync: SENDING :columns %s :silent" tbl)
+              (with-current-buffer buf
+                (puthash key t pending-hash)
+                (setq sql-datum--ready nil)
+                (cl-incf sql-datum--suppress-prompt-count)
+                (comint-send-string proc (format ":columns %s :silent\n" tbl)))))))
+      (if (null needed)
+          t
+        ;; Wait for all columns to arrive.
+        (sql-datum--trace "fetch-columns-sync: waiting for %s" needed)
+        (let ((deadline (+ (float-time) sql-datum-column-fetch-timeout)))
+          (while (and needed (< (float-time) deadline))
+            (accept-process-output proc 0.05)
+            (setq needed (cl-remove-if
+                          (lambda (key) (gethash key col-hash))
+                          needed)))
+          (if needed
+              (progn
+                (sql-datum--trace "fetch-columns-sync: TIMEOUT waiting for %s" needed)
+                (message "datum: timed out waiting for column data for: %s"
+                         (mapconcat #'identity needed ", "))
+                nil)
+            (sql-datum--trace "fetch-columns-sync: all columns cached")
+            t))))))
+
 (defun sql-datum--fetch-columns-send (table key buf proc pending-hash)
-  "Send the :columns command for TABLE to PROC and install a completion watcher.
+  "Send the :columns command for TABLE to PROC.
 KEY is the downcased cache key.  BUF is the SQLi buffer.
 PENDING-HASH tracks in-flight requests."
   (sql-datum--trace "fetch-columns-send: SENDING :columns %s :silent" table)
@@ -1254,44 +1302,6 @@ PENDING-HASH tracks in-flight requests."
     (puthash key t pending-hash)
     (setq sql-datum--ready nil)
     (cl-incf sql-datum--suppress-prompt-count)
-    ;; Register a callback invoked by handle-introspect when the
-    ;; columns:KEY envelope arrives (inside the preoutput filter).
-    (let ((sqli-name (buffer-name buf)))
-      (push (cons key
-                  (lambda ()
-                    (sql-datum--trace "column-callback: columns arrived for key=%s" key)
-                    (remhash key pending-hash)
-                    ;; Columns ready — trigger completion in visible
-                    ;; sql-mode windows.  A fallback backend may own
-                    ;; the current session, so cancel first, then
-                    ;; restart in the next event-loop turn.
-                    (when (fboundp 'company-manual-begin)
-                      (run-at-time
-                       0 nil
-                       (lambda ()
-                         (sql-datum--trace "auto-trigger: scanning windows")
-                         (dolist (win (window-list))
-                           (with-selected-window win
-                             (sql-datum--trace "  win=%s buf=%s sql-mode=%s"
-                                               win (buffer-name) (derived-mode-p 'sql-mode))
-                             (when (and (derived-mode-p 'sql-mode)
-                                        (or (equal sql-buffer sqli-name)
-                                            (equal (sql-find-sqli-buffer 'datum)
-                                                   sqli-name))
-                                        (bound-and-true-p company-mode))
-                               (when (and (fboundp 'company-cancel)
-                                          (bound-and-true-p company-candidates))
-                                 (sql-datum--trace "  -> cancelling fallback session")
-                                 (company-cancel))
-                               (let ((w win))
-                                 (run-at-time
-                                  0 nil
-                                  (lambda ()
-                                    (when (window-live-p w)
-                                      (with-selected-window w
-                                        (sql-datum--trace "  -> company-manual-begin")
-                                        (company-manual-begin))))))))))))))
-            sql-datum--column-callbacks))
     (comint-send-string proc (format ":columns %s :silent\n" table))))
 
 (defun sql-datum--xdb-fetch-async (db buf xdb-cache callback)
@@ -1496,25 +1506,14 @@ Completing a FUNCTION name auto-inserts parentheses."
                                                  #'string-equal-ignore-case))
                                      tbl-part))
                        (resolved-key (downcase resolved))
-                       (pending-hash (and buf (buffer-local-value
-                                               'sql-datum--columns-pending buf)))
                        (comp-start start))
-                  ;; Trigger async fetch if not cached
-                  ;; Fetch if not cached; defer completion until ready.
-                  (unless (gethash resolved-key col-hash)
-                    (when (and buf pending-hash)
-                      (sql-datum--fetch-columns-async
-                       resolved buf col-hash pending-hash)))
-                  ;; Prefetch columns for other tables in the statement
-                  (when (and buf pending-hash)
-                    (dolist (entry aliases)
-                      (let ((tbl (cdr entry)))
-                        (unless (string= (downcase tbl) resolved-key)
-                          (sql-datum--fetch-columns-async
-                           tbl buf col-hash pending-hash)))))
-                  ;; Only show completions if the primary table's
-                  ;; columns are cached; otherwise the callback in
-                  ;; fetch-columns-send will auto-trigger completion.
+                  ;; Synchronously fetch columns for the resolved table
+                  ;; (and prefetch others from aliases).
+                  (let ((all-tables (cons resolved
+                                         (cl-remove resolved
+                                                    (mapcar #'cdr aliases)
+                                                    :test #'string-equal-ignore-case))))
+                    (sql-datum--fetch-columns-sync all-tables buf))
                   (when (gethash resolved-key col-hash)
                   (list start end
                         (lambda (string pred action)
@@ -1569,24 +1568,13 @@ Completing a FUNCTION name auto-inserts parentheses."
                        ;; hash sets here so the annotation function (called
                        ;; per-candidate) can classify without rebuilding.
                        (ann-state (make-hash-table :test #'eq)))
-                  ;; Check if all statement tables have columns cached.
-                  ;; If not, trigger async fetches and return nil — the
-                  ;; callback in fetch-columns-send will auto-trigger
-                  ;; completion once the data arrives.
+                  ;; Synchronously fetch columns for any uncached tables.
+                  ;; This blocks briefly (with timeout) so the completion
+                  ;; table always includes column data when available.
                   (sql-datum--trace "capf: normal-completion stmt-tables=%s buf=%s"
                                     stmt-tables buf)
-                  (let ((columns-pending nil))
-                    (when (and stmt-tables buf)
-                      (let ((ch (buffer-local-value 'sql-datum--columns buf))
-                            (ph (buffer-local-value 'sql-datum--columns-pending buf)))
-                        (when (and ch ph)
-                          (dolist (tbl stmt-tables)
-                            (unless (gethash (downcase tbl) ch)
-                              (sql-datum--fetch-columns-async tbl buf ch ph)
-                              (setq columns-pending t))))))
-                    (when columns-pending
-                      (sql-datum--trace "capf: columns not ready, deferring"))
-                    (unless columns-pending
+                  (when (and stmt-tables buf)
+                    (sql-datum--fetch-columns-sync stmt-tables buf))
                   (list start end
                         (lambda (string pred action)
                           (let* ((cur-tables (and buf (buffer-local-value 'sql-datum--tables buf)))
@@ -1703,7 +1691,7 @@ Completing a FUNCTION name auto-inserts parentheses."
                                 (insert "()")
                                 (backward-char)
                                 (when-let ((msg (sql-datum-eldoc-function)))
-                                  (message "%s" msg))))))))))))))))))
+                                  (message "%s" msg))))))))))))))))
 
 
 ;;; ---------------------------------------------------------------------------
