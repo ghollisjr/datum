@@ -174,11 +174,6 @@ Set by the `ready' envelope, cleared when a command is sent.")
         (goto-char (point-max))
         (insert (format "[%s] %s\n" ts msg))))))
 
-(defvar-local sql-datum--column-callbacks nil
-  "Alist of (KEY . CALLBACK) for pending column fetches.
-When `handle-introspect' receives a columns:KEY envelope, it calls
-CALLBACK and removes the entry.  This replaces output-matching
-watchers, which cannot see envelope lines (stripped by preoutput).")
 
 (defvar-local sql-datum--suppress-prompt-count 0
   "Number of upcoming prompts to suppress in the preoutput filter.
@@ -403,14 +398,7 @@ When `sql-datum-open-result-file' is non-nil, also offer to open the file."
                       (mapcar (lambda (row) (if (consp row) (car row) row))
                               items)
                       sql-datum--columns)
-             (puthash canon-key items sql-datum--column-details)
-             ;; Fire and remove any registered callback for this key.
-             (let ((cb (assoc canon-key sql-datum--column-callbacks)))
-               (when cb
-                 (sql-datum--trace "handle-introspect: firing callback for %s" canon-key)
-                 (setq sql-datum--column-callbacks
-                       (delq cb sql-datum--column-callbacks))
-                 (funcall (cdr cb))))))
+             (puthash canon-key items sql-datum--column-details)))
           ((pred (string-prefix-p "xdb:"))
            (sql-datum--handle-xdb-introspect kind items))))
     (error (message "datum: failed to parse introspect payload: %s" err))))
@@ -1206,10 +1194,9 @@ BUF is the SQLi process buffer.  COL-HASH is `sql-datum--columns',
 PENDING-HASH is `sql-datum--columns-pending'.
 Skips if TABLE is already cached or already in-flight.
 
-Note: this runs independently of the refresh chain.  The watcher
-detects completion by matching the envelope line in raw output.
-The `sql-datum--ready' guard ensures the process is idle before
-sending."
+Used for background prefetching (e.g. inside dynamic completion
+tables).  For completion-time fetches, prefer the synchronous
+`sql-datum--fetch-columns-sync' which blocks briefly with timeout."
   ;; All cache keys are downcased — normalize the lookup key.
   (let ((key (downcase table)))
     (sql-datum--trace "fetch-columns-async: table=%s key=%s cached=%s pending=%s ready=%s"
