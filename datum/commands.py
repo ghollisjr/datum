@@ -699,12 +699,14 @@ def _args_to_abspath(args):
     return (filename, os.path.exists(filename))
 
 
-def _synthesize_create_table(schema, name, column_rows, dialect=None):
+def _synthesize_create_table(schema, name, column_rows, dialect=None,
+                             database=None):
     """Build a CREATE TABLE statement from INFORMATION_SCHEMA column rows.
 
     Each row: (column_name, data_type, is_nullable,
                char_max_length, numeric_precision, numeric_scale, column_default)
     dialect controls identifier quoting (brackets for mssql, double-quotes otherwise).
+    database, if given, is shown in a leading comment for cross-database context.
     """
     def _qi(n):
         """Quote identifier only if it needs quoting (spaces, special chars)."""
@@ -738,7 +740,8 @@ def _synthesize_create_table(schema, name, column_rows, dialect=None):
         lines.append(f"    {col_name} {type_str} {null_str}{default_str}")
 
     cols = ",\n".join(lines)
-    return f"CREATE TABLE {_qi(schema)}.{_qi(name)} (\n{cols}\n);"
+    preamble = f"-- Database: {database}\n" if database else ""
+    return f"{preamble}CREATE TABLE {_qi(schema)}.{_qi(name)} (\n{cols}\n);"
 
 
 def refresh_db(args):
@@ -1025,7 +1028,8 @@ def definition(args):
             schema = _driver.default_schema
 
         # Resolve object type
-        sql, params = _driver.sql_resolve_object_type(schema, name)
+        sql, params = _driver.sql_resolve_object_type(schema, name,
+                                                      database=database)
         cursor.execute(sql, params)
         row = cursor.fetchone()
         if not row:
@@ -1033,10 +1037,12 @@ def definition(args):
             return
 
         object_type = str(row[0])
-        display_name = f"{schema}.{name}"
+        display_name = f"{database}.{schema}.{name}" if database \
+            else f"{schema}.{name}"
 
         # Fetch definition
-        sql, params = _driver.sql_get_definition(schema, name, object_type)
+        sql, params = _driver.sql_get_definition(schema, name, object_type,
+                                                 database=database)
         cursor.execute(sql, params)
 
         if object_type == "TABLE":
@@ -1045,7 +1051,8 @@ def definition(args):
                 envelope.error(f":definition — no columns found for {display_name}")
                 return
             text = _synthesize_create_table(schema, name, rows,
-                                               dialect=_driver.dialect_name)
+                                               dialect=_driver.dialect_name,
+                                               database=database)
         else:
             row = cursor.fetchone()
             if not row or not row[0]:

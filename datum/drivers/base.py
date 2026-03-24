@@ -123,17 +123,19 @@ class BaseDriver(ABC):
 
     # --- Definition lookup ---
 
-    def sql_resolve_object_type(self, schema, name):
+    def sql_resolve_object_type(self, schema, name, database=None):
         """Return (sql, params) to resolve object type.
         Expected result: single row (object_type,) where object_type is
         TABLE, VIEW, PROCEDURE, or FUNCTION.
+        database is used for cross-database lookups (MSSQL).
         """
         raise NotImplementedError
 
-    def sql_get_definition(self, schema, name, object_type):
+    def sql_get_definition(self, schema, name, object_type, database=None):
         """Return (sql, params) to get the definition/source of an object.
         For TABLE: returns column rows (name, type, nullable, default).
         For VIEW/PROCEDURE/FUNCTION: returns a single row (definition_text,).
+        database is used for cross-database lookups (MSSQL).
         """
         raise NotImplementedError
 
