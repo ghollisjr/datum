@@ -1196,23 +1196,45 @@ the race window with concurrent silent commands."
     (unless (or (gethash key col-hash)
                 (gethash key pending-hash))
       (let ((proc (get-buffer-process buf)))
-        (when (and proc (sql-datum--at-prompt-p buf))
-          (with-current-buffer buf
-            (puthash key t sql-datum--columns-pending)
-            (comint-send-string proc (format ":columns %s :silent\n" table)))
-          (letrec ((watcher
-                    (lambda (output)
-                      ;; Detect completion by matching the envelope line
-                      ;; in the raw output.  Keys are downcased at write
-                      ;; time, so a direct gethash is sufficient.
-                      (when (string-match-p
-                             (concat "##DATUM:introspect:columns:"
-                                     (regexp-quote key) ":")
-                             output)
-                        (remove-hook 'comint-output-filter-functions watcher t)
-                        (remhash key pending-hash)))))
-            (with-current-buffer buf
-              (add-hook 'comint-output-filter-functions watcher nil t))))))))
+        (when proc
+          (if (sql-datum--at-prompt-p buf)
+              ;; Prompt is ready — send the command now.
+              (sql-datum--fetch-columns-send table key buf proc pending-hash)
+            ;; Prompt not ready (refresh still running).  Install a
+            ;; one-shot watcher that sends the command once we see a
+            ;; prompt character, so the fetch isn't silently lost.
+            (puthash key 'deferred pending-hash)
+            (letrec ((retry-watcher
+                      (lambda (_output)
+                        (when (sql-datum--at-prompt-p buf)
+                          (remove-hook 'comint-output-filter-functions
+                                       retry-watcher t)
+                          (if (eq (gethash key pending-hash) 'deferred)
+                              (sql-datum--fetch-columns-send
+                               table key buf proc pending-hash)
+                            ;; Already fetched by another path — clean up.
+                            (remhash key pending-hash))))))
+              (with-current-buffer buf
+                (add-hook 'comint-output-filter-functions
+                          retry-watcher nil t)))))))))
+
+(defun sql-datum--fetch-columns-send (table key buf proc pending-hash)
+  "Send the :columns command for TABLE to PROC and install a completion watcher.
+KEY is the downcased cache key.  BUF is the SQLi buffer.
+PENDING-HASH tracks in-flight requests."
+  (with-current-buffer buf
+    (puthash key t pending-hash)
+    (comint-send-string proc (format ":columns %s :silent\n" table)))
+  (letrec ((watcher
+            (lambda (output)
+              (when (string-match-p
+                     (concat "##DATUM:introspect:columns:"
+                             (regexp-quote key) ":")
+                     output)
+                (remove-hook 'comint-output-filter-functions watcher t)
+                (remhash key pending-hash)))))
+    (with-current-buffer buf
+      (add-hook 'comint-output-filter-functions watcher nil t))))
 
 (defun sql-datum--xdb-fetch-async (db buf xdb-cache callback)
   "Send :refresh-db DB asynchronously.  Call CALLBACK when cache entry is ready.
