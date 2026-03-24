@@ -357,6 +357,10 @@ def _run_introspect(sql, kind, label, params=None, silent=False):
         if not rows:
             if not silent:
                 print(f"(no {label} found)")
+            # Always send the envelope so Emacs-side waiters
+            # (e.g. fetch-columns-sync) see an immediate response
+            # rather than timing out.
+            envelope.introspect(kind, [])
             return
         if not silent:
             # Use the standard printer for consistent formatting
@@ -376,6 +380,8 @@ def _run_introspect(sql, kind, label, params=None, silent=False):
     except Exception as err:
         if not silent:
             print(f"Error running {label} query: {err}")
+        # Send empty envelope so Emacs-side waiters don't hang.
+        envelope.introspect(kind, [])
 
 
 def databases(args):

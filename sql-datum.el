@@ -671,9 +671,13 @@ or \"dbo.my col\" → \"dbo.[my col]\" for mssql."
   "After completion inserts CAND at START, replace with quoted form if needed.
 DIALECT determines quoting style.  If the user already typed an
 opening quote or bracket before START, it is consumed so the result
-doesn't get double-quoted."
+doesn't get double-quoted.
+CAND may already be quoted (from Python introspection); it is
+unquoted first to avoid double-quoting."
   (let ((real-start start)
-        (has-leading-quote nil))
+        (has-leading-quote nil)
+        ;; Unquote first so already-quoted candidates don't get re-quoted.
+        (bare (sql-datum--unquote-identifier cand)))
     ;; Check for a user-typed opening quote/bracket just before start
     (when (> real-start (point-min))
       (let ((prev-char (char-after (1- real-start))))
@@ -681,7 +685,7 @@ doesn't get double-quoted."
                   (and (eq prev-char ?\[) (equal dialect "mssql")))
           (setq real-start (1- real-start))
           (setq has-leading-quote t))))
-    (let ((quoted (sql-datum--quote-identifier cand dialect)))
+    (let ((quoted (sql-datum--quote-identifier bare dialect)))
       (when (or has-leading-quote (not (string= cand quoted)))
         (let ((end (point)))
           (delete-region real-start end)
@@ -849,24 +853,36 @@ and the completion framework passes the quote as part of the prefix."
     (dolist (x list) (puthash x t h))
     h))
 
+(defun sql-datum--unquote-identifier (name)
+  "Unquote all segments of a dotted SQL identifier NAME.
+\"public.\\\"test table\\\"\" → \"public.test table\"."
+  (mapconcat #'sql-datum--unquote-part
+             (sql-datum--split-identifier name) "."))
+
 (defun sql-datum--completion-match-p (prefix candidate &optional ds-prefix)
   "Return non-nil if PREFIX matches CANDIDATE.
-Strips leading quote characters from PREFIX before matching.
+Compares unquoted forms so that a typed prefix like public.\"test
+matches a candidate like public.\"test table\".
 Matches against the full name, or if PREFIX has no dot, also against
 the portion after the last dot (so \"Pat\" matches \"dbo.PatientDim\").
 When DS-PREFIX is non-nil, skip the after-dot fallback for candidates
 that start with DS-PREFIX — their bare forms are already in the list."
-  (let ((prefix (sql-datum--strip-leading-quotes prefix)))
+  (let ((bare-prefix (sql-datum--unquote-identifier prefix))
+        (bare-candidate (sql-datum--unquote-identifier candidate)))
     (or (string-prefix-p prefix candidate t)
+        (string-prefix-p bare-prefix bare-candidate t)
         (and (not (string-match-p "\\." prefix))
              (string-match-p "\\." candidate)
              ;; Skip after-dot match when candidate is in the default
              ;; schema — the bare form is already a separate candidate.
              (not (and ds-prefix (string-prefix-p ds-prefix candidate t)))
-             (string-prefix-p
-              prefix
-              (car (last (split-string candidate "\\.")))
-              t)))))
+             (let ((after-dot (car (last (sql-datum--split-identifier
+                                          candidate)))))
+               (or (string-prefix-p prefix after-dot t)
+                   (string-prefix-p
+                    bare-prefix
+                    (sql-datum--unquote-part after-dot)
+                    t)))))))
 
 (defun sql-datum--make-completion-table (candidates &optional sort-fn ds-prefix)
   "Build a completion table that also matches bare table name portions.
@@ -1237,6 +1253,13 @@ tables).  For completion-time fetches, prefer the synchronous
 If columns don't arrive within this time, completion proceeds
 without them and a warning is shown.")
 
+(defun sql-datum--explicit-completion-p ()
+  "Return non-nil if completion was explicitly triggered by the user.
+Returns nil during company idle completion (automatic as-you-type),
+where blocking with `accept-process-output' would freeze Emacs."
+  (or (not (bound-and-true-p company-mode))
+      (bound-and-true-p company--manual-action)))
+
 (defun sql-datum--fetch-columns-sync (tables buf)
   "Fetch columns for TABLES synchronously, waiting until all arrive or timeout.
 BUF is the SQLi process buffer.  Sends :columns TABLE :silent for each
@@ -1263,14 +1286,24 @@ Returns t if all columns are cached, nil if timed out."
                 (comint-send-string proc (format ":columns %s :silent\n" tbl)))))))
       (if (null needed)
           t
-        ;; Wait for all columns to arrive.
+        ;; Wait for all columns to arrive.  Use a sentinel to detect
+        ;; empty responses (gethash returns nil for both "absent" and
+        ;; "mapped to nil").
         (sql-datum--trace "fetch-columns-sync: waiting for %s" needed)
-        (let ((deadline (+ (float-time) sql-datum-column-fetch-timeout)))
+        (let ((deadline (+ (float-time) sql-datum-column-fetch-timeout))
+              (sentinel (make-symbol "missing")))
           (while (and needed (< (float-time) deadline))
             (accept-process-output proc 0.05)
             (setq needed (cl-remove-if
-                          (lambda (key) (gethash key col-hash))
+                          (lambda (key)
+                            (not (eq (gethash key col-hash sentinel)
+                                     sentinel)))
                           needed)))
+          ;; Clean up pending-hash for keys that arrived.
+          (dolist (tbl tables)
+            (let ((key (downcase tbl)))
+              (when (not (eq (gethash key col-hash sentinel) sentinel))
+                (remhash key pending-hash))))
           (if needed
               (progn
                 (sql-datum--trace "fetch-columns-sync: TIMEOUT waiting for %s" needed)
@@ -1494,13 +1527,20 @@ Completing a FUNCTION name auto-inserts parentheses."
                                      tbl-part))
                        (resolved-key (downcase resolved))
                        (comp-start start))
-                  ;; Synchronously fetch columns for the resolved table
-                  ;; (and prefetch others from aliases).
+                  ;; Fetch columns for the resolved table (and prefetch
+                  ;; others from aliases).  Only block during explicit
+                  ;; completion (TAB) to avoid freezing on idle typing.
                   (let ((all-tables (cons resolved
                                          (cl-remove resolved
                                                     (mapcar #'cdr aliases)
                                                     :test #'string-equal-ignore-case))))
-                    (sql-datum--fetch-columns-sync all-tables buf))
+                    (if (sql-datum--explicit-completion-p)
+                        (sql-datum--fetch-columns-sync all-tables buf)
+                      (dolist (tbl all-tables)
+                        (sql-datum--fetch-columns-async
+                         tbl buf col-hash
+                         (buffer-local-value
+                          'sql-datum--columns-pending buf)))))
                   (when (gethash resolved-key col-hash)
                   (list start end
                         (lambda (string pred action)
@@ -1555,12 +1595,13 @@ Completing a FUNCTION name auto-inserts parentheses."
                        ;; hash sets here so the annotation function (called
                        ;; per-candidate) can classify without rebuilding.
                        (ann-state (make-hash-table :test #'eq)))
-                  ;; Synchronously fetch columns for any uncached tables.
-                  ;; This blocks briefly (with timeout) so the completion
-                  ;; table always includes column data when available.
+                  ;; Fetch columns for uncached tables.  Only block
+                  ;; during explicit completion (TAB); idle completion
+                  ;; uses whatever is already cached.
                   (sql-datum--trace "capf: normal-completion stmt-tables=%s buf=%s"
                                     stmt-tables buf)
-                  (when (and stmt-tables buf)
+                  (when (and stmt-tables buf
+                             (sql-datum--explicit-completion-p))
                     (sql-datum--fetch-columns-sync stmt-tables buf))
                   (list start end
                         (lambda (string pred action)
