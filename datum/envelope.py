@@ -28,10 +28,21 @@ import sys
 _SIGIL = "##DATUM"
 _END = "##"
 
+_mode = "stdout"  # "stdout" (default/REPL), "stderr", or "suppress"
+
+
+def set_mode(mode):
+    """Set output mode: 'stdout' (default), 'stderr', or 'suppress'."""
+    global _mode
+    _mode = mode
+
 
 def _send(msg_type, payload):
-    """Write a single envelope line to stdout, flushed immediately."""
-    print(f"{_SIGIL}:{msg_type}:{payload}{_END}", flush=True)
+    """Write a single envelope line, respecting the current output mode."""
+    if _mode == "suppress":
+        return
+    dest = sys.stderr if _mode == "stderr" else sys.stdout
+    print(f"{_SIGIL}:{msg_type}:{payload}{_END}", flush=True, file=dest)
 
 
 def info(message):

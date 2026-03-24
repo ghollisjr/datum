@@ -8,7 +8,12 @@ from . import commands
 from . import envelope
 from .drivers import get_driver, dialect_from_driver
 
+import csv
+import json
+import sys
 import traceback
+from datetime import datetime, date, time
+from decimal import Decimal
 
 config = None
 _driver = None
@@ -110,6 +115,81 @@ def _emit_current_db_and_user():
             envelope.meta("user", str(row[0]))
     except Exception:
         pass
+
+
+def run_single(query=None, command=None, fmt="table"):
+    """Execute a single query or command and exit (non-interactive mode)."""
+    # Redirect banner/status prints to stderr so stdout stays clean.
+    _real_stdout = sys.stdout
+    sys.stdout = sys.stderr
+    try:
+        connect.get_connection()
+        connect.show_connection_banner_and_get_prompt_header()
+        envelope.meta("server", connect.get_server_or_dsn())
+        _emit_current_db_and_user()
+        if _driver.default_schema:
+            envelope.meta("default-schema", _driver.default_schema)
+    finally:
+        sys.stdout = _real_stdout
+
+    if command:
+        # Normalize: ensure leading colon
+        cmd = command if command.startswith(":") else ":" + command
+        sql = commands.handle(cmd)
+        if sql:
+            _execute_and_print(sql, fmt)
+    elif query:
+        _execute_and_print(query, fmt)
+
+
+def _execute_and_print(sql, fmt):
+    """Execute SQL and print results in the requested format."""
+    cursor = connect.get_connection().cursor()
+    cursor.execute(sql)
+    if fmt == "json":
+        _print_json(cursor)
+    elif fmt == "csv":
+        _print_csv(cursor)
+    else:
+        printer.print_cursor_results(cursor)
+
+
+def _json_serializer(obj):
+    """Custom JSON serializer for types not handled by default."""
+    if isinstance(obj, (datetime, date, time)):
+        return obj.isoformat()
+    if isinstance(obj, Decimal):
+        return float(obj)
+    if isinstance(obj, bytes):
+        return obj.hex()
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+
+def _print_json(cursor):
+    """Print cursor results as JSON array of objects."""
+    all_results = []
+    while True:
+        if cursor.description:
+            columns = [col[0] for col in cursor.description]
+            rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
+            all_results.extend(rows)
+        try:
+            if not cursor.nextset():
+                break
+        except Exception:
+            break
+    print(json.dumps(all_results, indent=2, default=_json_serializer))
+
+
+def _print_csv(cursor):
+    """Print first resultset as CSV to stdout."""
+    if not cursor.description:
+        return
+    columns = [col[0] for col in cursor.description]
+    writer = csv.writer(sys.stdout)
+    writer.writerow(columns)
+    for row in cursor.fetchall():
+        writer.writerow(row)
 
 
 def prompt_for_query_or_command():

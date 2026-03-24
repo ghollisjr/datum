@@ -4,12 +4,14 @@ Usage:
     datum (-h | --help)
     datum --list-drivers
     datum --conn-string=<connection_string> [--sql-type=<type>] [--config=<path>]
+          [--query=<sql> | --command=<cmd>] [--format=<fmt>]
     datum (--driver=<odbc_driver> | --dsn=<dsn>)
           [--server=<server> --database=<database>]
           [--user=<username> --pass=<password> --integrated]
           [--param <name=value>]...
           [--sql-type=<type>]
           [--config=<path>]
+          [--query=<sql> | --command=<cmd>] [--format=<fmt>]
 
 Options:
   -h --help             Show this screen.
@@ -55,6 +57,12 @@ Optional parameters:
                          in which case it is assumed the file is in the dir
                          $XDG_CONFIG_HOME/datum [default: config.ini]
 
+Non-interactive mode (execute and exit):
+
+  --query=<sql>          Execute a SQL query and print results to stdout.
+  --command=<cmd>        Execute a datum command (e.g. :tables, :columns users).
+  --format=<fmt>         Output format: table (default), json, or csv.
+
 If the value for any parameter starts with ENV= then the contents of an env var
 are used. For example: --pass=ENV=DB_SECRET would get the value for <password>
 from $DB_SECRET. It is supported in --param values too.
@@ -63,6 +71,7 @@ from $DB_SECRET. It is supported in --param values too.
 from docopt import docopt
 from . import datum
 from . import drivers
+from . import envelope
 import sys
 
 
@@ -72,8 +81,22 @@ def main():
     if args["--list-drivers"]:
         drivers.print_list()
         return
-    datum.initialize(args)
-    datum.query_loop()
+
+    query = args.get("--query")
+    command = args.get("--command")
+    fmt = args.get("--format") or "table"
+
+    if query or command:
+        envelope.set_mode("stderr")
+        try:
+            datum.initialize(args)
+            datum.run_single(query=query, command=command, fmt=fmt)
+        except Exception as e:
+            print(str(e), file=sys.stderr)
+            sys.exit(1)
+    else:
+        datum.initialize(args)
+        datum.query_loop()
 
 
 if __name__ == "__main__":
