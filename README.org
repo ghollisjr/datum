@@ -591,13 +591,18 @@ You can also introspect a remote database manually with =:refresh-db <name>=.
 *** Quoted identifier completion
 
 Identifiers containing spaces, hyphens, or other special characters are
-automatically quoted when completed.  PostgreSQL uses double quotes
-(="my column"=), MSSQL uses square brackets (=[my column]=).  Only the
-segments that need quoting are wrapped — e.g. =public."my table"=.
+automatically quoted when completed.  Each dialect uses its native quote
+style by default: double quotes for PostgreSQL (="my column"=), square
+brackets for MSSQL (=[my column]=), backticks for MySQL (=`my column`=).
+Only the segments that need quoting are wrapped — e.g. =public."my table"=.
 
-You can start typing with an opening quote or bracket (="che<TAB>= or
-=[che<TAB>=) and completion will match against the bare name, then
-produce the correctly quoted result without double-quoting.
+Set =sql-datum-prefer-ansi-quotes= to =t= to use ANSI double-quote
+quoting for all dialects instead of dialect-specific characters.
+
+You can start typing with an opening quote, bracket, or backtick
+(="che<TAB>=, =[che<TAB>=, or =`che<TAB>=) and completion will match
+against the bare name, then produce the correctly quoted result without
+double-quoting.
 
 *** Schema-qualified completion
 
@@ -688,6 +693,7 @@ time. The timer stops automatically when the buffer is no longer visible.
 | =sql-datum-running-refresh-interval= | =5=              | Auto-refresh interval (seconds)      |
 | =sql-datum-auto-introspect=          | =t=              | Auto-run =:refresh= on connect       |
 | =sql-datum-refresh-interval=         | =nil=            | Periodic refresh interval (seconds)  |
+| =sql-datum-prefer-ansi-quotes=       | =nil=            | Use ANSI ="= quoting for all dialects |
 
 * Envelope protocol
 
