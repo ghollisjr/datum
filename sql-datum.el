@@ -96,6 +96,13 @@ completion candidates up to date.  Set to nil to disable."
   :type '(choice (const :tag "Disabled" nil) integer)
   :group 'SQL)
 
+(defcustom sql-datum-prefer-ansi-quotes nil
+  "When non-nil, prefer ANSI double-quote quoting for all dialects.
+When nil (the default), use dialect-specific quoting: backticks
+for MySQL, square brackets for MSSQL."
+  :type 'boolean
+  :group 'SQL)
+
 (defvar sql-datum--refresh-timer nil
   "Timer for periodic introspection refresh.")
 
@@ -685,12 +692,19 @@ When DISPLAY is non-nil, pop up the buffer; otherwise just update it."
 
 (defun sql-datum--active-quote-styles (dialect)
   "Return quote styles active for DIALECT.
-nil dialect returns all styles."
-  (cl-remove-if-not
-   (lambda (s)
-     (let ((d (plist-get s :dialect)))
-       (or (null d) (null dialect) (member dialect d))))
-   sql-datum--quote-styles))
+nil dialect returns all styles.  When `sql-datum-prefer-ansi-quotes'
+is nil, dialect-specific styles are sorted first so that quoting
+functions prefer them over ANSI double-quotes."
+  (let ((active (cl-remove-if-not
+                 (lambda (s)
+                   (let ((d (plist-get s :dialect)))
+                     (or (null d) (null dialect) (member dialect d))))
+                 sql-datum--quote-styles)))
+    (if sql-datum-prefer-ansi-quotes
+        active
+      ;; Put dialect-specific styles first, ANSI (nil dialect) last.
+      (append (cl-remove-if-not (lambda (s) (plist-get s :dialect)) active)
+              (cl-remove-if     (lambda (s) (plist-get s :dialect)) active)))))
 
 (defun sql-datum--unquote-part (part)
   "Strip bracket, double-quote, or backtick quoting from a single identifier PART.
