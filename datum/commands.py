@@ -15,16 +15,17 @@ _config = {}
 _driver = None
 
 
+_QUOTE_CHARS = {"mssql": ("[", "]"), "mysql": ("`", "`")}
+
+
 def _quote_name(name):
     """Quote a SQL identifier if it contains special characters.
     Uses bracket quoting for MSSQL, backtick quoting for MySQL,
     double-quote quoting otherwise."""
     if '.' in name or ' ' in name:
-        if _driver and _driver.dialect_name == "mssql":
-            return f"[{name}]"
-        if _driver and _driver.dialect_name == "mysql":
-            return f"`{name}`"
-        return f'"{name}"'
+        open_ch, close_ch = _QUOTE_CHARS.get(
+            _driver.dialect_name if _driver else None, ('"', '"'))
+        return f"{open_ch}{name}{close_ch}"
     return name
 
 

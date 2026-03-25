@@ -675,67 +675,72 @@ When DISPLAY is non-nil, pop up the buffer; otherwise just update it."
 ;;; Identifier quoting helpers
 ;;; ---------------------------------------------------------------------------
 
+(defconst sql-datum--quote-styles
+  '((:open ?\"  :close ?\"  :dialect nil)           ; ANSI — all dialects
+    (:open ?\[  :close ?\]  :dialect ("mssql"))
+    (:open ?\`  :close ?\`  :dialect ("mysql")))
+  "SQL identifier quote styles.
+:dialect nil means valid in all dialects.
+:dialect (list) means valid only in those dialects.")
+
+(defun sql-datum--active-quote-styles (dialect)
+  "Return quote styles active for DIALECT.
+nil dialect returns all styles."
+  (cl-remove-if-not
+   (lambda (s)
+     (let ((d (plist-get s :dialect)))
+       (or (null d) (null dialect) (member dialect d))))
+   sql-datum--quote-styles))
+
 (defun sql-datum--unquote-part (part)
   "Strip bracket, double-quote, or backtick quoting from a single identifier PART.
 Handles both closed quotes and unclosed leading quotes (mid-typing).
 \"[foo bar]\" → \"foo bar\", \"\\\"foo\\\"\" → \"foo\", \"`foo`\" → \"foo\"."
-  (cond ((and (string-prefix-p "[" part)
-              (string-suffix-p "]" part))
-         (substring part 1 -1))
-        ((and (string-prefix-p "\"" part)
-              (string-suffix-p "\"" part)
-              (> (length part) 1))
-         (substring part 1 -1))
-        ((and (string-prefix-p "`" part)
-              (string-suffix-p "`" part)
-              (> (length part) 1))
-         (substring part 1 -1))
-        ;; Unclosed leading quote/bracket/backtick (user is mid-typing)
-        ((string-prefix-p "\"" part)
-         (substring part 1))
-        ((string-prefix-p "[" part)
-         (substring part 1))
-        ((string-prefix-p "`" part)
-         (substring part 1))
-        (t part)))
+  (let ((len (length part)))
+    (cl-loop for s in sql-datum--quote-styles
+             for open  = (string (plist-get s :open))
+             for close = (string (plist-get s :close))
+             if (and (string-prefix-p open part)
+                     (string-suffix-p close part)
+                     (or (not (string= open close)) (> len 1)))
+             return (substring part 1 -1)
+             else if (string-prefix-p open part)
+             return (substring part 1)
+             finally return part)))
 
 (defun sql-datum--split-identifier (raw)
-  "Split RAW identifier string on dots, respecting bracket and double-quote quoting.
+  "Split RAW identifier string on dots, respecting bracket, double-quote, and backtick quoting.
 Returns a list of parts (still quoted).  E.g.
   \"public.\\\"my table\\\"\" → (\"public\" \"\\\"my table\\\"\")
   \"dbo.[my col]\"       → (\"dbo\" \"[my col]\")."
   (let ((parts nil)
         (current "")
-        (in-bracket nil)
-        (in-dquote nil)
-        (in-backtick nil)
+        (in-quote nil)  ; holds close-char when inside quotes, nil otherwise
         (i 0)
         (len (length raw)))
     (while (< i len)
       (let ((ch (aref raw i)))
         (cond
-         ((and (not in-bracket) (not in-dquote) (not in-backtick) (eq ch ?\[))
-          (setq in-bracket t)
+         ;; Inside a quoted region — check for closing char
+         ((and in-quote (eq ch in-quote))
+          (setq in-quote nil)
           (setq current (concat current (string ch))))
-         ((and in-bracket (eq ch ?\]))
-          (setq in-bracket nil)
+         (in-quote
           (setq current (concat current (string ch))))
-         ((and (not in-bracket) (not in-dquote) (not in-backtick) (eq ch ?\"))
-          (setq in-dquote t)
-          (setq current (concat current (string ch))))
-         ((and in-dquote (eq ch ?\"))
-          (setq in-dquote nil)
-          (setq current (concat current (string ch))))
-         ((and (not in-bracket) (not in-dquote) (not in-backtick) (eq ch ?\`))
-          (setq in-backtick t)
-          (setq current (concat current (string ch))))
-         ((and in-backtick (eq ch ?\`))
-          (setq in-backtick nil)
-          (setq current (concat current (string ch))))
-         ((and (not in-bracket) (not in-dquote) (not in-backtick) (eq ch ?.))
+         ;; Outside quotes — check for opening chars
+         ((cl-loop for s in sql-datum--quote-styles
+                   when (eq ch (plist-get s :open))
+                   do (setq in-quote (plist-get s :close))
+                      (setq current (concat current (string ch)))
+                   and return t)
+          ;; handled by cl-loop side effects
+          )
+         ;; Dot separator
+         ((eq ch ?.)
           (unless (string-empty-p current)
             (push current parts))
           (setq current ""))
+         ;; Normal character
          (t
           (setq current (concat current (string ch))))))
       (setq i (1+ i)))
@@ -751,14 +756,12 @@ Returns a list of parts (still quoted).  E.g.
 
 (defun sql-datum--quote-segment (segment dialect)
   "Quote a single identifier SEGMENT for DIALECT if it needs quoting.
-Uses double quotes for postgres, square brackets for mssql, backticks for mysql."
+Uses the first matching style from `sql-datum--quote-styles' for DIALECT."
   (if (sql-datum--needs-quoting-p segment)
-      (cond ((equal dialect "mssql")
-             (concat "[" segment "]"))
-            ((equal dialect "mysql")
-             (concat "`" segment "`"))
-            (t
-             (concat "\"" segment "\"")))
+      (let ((style (car (sql-datum--active-quote-styles dialect))))
+        (concat (string (plist-get style :open))
+                segment
+                (string (plist-get style :close))))
     segment))
 
 (defun sql-datum--quote-identifier (name dialect)
@@ -787,18 +790,23 @@ unquoted first to avoid double-quoting."
     ;; Double-quote is ANSI and valid in every dialect.
     (when (> real-start (point-min))
       (let ((prev-char (char-after (1- real-start))))
-        (when (or (eq prev-char ?\")
-                  (and (eq prev-char ?\[) (equal dialect "mssql"))
-                  (and (eq prev-char ?\`) (equal dialect "mysql")))
+        (when (cl-some (lambda (s)
+                         (and (eq prev-char (plist-get s :open))
+                              (let ((d (plist-get s :dialect)))
+                                (or (null d) (member dialect d)))))
+                       sql-datum--quote-styles)
           (setq real-start (1- real-start))
           (setq has-leading-quote t)
           (setq user-quote-style prev-char))))
     ;; Use the user's chosen quote style if they started one,
     ;; otherwise fall back to dialect default.
-    (let* ((effective-dialect (cond ((eq user-quote-style ?\") "ansi")
-                                   ((eq user-quote-style ?\[) "mssql")
-                                   ((eq user-quote-style ?\`) "mysql")
-                                   (t dialect)))
+    (let* ((effective-dialect
+            (if user-quote-style
+                (let ((match (cl-find-if
+                              (lambda (s) (eq user-quote-style (plist-get s :open)))
+                              sql-datum--quote-styles)))
+                  (or (car (plist-get match :dialect)) dialect))
+              dialect))
            (quoted (sql-datum--quote-identifier bare effective-dialect)))
       (when (or has-leading-quote (not (string= cand quoted)))
         (let ((end (point)))
@@ -812,125 +820,82 @@ unquoted first to avoid double-quoting."
 
 (defun sql-datum--scan-quoted-identifier (direction &optional dialect)
   "Scan in DIRECTION (-1 backward, 1 forward) over a possibly-quoted SQL identifier.
-Handles bare identifiers and dialect-appropriate quoting:
-double-quoted \\\"name\\\" for all dialects (ANSI), bracket-quoted
-[name] for mssql, backtick-quoted \`name\` for mysql.
+Handles bare identifiers and dialect-appropriate quoting.
 DIALECT controls which quote styles are recognized; nil means all.
 Returns the new position."
-  ;; If point is inside a quoted region, jump to the boundary first so
-  ;; the main loop sees the quote character and handles the segment.
-  ;; sql-mode doesn't treat " as a string delimiter, so syntax-ppss
-  ;; won't detect it — use manual search instead.
-  ;; Both blocks verify point is genuinely *between* the delimiters to
-  ;; avoid misfiring on earlier quoted identifiers on the same line.
-  (let* ((dq-open (save-excursion
-                    (search-backward "\"" (line-beginning-position) t)))
-         (dq-close (when dq-open
-                     (save-excursion
-                       (goto-char (1+ dq-open))
-                       (search-forward "\"" (line-end-position) t)))))
-    (when (and dq-open dq-close
-               (< dq-open (point))
-               (>= dq-close (point)))
-      (if (eq direction -1)
-          (goto-char dq-open)
-        (goto-char dq-close))))
-  (when (or (null dialect) (equal dialect "mssql"))
-    (let* ((bracket-open (save-excursion
-                           (search-backward "[" (line-beginning-position) t)))
-           (bracket-close (when bracket-open
-                            (save-excursion
-                              (goto-char (1+ bracket-open))
-                              (search-forward "]" (line-end-position) t)))))
-      (when (and bracket-open bracket-close
-                 (< bracket-open (point))
-                 (>= bracket-close (point)))
-        (if (eq direction -1)
-            (goto-char bracket-open)
-          (goto-char bracket-close)))))
-  (when (or (null dialect) (equal dialect "mysql"))
-    (let* ((bt-open (save-excursion
-                      (search-backward "`" (line-beginning-position) t)))
-           (bt-close (when bt-open
+  (let ((styles (sql-datum--active-quote-styles dialect)))
+    ;; If point is inside a quoted region, jump to the boundary first so
+    ;; the main loop sees the quote character and handles the segment.
+    (dolist (s styles)
+      (let* ((open-str  (string (plist-get s :open)))
+             (close-str (string (plist-get s :close)))
+             (qopen (save-excursion
+                      (search-backward open-str (line-beginning-position) t)))
+             (qclose (when qopen
                        (save-excursion
-                         (goto-char (1+ bt-open))
-                         (search-forward "`" (line-end-position) t)))))
-      (when (and bt-open bt-close
-                 (< bt-open (point))
-                 (>= bt-close (point)))
-        (if (eq direction -1)
-            (goto-char bt-open)
-          (goto-char bt-close)))))
-  (let ((keep-going t))
-    (while keep-going
-      (setq keep-going nil)
-      (cond
-       ;; Double-quoted segment (ANSI — all dialects)
-       ((and (eq direction 1) (eq (char-after) ?\"))
-        (forward-char)
-        (search-forward "\"" nil t)
-        (setq keep-going (eq (char-after) ?.)))
-       ((and (eq direction -1) (eq (char-before) ?\"))
-        (let ((quote-pos (1- (point))))
-          (backward-char)
-          (let ((found (search-backward "\"" (line-beginning-position) t)))
-            (if (and found
-                     ;; Reject if another " exists between — means we
-                     ;; jumped past a different quoted identifier.
-                     (not (string-match-p "\""
-                            (buffer-substring-no-properties
-                             (1+ found) quote-pos))))
-                ;; Valid closed quote — point is at opening "
-                (setq keep-going (eq (char-before) ?.))
-              ;; No valid match — treat as unclosed opening quote
-              (goto-char quote-pos)
-              (setq keep-going (eq (char-before) ?.))))))
-       ;; Bracket-quoted segment (mssql only)
-       ((and (or (null dialect) (equal dialect "mssql"))
-             (eq direction 1) (eq (char-after) ?\[))
-        (forward-char)
-        (search-forward "]" nil t)
-        (setq keep-going (eq (char-after) ?.)))
-       ((and (or (null dialect) (equal dialect "mssql"))
-             (eq direction -1) (eq (char-before) ?\]))
-        (backward-char)
-        (search-backward "[" nil t)
-        (setq keep-going (eq (char-before) ?.)))
-       ;; Backtick-quoted segment (mysql only)
-       ((and (or (null dialect) (equal dialect "mysql"))
-             (eq direction 1) (eq (char-after) ?\`))
-        (forward-char)
-        (search-forward "`" nil t)
-        (setq keep-going (eq (char-after) ?.)))
-       ((and (or (null dialect) (equal dialect "mysql"))
-             (eq direction -1) (eq (char-before) ?\`))
-        (let ((quote-pos (1- (point))))
-          (backward-char)
-          (let ((found (search-backward "`" (line-beginning-position) t)))
-            (if (and found
-                     ;; Reject if another ` exists between — means we
-                     ;; jumped past a different quoted identifier.
-                     (not (string-match-p "`"
-                            (buffer-substring-no-properties
-                             (1+ found) quote-pos))))
-                ;; Valid closed backtick — point is at opening `
-                (setq keep-going (eq (char-before) ?.))
-              ;; No valid match — treat as unclosed opening backtick
-              (goto-char quote-pos)
-              (setq keep-going (eq (char-before) ?.))))))
-       ;; Bare identifier segment
-       (t
-        (if (eq direction 1)
-            (skip-chars-forward "a-zA-Z0-9_#@$")
-          (skip-chars-backward "a-zA-Z0-9_#@$"))
-        (setq keep-going
-              (if (eq direction 1)
-                  (eq (char-after) ?.)
-                (eq (char-before) ?.)))))
-      ;; Skip the dot to continue to the next segment
-      (when keep-going
-        (forward-char direction)))
-    (point)))
+                         (goto-char (1+ qopen))
+                         (search-forward close-str (line-end-position) t)))))
+        (when (and qopen qclose
+                   (< qopen (point))
+                   (>= qclose (point)))
+          (if (eq direction -1)
+              (goto-char qopen)
+            (goto-char qclose)))))
+    ;; Main scanning loop
+    (let ((keep-going t))
+      (while keep-going
+        (setq keep-going nil)
+        (let ((handled nil))
+          ;; Try each active quote style
+          (cl-loop
+           for s in styles
+           for open-ch  = (plist-get s :open)
+           for close-ch = (plist-get s :close)
+           for same-char = (eq open-ch close-ch)
+           do
+           (cond
+            ;; Forward into opening quote
+            ((and (not handled) (eq direction 1) (eq (char-after) open-ch))
+             (forward-char)
+             (search-forward (string close-ch) nil t)
+             (setq keep-going (eq (char-after) ?.))
+             (setq handled t))
+            ;; Backward from closing quote — same-char styles need
+            ;; the between-check to avoid jumping past other identifiers.
+            ((and (not handled) (eq direction -1) (eq (char-before) close-ch) same-char)
+             (let ((quote-pos (1- (point))))
+               (backward-char)
+               (let ((found (search-backward (string open-ch)
+                                             (line-beginning-position) t)))
+                 (if (and found
+                          (not (string-match-p
+                                (regexp-quote (string open-ch))
+                                (buffer-substring-no-properties
+                                 (1+ found) quote-pos))))
+                     (setq keep-going (eq (char-before) ?.))
+                   ;; No valid match — treat as unclosed opening quote
+                   (goto-char quote-pos)
+                   (setq keep-going (eq (char-before) ?.)))))
+             (setq handled t))
+            ;; Backward from closing quote — different-char styles (e.g. [])
+            ((and (not handled) (eq direction -1) (eq (char-before) close-ch) (not same-char))
+             (backward-char)
+             (search-backward (string open-ch) nil t)
+             (setq keep-going (eq (char-before) ?.))
+             (setq handled t))))
+          ;; Bare identifier segment
+          (unless handled
+            (if (eq direction 1)
+                (skip-chars-forward "a-zA-Z0-9_#@$")
+              (skip-chars-backward "a-zA-Z0-9_#@$"))
+            (setq keep-going
+                  (if (eq direction 1)
+                      (eq (char-after) ?.)
+                    (eq (char-before) ?.)))))
+        ;; Skip the dot to continue to the next segment
+        (when keep-going
+          (forward-char direction)))
+      (point))))
 
 (defun sql-datum--identifier-at-point-raw ()
   "Return the raw SQL identifier at point, preserving quoting.
@@ -1008,12 +973,11 @@ With no identifier at point, prompts for a name."
 
 (defun sql-datum--strip-leading-quotes (s &optional dialect)
   "Strip a leading quote character from S appropriate for DIALECT.
-Double-quote is always valid (ANSI).  Bracket is mssql-only.
-Backtick is mysql-only.  When DIALECT is nil, strip any known quote."
+When DIALECT is nil, strip any known quote."
   (if (and (> (length s) 0)
-           (or (eq (aref s 0) ?\")
-               (and (eq (aref s 0) ?\[) (or (null dialect) (equal dialect "mssql")))
-               (and (eq (aref s 0) ?\`) (or (null dialect) (equal dialect "mysql")))))
+           (cl-some (lambda (st)
+                      (eq (aref s 0) (plist-get st :open)))
+                    (sql-datum--active-quote-styles dialect)))
       (substring s 1)
     s))
 
