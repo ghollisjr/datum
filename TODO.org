@@ -1,5 +1,8 @@
 #+TITLE: Datum TODO
 
+* TODO Add backtick support for mysql/mariadb
+`` should act like [] for ms-sql and "" for ANSI SQL
+
 * DONE Qualified column autocomplete
 Implemented in =sql-datum.el=: typing =table.<TAB>= or =alias.<TAB>=
 offers =table.column= candidates with type annotations from

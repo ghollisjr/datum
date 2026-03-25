@@ -745,6 +745,47 @@ def _synthesize_create_table(schema, name, column_rows, dialect=None,
     return f"{preamble}CREATE TABLE {table_ref} (\n{cols}\n);"
 
 
+import re as _re
+
+_SQL_CLAUSE_RE = _re.compile(
+    r'\b(SELECT|FROM|WHERE|AND|OR|ORDER\s+BY|GROUP\s+BY|HAVING|'
+    r'LIMIT|UNION|INNER\s+JOIN|LEFT\s+JOIN|RIGHT\s+JOIN|'
+    r'CROSS\s+JOIN|FULL\s+JOIN|JOIN|ON|SET|VALUES|INTO)\b',
+    _re.IGNORECASE)
+
+
+def _format_single_line_sql(text):
+    """Format a single-line SQL definition for readability.
+
+    MySQL/MariaDB stores view definitions as one long line.  This breaks
+    before major SQL keywords and after top-level commas (respecting
+    parenthesis nesting so function arguments aren't split).
+    """
+    # First pass: break before major SQL keywords
+    parts = _SQL_CLAUSE_RE.split(text)
+    if len(parts) > 1:
+        result = parts[0]
+        for i in range(1, len(parts), 2):
+            keyword = parts[i]
+            rest = parts[i + 1] if i + 1 < len(parts) else ""
+            result += "\n" + keyword + rest
+        text = result
+
+    # Second pass: break after top-level commas (depth 0 parentheses)
+    # so SELECT column lists get one column per line.
+    out = []
+    depth = 0
+    for ch in text:
+        out.append(ch)
+        if ch == '(':
+            depth += 1
+        elif ch == ')':
+            depth = max(0, depth - 1)
+        elif ch == ',' and depth == 0:
+            out.append('\n       ')  # indent continuation lines
+    return ''.join(out)
+
+
 def refresh_db(args):
     """Built-in :refresh-db command — introspect a specific remote database.
 
@@ -1076,6 +1117,11 @@ def definition(args):
                 envelope.error(f":definition — no source found for {display_name}")
                 return
             text = str(row[0]).replace("\r\n", "\n").replace("\r", "\n")
+            # If the definition is a single long line (common with MySQL
+            # views), insert newlines before major SQL keywords for
+            # readability.  Skip this if the text already has newlines.
+            if "\n" not in text.strip():
+                text = _format_single_line_sql(text)
             text = text.rstrip().rstrip(";\n \t").rstrip() + ";"
             if effective_db:
                 text = f"-- Database: {effective_db}\n{text}"
