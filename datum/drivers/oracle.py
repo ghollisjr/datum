@@ -167,7 +167,7 @@ class OracleDriver(BaseDriver):
             ORDER BY column_id
         """, [table.upper()])
 
-    def sql_resolve_object_type(self, schema, name):
+    def sql_resolve_object_type(self, schema, name, database=None):
         owner = self._owner(schema)
         if owner:
             return ("""
@@ -188,7 +188,7 @@ class OracleDriver(BaseDriver):
                   AND ROWNUM = 1
             """, [name.upper()])
 
-    def sql_get_definition(self, schema, name, object_type):
+    def sql_get_definition(self, schema, name, object_type, database=None):
         owner = self._owner(schema)
         if object_type == 'TABLE':
             if owner:

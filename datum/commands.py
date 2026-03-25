@@ -741,7 +741,8 @@ def _synthesize_create_table(schema, name, column_rows, dialect=None,
 
     cols = ",\n".join(lines)
     preamble = f"-- Database: {database}\n" if database else ""
-    return f"{preamble}CREATE TABLE {_qi(schema)}.{_qi(name)} (\n{cols}\n);"
+    table_ref = f"{_qi(schema)}.{_qi(name)}" if schema else _qi(name)
+    return f"{preamble}CREATE TABLE {table_ref} (\n{cols}\n);"
 
 
 def refresh_db(args):
@@ -1031,8 +1032,9 @@ def definition(args):
         effective_db = database
         if not effective_db:
             try:
-                cursor.execute(_driver.sql_current_database)
-                db_row = cursor.fetchone()
+                db_cursor = connect.get_connection().cursor()
+                db_cursor.execute(_driver.sql_current_database)
+                db_row = db_cursor.fetchone()
                 if db_row:
                     effective_db = str(db_row[0])
             except Exception:
@@ -1048,8 +1050,12 @@ def definition(args):
             return
 
         object_type = str(row[0])
-        display_name = f"{database}.{schema}.{name}" if database \
-            else f"{schema}.{name}"
+        if database and schema:
+            display_name = f"{database}.{schema}.{name}"
+        elif schema:
+            display_name = f"{schema}.{name}"
+        else:
+            display_name = name
 
         # Fetch definition
         sql, params = _driver.sql_get_definition(schema, name, object_type,

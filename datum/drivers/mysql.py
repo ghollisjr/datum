@@ -160,7 +160,7 @@ class MySQLDriver(BaseDriver):
             ORDER BY ORDINAL_POSITION
         """, [schema, table])
 
-    def sql_resolve_object_type(self, schema, name):
+    def sql_resolve_object_type(self, schema, name, database=None):
         schema_clause = "TABLE_SCHEMA = DATABASE()" if schema is None else "TABLE_SCHEMA = ?"
         params = [name] if schema is None else [schema, name]
         schema_clause2 = "ROUTINE_SCHEMA = DATABASE()" if schema is None else "ROUTINE_SCHEMA = ?"
@@ -181,7 +181,7 @@ class MySQLDriver(BaseDriver):
             LIMIT 1
         """, params + params2)
 
-    def sql_get_definition(self, schema, name, object_type):
+    def sql_get_definition(self, schema, name, object_type, database=None):
         schema_clause = "TABLE_SCHEMA = DATABASE()" if schema is None else "TABLE_SCHEMA = ?"
         schema_params = [] if schema is None else [schema]
         if object_type == 'TABLE':

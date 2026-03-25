@@ -88,7 +88,7 @@ class SQLiteDriver(BaseDriver):
             ORDER BY cid
         """, [])
 
-    def sql_resolve_object_type(self, schema, name):
+    def sql_resolve_object_type(self, schema, name, database=None):
         return ("""
             SELECT CASE type
                        WHEN 'table' THEN 'TABLE'
@@ -100,7 +100,7 @@ class SQLiteDriver(BaseDriver):
             LIMIT 1
         """, [name])
 
-    def sql_get_definition(self, schema, name, object_type):
+    def sql_get_definition(self, schema, name, object_type, database=None):
         if object_type == 'TABLE':
             return (f"""
                 SELECT name AS column_name,

@@ -146,7 +146,7 @@ class PostgreSQLDriver(BaseDriver):
             ORDER BY n.nspname, p.proname
         """, [pattern])
 
-    def sql_resolve_object_type(self, schema, name):
+    def sql_resolve_object_type(self, schema, name, database=None):
         return ("""
             SELECT CASE
                        WHEN c.relkind = 'r' THEN 'TABLE'
@@ -172,7 +172,7 @@ class PostgreSQLDriver(BaseDriver):
             LIMIT 1
         """, [schema, name, schema, name])
 
-    def sql_get_definition(self, schema, name, object_type):
+    def sql_get_definition(self, schema, name, object_type, database=None):
         if object_type == 'TABLE':
             return ("""
                 SELECT column_name, data_type, is_nullable,
