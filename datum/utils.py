@@ -22,6 +22,7 @@ def split_identifier(raw):
     current = []
     in_dquote = False
     in_bracket = False
+    in_backtick = False
     for ch in raw:
         if in_dquote:
             if ch == '"':
@@ -33,10 +34,17 @@ def split_identifier(raw):
                 in_bracket = False
             else:
                 current.append(ch)
+        elif in_backtick:
+            if ch == '`':
+                in_backtick = False
+            else:
+                current.append(ch)
         elif ch == '"':
             in_dquote = True
         elif ch == '[':
             in_bracket = True
+        elif ch == '`':
+            in_backtick = True
         elif ch == '.':
             parts.append(''.join(current))
             current = []

@@ -17,10 +17,13 @@ _driver = None
 
 def _quote_name(name):
     """Quote a SQL identifier if it contains special characters.
-    Uses bracket quoting for MSSQL, double-quote quoting otherwise."""
+    Uses bracket quoting for MSSQL, backtick quoting for MySQL,
+    double-quote quoting otherwise."""
     if '.' in name or ' ' in name:
         if _driver and _driver.dialect_name == "mssql":
             return f"[{name}]"
+        if _driver and _driver.dialect_name == "mysql":
+            return f"`{name}`"
         return f'"{name}"'
     return name
 
@@ -85,10 +88,56 @@ def set_driver(driver):
     _driver = driver
 
 
+def _split_command_line(text):
+    """Split a command line respecting SQL identifier quoting.
+
+    Splits on whitespace but keeps quoted segments together:
+    double-quoted "...", bracket-quoted [...], and backtick-quoted `...`.
+    """
+    parts = []
+    current = []
+    in_dquote = False
+    in_bracket = False
+    in_backtick = False
+    for ch in text:
+        if in_dquote:
+            current.append(ch)
+            if ch == '"':
+                in_dquote = False
+        elif in_bracket:
+            current.append(ch)
+            if ch == ']':
+                in_bracket = False
+        elif in_backtick:
+            current.append(ch)
+            if ch == '`':
+                in_backtick = False
+        elif ch == '"':
+            in_dquote = True
+            current.append(ch)
+        elif ch == '[':
+            in_bracket = True
+            current.append(ch)
+        elif ch == '`':
+            in_backtick = True
+            current.append(ch)
+        elif ch in (' ', '\t'):
+            if current:
+                parts.append(''.join(current))
+                current = []
+        else:
+            current.append(ch)
+    if current:
+        parts.append(''.join(current))
+    return parts
+
+
 def handle(user_input):
     """Handle a datum command."""
     global _builtins
-    command_name, *args = user_input.strip().split(" ")
+    tokens = _split_command_line(user_input.strip())
+    command_name = tokens[0] if tokens else ""
+    args = tokens[1:]
     output_query = ""
     if command_name in _builtins:
         return _builtins[command_name](args)
