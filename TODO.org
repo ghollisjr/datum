@@ -1,7 +1,9 @@
 #+TITLE: Datum TODO
 
-* TODO Add backtick support for mysql/mariadb
-`` should act like [] for ms-sql and "" for ANSI SQL
+* DONE Add backtick support for mysql/mariadb
+`` acts like [] for ms-sql and "" for ANSI SQL.  Implemented across
+=sql-datum.el= (data-driven via =sql-datum--quote-styles=) and Python
+(=_QUOTE_PAIRS= in =utils.py=, =_QUOTE_CHARS= in =commands.py=).
 
 * DONE Qualified column autocomplete
 Implemented in =sql-datum.el=: typing =table.<TAB>= or =alias.<TAB>=
@@ -43,11 +45,34 @@ and list jobs accordingly.  If neither is present, skip gracefully.
 These functions provide the building blocks for scripting ETL workflows
 from Emacs Lisp (including =org-babel= source blocks).
 
+The command queue (=sql-datum--enqueue=, =sql-datum--enqueue-one=,
+=:done-fn= callbacks) is already in place and provides the correct
+foundation.  The blocking wait pattern used in
+=sql-datum--fetch-columns-sync= is the template for
+=datum-send-and-wait=.
+
 ** TODO =datum-send-and-wait=
 Send a command string to the datum process and block until completion.
 
-- Uses =accept-process-output= loop with a timeout (default 120s)
-- Detects completion via =info= or =error= envelope, or next prompt
+Implementation sketch: enqueue a transaction with a =:done-fn= that
+sets a flag, then wait on the flag using =accept-process-output=:
+
+#+begin_src elisp
+(defun datum-send-and-wait (cmd &optional timeout)
+  "Send CMD to datum and block until completion or TIMEOUT seconds."
+  (let ((done nil)
+        (deadline (+ (float-time) (or timeout 120)))
+        (buf (sql-find-sqli-buffer 'datum)))
+    (with-current-buffer buf
+      (sql-datum--enqueue-one cmd
+        :done-fn (lambda () (setq done t))))
+    (let ((proc (get-buffer-process buf)))
+      (while (and (not done) (< (float-time) deadline))
+        (accept-process-output proc 0.05)))
+    (unless done
+      (error "datum-send-and-wait: timed out after %ss" (or timeout 120)))))
+#+end_src
+
 - On =error= envelope, signals an Emacs error so callers can use
   =condition-case=
 - Non-blocking variant =datum-send-async= with callback for cases
@@ -59,7 +84,8 @@ Send a query, wait for the result, return the first cell as an Elisp
 object.
 
 - Requires a dedicated =##DATUM:scalar:...##= envelope emitted by
-  Python when a query returns exactly one row and one column
+  Python when a query returns exactly one row and one column — this
+  is the remaining work needed on the Python side
 - Type coercion: numeric strings to integers or floats, NULL to nil,
   otherwise string
 - Signals an error if query returns more than one row or column

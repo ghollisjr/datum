@@ -118,7 +118,19 @@ def _emit_current_db_and_user():
 
 
 def run_single(query=None, command=None, fmt="table"):
-    """Execute a single query or command and exit (non-interactive mode)."""
+    """Execute a single query or command and exit (non-interactive mode).
+
+    Envelopes are redirected to stderr (via envelope.set_mode('stderr'))
+    so that stdout contains only the query results.  This means dialect,
+    meta, and introspect envelopes are not available to Elisp callers in
+    this mode.  If envelope data is needed, use the interactive REPL mode
+    instead.
+
+    fmt: 'table' (default, human-readable), 'csv', or 'json'.
+    Note: --format=csv prints only the first resultset.  Use --format=json
+    to capture all resultsets from stored procedures or multi-statement
+    queries.
+    """
     # Redirect banner/status prints to stderr so stdout stays clean.
     _real_stdout = sys.stdout
     sys.stdout = sys.stderr
@@ -182,7 +194,12 @@ def _print_json(cursor):
 
 
 def _print_csv(cursor):
-    """Print first resultset as CSV to stdout."""
+    """Print only the first resultset as CSV to stdout.
+
+    Multi-resultset queries (stored procedures, multi-statement batches)
+    will only have their first resultset written.  Use --format=json to
+    capture all resultsets.
+    """
     if not cursor.description:
         return
     columns = [col[0] for col in cursor.description]

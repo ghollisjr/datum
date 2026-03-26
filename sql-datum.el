@@ -1395,59 +1395,50 @@ where blocking with `accept-process-output' would freeze Emacs."
       (bound-and-true-p company--manual-action)))
 
 (defun sql-datum--fetch-columns-sync (tables buf)
-  "Fetch columns for TABLES synchronously, waiting until all arrive or timeout.
-BUF is the SQLi process buffer.  Sends :columns TABLE :silent for each
-uncached table, then waits for process output until all columns are in
-the cache or `sql-datum-column-fetch-timeout' expires.
-Returns t if all columns are cached, nil if timed out."
+  "Fetch columns for TABLES, waiting until all arrive or timeout.
+Sends :columns TABLE :silent for each uncached table via the command
+queue, then polls with `accept-process-output' until all columns are
+cached or `sql-datum-column-fetch-timeout' expires."
   (let* ((proc (get-buffer-process buf))
          (col-hash (buffer-local-value 'sql-datum--columns buf))
-         (pending-hash (buffer-local-value 'sql-datum--columns-pending buf))
-         (needed nil))
-    ;; Cannot safely send direct commands while a queued transaction is in-flight.
-    (when (and proc col-hash pending-hash
-              (not (buffer-local-value 'sql-datum--queue-current buf)))
-      ;; Identify which tables need fetching.
-      (dolist (tbl tables)
-        (let ((key (downcase tbl)))
-          (unless (gethash key col-hash)
-            (push key needed)
-            ;; Send the command if not already in-flight.
-            (unless (gethash key pending-hash)
-              (sql-datum--trace "fetch-columns-sync: SENDING :columns %s :silent" tbl)
-              (with-current-buffer buf
-                (puthash key t pending-hash)
-                (setq sql-datum--ready nil)
-                (cl-incf sql-datum--suppress-prompt-count)
-                (comint-send-string proc (format ":columns %s :silent\n" tbl)))))))
-      (if (null needed)
-          t
-        ;; Wait for all columns to arrive.  Use a sentinel to detect
-        ;; empty responses (gethash returns nil for both "absent" and
-        ;; "mapped to nil").
-        (sql-datum--trace "fetch-columns-sync: waiting for %s" needed)
-        (let ((deadline (+ (float-time) sql-datum-column-fetch-timeout))
-              (sentinel (make-symbol "missing")))
-          (while (and needed (< (float-time) deadline))
-            (accept-process-output proc 0.05)
-            (setq needed (cl-remove-if
-                          (lambda (key)
-                            (not (eq (gethash key col-hash sentinel)
-                                     sentinel)))
-                          needed)))
-          ;; Clean up pending-hash for keys that arrived.
-          (dolist (tbl tables)
-            (let ((key (downcase tbl)))
-              (when (not (eq (gethash key col-hash sentinel) sentinel))
-                (remhash key pending-hash))))
-          (if needed
-              (progn
-                (sql-datum--trace "fetch-columns-sync: TIMEOUT waiting for %s" needed)
-                (message "datum: timed out waiting for column data for: %s"
-                         (mapconcat #'identity needed ", "))
-                nil)
-            (sql-datum--trace "fetch-columns-sync: all columns cached")
-            t))))))
+         (pending-hash (buffer-local-value 'sql-datum--columns-pending buf)))
+    (when (and proc col-hash pending-hash)
+      (let ((needed nil))
+        ;; Enqueue fetches for uncached tables via the normal queue path.
+        (dolist (tbl tables)
+          (let ((key (downcase tbl)))
+            (unless (gethash key col-hash)
+              (push key needed)
+              (unless (gethash key pending-hash)
+                (sql-datum--fetch-columns-send tbl key buf proc pending-hash)))))
+        (if (null needed)
+            t
+          ;; Pump the queue and wait.
+          (with-current-buffer buf (sql-datum--queue-pump))
+          (sql-datum--trace "fetch-columns-sync: waiting for %s" needed)
+          (let ((deadline (+ (float-time) sql-datum-column-fetch-timeout))
+                (sentinel (make-symbol "missing")))
+            (while (and needed (< (float-time) deadline))
+              (accept-process-output proc 0.05)
+              (setq needed (cl-remove-if
+                            (lambda (key)
+                              (not (eq (gethash key col-hash sentinel)
+                                       sentinel)))
+                            needed)))
+            (dolist (tbl tables)
+              (remhash (downcase tbl) pending-hash))
+            (if needed
+                (progn
+                  (sql-datum--trace "fetch-columns-sync: TIMEOUT waiting for %s" needed)
+                  ;; Suppress warning when queue is still busy — data will
+                  ;; arrive once the current transaction completes.
+                  (when (and (null (buffer-local-value 'sql-datum--queue-current buf))
+                             (null (buffer-local-value 'sql-datum--command-queue buf)))
+                    (message "datum: timed out waiting for column data for: %s"
+                             (mapconcat #'identity needed ", ")))
+                  nil)
+              (sql-datum--trace "fetch-columns-sync: all columns cached")
+              t)))))))
 
 (defun sql-datum--fetch-columns-send (table key buf proc pending-hash)
   "Send the :columns command for TABLE to PROC.

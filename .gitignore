@@ -1,5 +1,6 @@
 .emacs_backups/
 tests/
+dev/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
