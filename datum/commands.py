@@ -17,6 +17,28 @@ _driver = None
 
 _QUOTE_CHARS = {"mssql": ("[", "]"), "mysql": ("`", "`")}
 
+# ANSI SQL standard INFORMATION_SCHEMA views.
+# Injected into completion so they're always available regardless of dialect.
+_ANSI_INFORMATION_SCHEMA_VIEWS = [
+    "TABLES", "COLUMNS", "SCHEMATA", "VIEWS",
+    "ROUTINES", "PARAMETERS",
+    "TABLE_CONSTRAINTS", "KEY_COLUMN_USAGE",
+    "REFERENTIAL_CONSTRAINTS", "CHECK_CONSTRAINTS",
+    "DOMAINS", "DOMAIN_CONSTRAINTS",
+    "TABLE_PRIVILEGES", "COLUMN_PRIVILEGES", "USAGE_PRIVILEGES",
+    "CHARACTER_SETS", "COLLATIONS",
+    "COLUMN_DOMAIN_USAGE", "CONSTRAINT_TABLE_USAGE",
+    "CONSTRAINT_COLUMN_USAGE",
+]
+
+
+def _inject_ansi_objects(schema_items, table_items):
+    """Ensure information_schema and its views are in completion lists."""
+    if not any(s.lower() == "information_schema" for s in schema_items):
+        schema_items.append("information_schema")
+    for view in _ANSI_INFORMATION_SCHEMA_VIEWS:
+        table_items.append(f"information_schema.{view}")
+
 
 def _quote_name(name):
     """Quote a SQL identifier if it contains special characters.
@@ -452,6 +474,8 @@ def schemas(args):
         _run_introspect(sql, "schemas", "schemas", params)
     else:
         _run_introspect(_driver.sql_list_schemas, "schemas", "schemas")
+        # Inject ANSI information_schema into completion candidates.
+        envelope.introspect_append("schemas", ["information_schema"])
 
 
 def tables(args):
@@ -490,6 +514,9 @@ def tables(args):
                     items.append(qname)
             else:
                 items.append(qname)
+        # Inject ANSI standard INFORMATION_SCHEMA views.
+        schema_items = []
+        _inject_ansi_objects(schema_items, items)
         envelope.introspect("tables", sorted(set(items)))
     except Exception as err:
         print(f"Error running tables query: {err}")
@@ -946,8 +973,10 @@ def refresh_schemas(args):
         cursor = conn.cursor()
         cursor.execute(_driver.sql_list_schemas)
         rows = cursor.fetchall()
-        if rows:
-            envelope.introspect("schemas", [str(r[0]) for r in rows])
+        items = [str(r[0]) for r in rows] if rows else []
+        # Inject ANSI standard information_schema.
+        _inject_ansi_objects(items, [])
+        envelope.introspect("schemas", items)
     except Exception:
         pass
     return ""
@@ -961,9 +990,9 @@ def refresh_tables(args):
         cursor = conn.cursor()
         cursor.execute(_driver.sql_list_tables)
         rows = cursor.fetchall()
+        default_schema = _driver.default_schema
+        items = []
         if rows:
-            default_schema = _driver.default_schema
-            items = []
             for row in rows:
                 schema = str(row[0]) if len(row) > 2 else None
                 table_name = str(row[1]) if len(row) > 2 else str(row[0])
@@ -974,7 +1003,10 @@ def refresh_tables(args):
                         items.append(qname)
                 else:
                     items.append(qname)
-            envelope.introspect("tables", sorted(set(items)))
+        # Inject ANSI standard INFORMATION_SCHEMA views.
+        schema_items = []
+        _inject_ansi_objects(schema_items, items)
+        envelope.introspect("tables", sorted(set(items)))
     except Exception:
         pass
     return ""

@@ -113,6 +113,11 @@ def introspect(kind, items):
         _send(msg_type, f"{kind}:{json.dumps(batch)}")
 
 
+def introspect_append(kind, items):
+    """Append additional items to an already-sent introspect payload."""
+    _send("introspect+", f"{kind}:{json.dumps(items)}")
+
+
 def running_text(text):
     """Send pre-formatted running-queries output to Emacs.
 
