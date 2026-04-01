@@ -1,5 +1,9 @@
 #+TITLE: Datum TODO
 
+* TODO Fix table at point completion
+Looks like "test table" and public."test table" table at point
+completion is starting with information_schema candidates, fix this.
+
 * DONE Add backtick support for mysql/mariadb
 `` acts like [] for ms-sql and "" for ANSI SQL.  Implemented across
 =sql-datum.el= (data-driven via =sql-datum--quote-styles=) and Python

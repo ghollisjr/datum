@@ -161,9 +161,11 @@ Values are \"FUNCTION\" or \"PROCEDURE\".  Keys are always downcased
 for consistent lookup.  Populated by the routine-types introspect envelope.")
 
 (defvar-local sql-datum--xdb-cache (make-hash-table :test #'equal)
-  "Cross-database completion cache for MSSQL.
+  "Cross-database completion cache.
 Hash: database name -> plist with keys :tables :schemas :routines
-:routine-types :routine-sigs :pending.")
+:routine-types :routine-sigs :pending.
+Currently only populated for MSSQL cross-database lookups; same-database
+three-part names are synthesized from the main cache for all dialects.")
 
 (defvar-local sql-datum--ready nil
   "Non-nil when the Python process is idle and ready for a command.
@@ -1476,71 +1478,113 @@ Returns the tail of LIST whose car matches ELT, or nil."
       (setq list (cdr list)))
     result))
 
-(defun sql-datum--xdb-completion (prefix start end buf dbs xdb-cache)
-  "Handle cross-database completion for MSSQL.
+(defun sql-datum--xdb-completion (prefix start end buf dbs xdb-cache dialect)
+  "Handle database-qualified (three-part) name completion.
 PREFIX is the typed text, START/END delimit it.  BUF is the SQLi
 buffer.  DBS is the database list, XDB-CACHE the cross-db hash.
+DIALECT is the current SQL dialect string.
+For the current database, candidates are synthesized from the main
+cache (works for all dialects).  For a different database, only
+MSSQL is supported (async cross-db fetch).
 Returns a completion spec or nil if PREFIX is not a known database."
   (let* ((first-dot (string-match "\\." prefix))
          (db-part (and first-dot (substring prefix 0 first-dot)))
          ;; Use canonical (server-side) casing for the database name
          (db-match (and db-part
                         (car (sql-datum--member-ignore-case
-                              db-part dbs)))))
+                              db-part dbs))))
+         (current-db (and db-match buf
+                          (gethash "database"
+                                   (buffer-local-value 'sql-datum--meta buf)
+                                   ""))))
     (when db-match
-      ;; Fetch asynchronously if not cached yet
-      (unless (gethash db-match xdb-cache)
-        (sql-datum--xdb-fetch-async db-match buf xdb-cache nil))
-      (let ((entry (gethash db-match xdb-cache)))
-        ;; If still pending, tell the user to TAB again
-        (when (plist-get entry :pending)
-          (message "datum: fetching %s, TAB again shortly" db-match))
-        ;; Return a completion spec with a *dynamic* table that reads
-        ;; from xdb-cache on every query.  This is critical because
-        ;; Emacs caches the completion table returned by the capf —
-        ;; if we close over a snapshot of candidates taken while the
-        ;; fetch is still pending, the table stays empty forever.
-        (let ((db-key db-match)
-              (cache xdb-cache))
-          (list start end
-                (lambda (string pred action)
-                  (let* ((cur (gethash db-key cache))
-                         (tables   (plist-get cur :tables))
-                         (routines (plist-get cur :routines))
-                         (db-pfx   (concat db-key "."))
-                         (cands (let (filtered)
-                                  (dolist (c (append tables routines))
-                                    (when (string-prefix-p db-pfx c t)
-                                      (push c filtered)))
-                                  (nreverse filtered))))
-                    (funcall
-                     (sql-datum--make-completion-table cands)
-                     string pred action)))
-                :exclusive t
-                :annotation-function
-                (lambda (cand)
-                  (let* ((cur (gethash db-match xdb-cache))
-                         (tables   (plist-get cur :tables))
-                         (routines (plist-get cur :routines)))
-                    (cond ((member cand tables)   " [table]")
-                          ((member cand routines) " [routine]")
-                          (t ""))))
-                :exit-function
-                (lambda (cand status)
-                  (when (eq status 'finished)
-                    ;; MSSQL always uses brackets
-                    (sql-datum--maybe-quote-completed cand start "mssql")
-                    (let* ((cur (gethash db-match xdb-cache))
-                           (xrtypes (plist-get cur :routine-types))
-                           (xsigs   (plist-get cur :routine-sigs))
-                           (dc (downcase cand)))
-                      (when (and xrtypes
-                                 (equal (gethash dc xrtypes) "FUNCTION"))
-                        (insert "()")
-                        (backward-char)
-                        (when (and xsigs (gethash dc xsigs))
-                          (message "%s(%s)" cand
-                                   (gethash dc xsigs)))))))))))))
+      (if (string-equal-ignore-case db-match current-db)
+          ;; Same database: synthesize three-part candidates from main cache
+          (let* ((tables   (buffer-local-value 'sql-datum--tables buf))
+                 (routines (buffer-local-value 'sql-datum--routines buf))
+                 (db-pfx   (concat db-match "."))
+                 (all-cands (mapcar (lambda (c) (concat db-pfx c))
+                                    (append tables routines)))
+                 (cur-rtypes (buffer-local-value 'sql-datum--routine-types buf))
+                 (cur-sigs   (buffer-local-value 'sql-datum--routine-signatures buf))
+                 ;; Capture for closures
+                 (the-dialect dialect)
+                 (the-tables  (mapcar (lambda (c) (concat db-pfx c)) tables))
+                 (the-routines (mapcar (lambda (c) (concat db-pfx c)) routines)))
+            (list start end
+                  (sql-datum--make-completion-table all-cands)
+                  :exclusive t
+                  :annotation-function
+                  (lambda (cand)
+                    (cond ((member cand the-tables)   " [table]")
+                          ((member cand the-routines) " [routine]")
+                          (t "")))
+                  :exit-function
+                  (lambda (cand status)
+                    (when (eq status 'finished)
+                      (sql-datum--maybe-quote-completed cand start the-dialect)
+                      (let ((dc (downcase cand)))
+                        (when (and cur-rtypes
+                                   (equal (gethash dc cur-rtypes) "FUNCTION"))
+                          (insert "()")
+                          (backward-char)
+                          (when (and cur-sigs (gethash dc cur-sigs))
+                            (message "%s(%s)" cand
+                                     (gethash dc cur-sigs)))))))))
+        ;; Different database: only MSSQL supports cross-db fetch
+        (when (equal dialect "mssql")
+          ;; Fetch asynchronously if not cached yet
+          (unless (gethash db-match xdb-cache)
+            (sql-datum--xdb-fetch-async db-match buf xdb-cache nil))
+          (let ((entry (gethash db-match xdb-cache)))
+            ;; If still pending, tell the user to TAB again
+            (when (plist-get entry :pending)
+              (message "datum: fetching %s, TAB again shortly" db-match))
+            ;; Return a completion spec with a *dynamic* table that reads
+            ;; from xdb-cache on every query.  This is critical because
+            ;; Emacs caches the completion table returned by the capf —
+            ;; if we close over a snapshot of candidates taken while the
+            ;; fetch is still pending, the table stays empty forever.
+            (let ((db-key db-match)
+                  (cache xdb-cache))
+              (list start end
+                    (lambda (string pred action)
+                      (let* ((cur (gethash db-key cache))
+                             (tables   (plist-get cur :tables))
+                             (routines (plist-get cur :routines))
+                             (db-pfx   (concat db-key "."))
+                             (cands (let (filtered)
+                                      (dolist (c (append tables routines))
+                                        (when (string-prefix-p db-pfx c t)
+                                          (push c filtered)))
+                                      (nreverse filtered))))
+                        (funcall
+                         (sql-datum--make-completion-table cands)
+                         string pred action)))
+                    :exclusive t
+                    :annotation-function
+                    (lambda (cand)
+                      (let* ((cur (gethash db-match xdb-cache))
+                             (tables   (plist-get cur :tables))
+                             (routines (plist-get cur :routines)))
+                        (cond ((member cand tables)   " [table]")
+                              ((member cand routines) " [routine]")
+                              (t ""))))
+                    :exit-function
+                    (lambda (cand status)
+                      (when (eq status 'finished)
+                        (sql-datum--maybe-quote-completed cand start "mssql")
+                        (let* ((cur (gethash db-match xdb-cache))
+                               (xrtypes (plist-get cur :routine-types))
+                               (xsigs   (plist-get cur :routine-sigs))
+                               (dc (downcase cand)))
+                          (when (and xrtypes
+                                     (equal (gethash dc xrtypes) "FUNCTION"))
+                            (insert "()")
+                            (backward-char)
+                            (when (and xsigs (gethash dc xsigs))
+                              (message "%s(%s)" cand
+                                       (gethash dc xsigs)))))))))))))))
 
 
 (defun sql-datum-completion-at-point ()
@@ -1621,14 +1665,13 @@ Completing a FUNCTION name auto-inserts parentheses."
                (dialect (and buf (buffer-local-value 'sql-datum--dialect buf)))
                (dbs     (and buf (buffer-local-value 'sql-datum--databases buf)))
                (xdb-cache (and buf (buffer-local-value 'sql-datum--xdb-cache buf)))
-               ;; Check for cross-database prefix (mssql only).
+               ;; Check for database-qualified prefix (any dialect).
                ;; Use raw-prefix so trailing dots are preserved
                ;; (e.g. "CDW_NEW." keeps the dot for db-part extraction).
-               (xdb-result (when (and (equal dialect "mssql")
-                                      (string-match-p "\\." raw-prefix)
+               (xdb-result (when (and (string-match-p "\\." raw-prefix)
                                       dbs)
                              (sql-datum--xdb-completion
-                              raw-prefix start end buf dbs xdb-cache))))
+                              raw-prefix start end buf dbs xdb-cache dialect))))
           (or xdb-result
               ;; --- Qualified column completion (table.col or alias.col) ---
               ;; Only enter this path when the prefix ends with a dot
@@ -1740,7 +1783,6 @@ Completing a FUNCTION name auto-inserts parentheses."
                                                            cur-col-hash)
                                                   (delete-dups all))))
                                  (cur-dbs (and buf (buffer-local-value 'sql-datum--databases buf)))
-                                 (cur-dialect (and buf (buffer-local-value 'sql-datum--dialect buf)))
                                  (bare-tables (when ds-prefix
                                                 (let (result)
                                                   (dolist (tbl cur-tables)
@@ -1773,11 +1815,11 @@ Completing a FUNCTION name auto-inserts parentheses."
                                  (candidates (if ctx-columns
                                                  (append ctx-columns cur-tables bare-tables cur-schemas
                                                          cur-routines bare-routines
-                                                         (when (equal cur-dialect "mssql") cur-dbs))
+                                                         cur-dbs)
                                                (append cur-tables bare-tables cur-schemas
                                                        cur-routines bare-routines
                                                        effective-columns
-                                                       (when (equal cur-dialect "mssql") cur-dbs))))
+                                                       cur-dbs)))
                                  ;; Build hash sets for annotation
                                  (tables-set (sql-datum--make-hash-set
                                               (append cur-tables bare-tables)))
@@ -2562,13 +2604,11 @@ Also re-fetches any cross-database caches built during this session."
                   (let ((b (sql-find-sqli-buffer 'datum)))
                     (and b (get-buffer b)))))
          (xdb-cache (and buf (buffer-local-value
-                              'sql-datum--xdb-cache buf)))
-         (dialect (and buf (buffer-local-value
-                            'sql-datum--dialect buf))))
+                              'sql-datum--xdb-cache buf))))
     (when buf
       (sql-datum--refresh-async buf))
     ;; Re-fetch any previously introspected cross-databases
-    (when (and xdb-cache (equal dialect "mssql"))
+    (when xdb-cache
       (let ((dbs-to-refresh nil))
         (maphash (lambda (db _entry) (push db dbs-to-refresh))
                  xdb-cache)
