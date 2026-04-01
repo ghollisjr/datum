@@ -2309,19 +2309,25 @@ in the candidate list."
          (parts (and ident (split-string ident "\\." t)))
          (default
           (when (and ident all-tables)
-            (or (cl-find ident all-tables :test #'string-equal-ignore-case)
-                ;; Bare name may need the default schema prefix to match.
-                (let ((ds (and buf-obj (buffer-local-value
-                                        'sql-datum--default-schema buf-obj))))
-                  (when ds
-                    (cl-find (concat ds "." ident) all-tables
-                             :test #'string-equal-ignore-case)))
-                ;; 3-part name (db.schema.table) — try schema.table in current db.
-                (when (>= (length parts) 3)
-                  (let ((schema-table (mapconcat #'identity
-                                                 (last parts 2) ".")))
-                    (cl-find schema-table all-tables
-                             :test #'string-equal-ignore-case)))))))
+            ;; Compare unquoted forms so that an identifier like
+            ;; "test table" matches the candidate public."test table".
+            (cl-flet ((unquoted-equal
+                        (a b)
+                        (string-equal-ignore-case
+                         a (sql-datum--unquote-identifier b))))
+              (or (cl-find ident all-tables :test #'unquoted-equal)
+                  ;; Bare name may need the default schema prefix to match.
+                  (let ((ds (and buf-obj (buffer-local-value
+                                          'sql-datum--default-schema buf-obj))))
+                    (when ds
+                      (cl-find (concat ds "." ident) all-tables
+                               :test #'unquoted-equal)))
+                  ;; 3-part name (db.schema.table) — try schema.table in current db.
+                  (when (>= (length parts) 3)
+                    (let ((schema-table (mapconcat #'identity
+                                                   (last parts 2) ".")))
+                      (cl-find schema-table all-tables
+                               :test #'unquoted-equal))))))))
     (completing-read (if default
                          (format "%s(default %s) " prompt default)
                        prompt)
