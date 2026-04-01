@@ -232,9 +232,17 @@ class OracleDriver(BaseDriver):
 
     def sql_check_database(self, name):
         return ("""
-            SELECT SYS_CONTEXT('USERENV', 'DB_NAME') AS name
-            FROM DUAL
-            WHERE SYS_CONTEXT('USERENV', 'DB_NAME') = ?
+            SELECT d.NAME           AS name,
+                   d.DBID           AS dbid,
+                   d.CREATED        AS created,
+                   d.LOG_MODE       AS log_mode,
+                   d.OPEN_MODE      AS open_mode,
+                   d.PLATFORM_NAME  AS platform,
+                   p.VALUE          AS charset
+            FROM V$DATABASE d,
+                 NLS_DATABASE_PARAMETERS p
+            WHERE p.PARAMETER = 'NLS_CHARACTERSET'
+              AND d.NAME = ?
         """, [name.upper()])
 
     def sql_check_schema(self, name):

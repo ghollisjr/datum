@@ -204,13 +204,22 @@ class PostgreSQLDriver(BaseDriver):
 
     def sql_check_database(self, name):
         return ("""
-            SELECT datname AS name,
-                   pg_encoding_to_char(encoding) AS encoding,
-                   datcollate AS collation,
-                   datctype AS ctype,
-                   pg_database_size(datname) AS size_bytes
-            FROM pg_database
-            WHERE datname = ?
+            SELECT d.datname                          AS name,
+                   r.rolname                          AS owner,
+                   pg_encoding_to_char(d.encoding)    AS encoding,
+                   d.datcollate                       AS collation,
+                   d.datctype                         AS ctype,
+                   t.spcname                          AS tablespace,
+                   pg_database_size(d.datname)        AS size_bytes,
+                   pg_size_pretty(pg_database_size(d.datname)) AS size,
+                   d.datconnlimit                     AS connection_limit,
+                   d.datallowconn                     AS allow_connections,
+                   d.datistemplate                    AS is_template,
+                   age(d.datfrozenxid)                AS xid_age
+            FROM pg_database d
+            LEFT JOIN pg_roles r      ON d.datdba = r.oid
+            LEFT JOIN pg_tablespace t ON d.dattablespace = t.oid
+            WHERE d.datname = ?
         """, [name])
 
     def sql_check_schema(self, name):

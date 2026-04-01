@@ -274,15 +274,46 @@ class MSSQLDriver(BaseDriver):
 
     def sql_check_database(self, name):
         return ("""
-            SELECT name,
-                   database_id,
-                   create_date,
-                   compatibility_level,
-                   collation_name,
-                   state_desc,
-                   recovery_model_desc
-            FROM sys.databases
-            WHERE name = ?
+            SELECT d.name,
+                   d.database_id,
+                   d.create_date,
+                   SUSER_SNAME(d.owner_sid)            AS owner,
+                   d.compatibility_level,
+                   d.collation_name,
+                   d.state_desc                         AS state,
+                   d.recovery_model_desc                AS recovery_model,
+                   d.log_reuse_wait_desc                AS log_reuse_wait,
+                   d.is_auto_close_on,
+                   d.is_auto_shrink_on,
+                   d.is_read_only,
+                   d.snapshot_isolation_state_desc       AS snapshot_isolation,
+                   d.is_auto_create_stats_on,
+                   d.is_auto_update_stats_on,
+                   d.page_verify_option_desc             AS page_verify,
+                   df.data_file_name,
+                   df.data_file_path,
+                   df.data_size_mb,
+                   lf.log_file_name,
+                   lf.log_file_path,
+                   lf.log_size_mb
+            FROM sys.databases d
+            OUTER APPLY (
+                SELECT TOP 1 f.name AS data_file_name,
+                       f.physical_name AS data_file_path,
+                       CAST(f.size * 8.0 / 1024 AS DECIMAL(18,2)) AS data_size_mb
+                FROM sys.master_files f
+                WHERE f.database_id = d.database_id AND f.type = 0
+                ORDER BY f.file_id
+            ) df
+            OUTER APPLY (
+                SELECT TOP 1 f.name AS log_file_name,
+                       f.physical_name AS log_file_path,
+                       CAST(f.size * 8.0 / 1024 AS DECIMAL(18,2)) AS log_size_mb
+                FROM sys.master_files f
+                WHERE f.database_id = d.database_id AND f.type = 1
+                ORDER BY f.file_id
+            ) lf
+            WHERE d.name = ?
         """, [name])
 
     def sql_check_schema(self, name):

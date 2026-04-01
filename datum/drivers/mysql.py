@@ -215,12 +215,24 @@ class MySQLDriver(BaseDriver):
 
     def sql_check_database(self, name):
         return ("""
-            SELECT SCHEMA_NAME AS name,
-                   DEFAULT_CHARACTER_SET_NAME AS charset,
-                   DEFAULT_COLLATION_NAME AS collation
-            FROM information_schema.SCHEMATA
-            WHERE SCHEMA_NAME = ?
-        """, [name])
+            SELECT s.SCHEMA_NAME                       AS name,
+                   s.DEFAULT_CHARACTER_SET_NAME         AS charset,
+                   s.DEFAULT_COLLATION_NAME             AS collation,
+                   t.table_count,
+                   t.total_data_mb,
+                   t.total_index_mb
+            FROM information_schema.SCHEMATA s
+            LEFT JOIN (
+                SELECT TABLE_SCHEMA,
+                       COUNT(*)                                  AS table_count,
+                       ROUND(SUM(DATA_LENGTH) / 1048576, 2)     AS total_data_mb,
+                       ROUND(SUM(INDEX_LENGTH) / 1048576, 2)    AS total_index_mb
+                FROM information_schema.TABLES
+                WHERE TABLE_SCHEMA = ?
+                GROUP BY TABLE_SCHEMA
+            ) t ON t.TABLE_SCHEMA = s.SCHEMA_NAME
+            WHERE s.SCHEMA_NAME = ?
+        """, [name, name])
 
     def sql_check_schema(self, name):
         # MySQL: schema = database
