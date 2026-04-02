@@ -2846,8 +2846,8 @@ With prefix ARG, prompts for join type (LEFT, RIGHT, etc.)."
   (define-key sql-mode-map (kbd "C-c C-x C-s") #'sql-datum-scratch)
   (define-key sql-mode-map (kbd "C-c C-x d")   #'sql-datum-disconnect)
   (define-key sql-mode-map (kbd "C-c C-x C-d") #'sql-datum-disconnect)
-  ;; C-c s y: copy last result
-  (define-key sql-mode-map (kbd "C-c s y") #'sql-datum-copy-last-result)
+  ;; C-c s w: copy last result (w = kill-ring-save convention)
+  (define-key sql-mode-map (kbd "C-c s w") #'sql-datum-copy-last-result)
   ;; C-c i: query templates
   (define-key sql-mode-map (kbd "C-c i s") #'sql-datum-insert-select)
   (define-key sql-mode-map (kbd "C-c i d") #'sql-datum-insert-select-distinct)
