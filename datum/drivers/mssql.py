@@ -196,6 +196,21 @@ class MSSQLDriver(BaseDriver):
             ORDER BY s.name, o.name
         """, [pattern])
 
+    def sql_list_columns(self, schema, table, database=None):
+        if database:
+            db = self.quote_identifier(database)
+            return (f"""
+                SELECT COLUMN_NAME,
+                       DATA_TYPE,
+                       IS_NULLABLE,
+                       COLUMN_DEFAULT
+                FROM {db}.INFORMATION_SCHEMA.COLUMNS
+                WHERE TABLE_SCHEMA = ?
+                  AND TABLE_NAME   = ?
+                ORDER BY ORDINAL_POSITION
+            """, [schema, table])
+        return super().sql_list_columns(schema, table)
+
     def sql_resolve_object_type(self, schema, name, database=None):
         if database:
             db = self.quote_identifier(database)

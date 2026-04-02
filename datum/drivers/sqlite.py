@@ -78,7 +78,7 @@ class SQLiteDriver(BaseDriver):
             ORDER BY name
         """, [pattern])
 
-    def sql_list_columns(self, schema, table):
+    def sql_list_columns(self, schema, table, database=None):
         return (f"""
             SELECT name AS column_name,
                    type AS data_type,

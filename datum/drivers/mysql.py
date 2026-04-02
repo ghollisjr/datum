@@ -137,8 +137,11 @@ class MySQLDriver(BaseDriver):
             ORDER BY R.ROUTINE_NAME
         """
 
-    def sql_list_columns(self, schema, table):
-        if schema is None:
+    def sql_list_columns(self, schema, table, database=None):
+        # In MySQL, database and schema are synonymous.
+        # A three-part name db.schema.table uses db as the effective schema.
+        effective_schema = database or schema
+        if effective_schema is None:
             return ("""
                 SELECT COLUMN_NAME,
                        DATA_TYPE,
@@ -158,7 +161,7 @@ class MySQLDriver(BaseDriver):
             WHERE TABLE_SCHEMA = ?
               AND TABLE_NAME   = ?
             ORDER BY ORDINAL_POSITION
-        """, [schema, table])
+        """, [effective_schema, table])
 
     def sql_resolve_object_type(self, schema, name, database=None):
         schema_clause = "TABLE_SCHEMA = DATABASE()" if schema is None else "TABLE_SCHEMA = ?"

@@ -606,12 +606,16 @@ def columns(args):
         return
     table_name = filtered_args[0]
     parts = _split_identifier(table_name)
-    if len(parts) > 1:
+    database = None
+    if len(parts) >= 3:
+        database = parts[0]
+        schema = parts[1]
+    elif len(parts) == 2:
         schema = parts[0]
     else:
         schema = _driver.default_schema
     table = parts[-1]
-    sql, params = _driver.sql_list_columns(schema, table)
+    sql, params = _driver.sql_list_columns(schema, table, database=database)
     _run_introspect(sql, f"columns:{table_name}", f"columns for {table_name}",
                     params=params, silent=silent)
 

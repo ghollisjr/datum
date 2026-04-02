@@ -143,7 +143,7 @@ class OracleDriver(BaseDriver):
             return schema.upper()
         return None
 
-    def sql_list_columns(self, schema, table):
+    def sql_list_columns(self, schema, table, database=None):
         owner = self._owner(schema)
         if owner:
             return ("""
