@@ -54,7 +54,7 @@ directly.
 | =C-c s R= | List routines (=C-u= to filter with LIKE)  |
 | =C-c s v= | Server version                           |
 | =C-c s u= | Current user                             |
-| =C-c s y= | Copy last result to kill ring (org table)  |
+| =C-c s w= | Copy last result to kill ring (org table)  |
 | =C-c s f= | Refresh introspection (+ cross-db caches) |
 | =C-c s F= | Toggle periodic auto-refresh (=C-u N= for interval) |
 

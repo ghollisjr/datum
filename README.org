@@ -152,7 +152,7 @@ This means every result you see -- queries, =:tables=, =:columns=,
 directly into any =.org= document and they align with =TAB=
 immediately, no reformatting needed.
 
-Use =C-c s y= to copy the last result to the kill ring, ready to paste.
+Use =C-c s w= to copy the last result to the kill ring, ready to paste.
 
 * Built-in commands
 
@@ -458,7 +458,7 @@ dialect-aware: they use =TOP= / =NEWID()= / =OBJECT_ID()= on MSSQL and
 | =C-c s v= | =sql-datum-version=      | Show server version                                        |
 | =C-c s u= | =sql-datum-user=         | Show current user                                          |
 | =C-c s f= | =sql-datum-refresh=      | Refresh introspection data (including cross-db caches)     |
-| =C-c s y= | =sql-datum-copy-last-result= | Copy last result to kill ring (already org table format)    |
+| =C-c s w= | =sql-datum-copy-last-result= | Copy last result to kill ring (already org table format)    |
 | =C-c s F= | =sql-datum-toggle-auto-refresh= | Toggle periodic introspection refresh (=C-u N= for interval) |
 | =C-c u=   | =sql-datum-use-database= | Switch to a different database (reconnects for PostgreSQL) |
 | =C-c C-c= | =sql-datum-send-smart=   | Send region or paragraph (auto-connects if needed)         |

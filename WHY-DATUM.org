@@ -61,7 +61,7 @@ headers.
 Datum gives you a real REPL with history, completion, and immediate feedback,
 while still letting you use =sql-mode= buffers for more deliberate work.
 And because Datum outputs native org-mode tables, you get the best of both
-worlds: run queries interactively, then =C-c s y= to yank the result straight
+worlds: run queries interactively, then =C-c s w= to yank the result straight
 into your =.org= document -- already formatted, ready to align with =TAB=.
 
 ** Emacs sql.el (raw)
@@ -272,7 +272,7 @@ SELECT * FROM users LIMIT 10;;
   ...
 
 ;; Copy the result to paste into an .org document
-C-c s y  →  "datum: last result copied to kill ring"
+C-c s w  →  "datum: last result copied to kill ring"
 
 ;; Call a function -- TAB inserts parens, eldoc shows signature
 SELECT get_user_email TAB
