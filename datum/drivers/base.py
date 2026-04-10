@@ -118,8 +118,8 @@ class BaseDriver(ABC):
                    IS_NULLABLE,
                    COLUMN_DEFAULT
             FROM INFORMATION_SCHEMA.COLUMNS
-            WHERE TABLE_SCHEMA = ?
-              AND TABLE_NAME   = ?
+            WHERE LOWER(TABLE_SCHEMA) = LOWER(?)
+              AND LOWER(TABLE_NAME)   = LOWER(?)
             ORDER BY ORDINAL_POSITION
         """, [schema, table])
 

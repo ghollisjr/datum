@@ -149,7 +149,7 @@ class MySQLDriver(BaseDriver):
                        COLUMN_DEFAULT
                 FROM information_schema.COLUMNS
                 WHERE TABLE_SCHEMA = DATABASE()
-                  AND TABLE_NAME   = ?
+                  AND LOWER(TABLE_NAME) = LOWER(?)
                 ORDER BY ORDINAL_POSITION
             """, [table])
         return ("""
@@ -158,8 +158,8 @@ class MySQLDriver(BaseDriver):
                    IS_NULLABLE,
                    COLUMN_DEFAULT
             FROM information_schema.COLUMNS
-            WHERE TABLE_SCHEMA = ?
-              AND TABLE_NAME   = ?
+            WHERE LOWER(TABLE_SCHEMA) = LOWER(?)
+              AND LOWER(TABLE_NAME)   = LOWER(?)
             ORDER BY ORDINAL_POSITION
         """, [effective_schema, table])
 

@@ -1712,10 +1712,16 @@ Completing a FUNCTION name auto-inserts parentheses."
                   ;; Fetch columns for the resolved table (and prefetch
                   ;; others from aliases).  Only block during explicit
                   ;; completion (TAB) to avoid freezing on idle typing.
-                  (let ((all-tables (cons resolved
+                  ;; Clear the fetched guard for the target table so that
+                  ;; qualified column completion always gets a fresh attempt.
+                  (let ((fetched-hash (and buf (buffer-local-value
+                                                'sql-datum--columns-fetched buf)))
+                        (all-tables (cons resolved
                                          (cl-remove resolved
                                                     (mapcar #'cdr aliases)
                                                     :test #'string-equal-ignore-case))))
+                    (when fetched-hash
+                      (remhash resolved-key fetched-hash))
                     (if (sql-datum--explicit-completion-p)
                         (sql-datum--fetch-columns-sync all-tables buf)
                       (dolist (tbl all-tables)
@@ -1723,44 +1729,47 @@ Completing a FUNCTION name auto-inserts parentheses."
                          tbl buf col-hash
                          (buffer-local-value
                           'sql-datum--columns-pending buf)))))
+                  ;; Only return column completion when columns are
+                  ;; actually cached; otherwise fall through to normal
+                  ;; completion so the user still gets useful candidates.
                   (when (gethash resolved-key col-hash)
-                  (list start end
-                        (lambda (string pred action)
-                          (let* ((cur-col-hash (and buf (buffer-local-value
-                                                         'sql-datum--columns buf)))
-                                 (tbl-cols (when cur-col-hash
-                                             (gethash resolved-key cur-col-hash)))
-                                 (qualified (when tbl-cols
-                                              (mapcar (lambda (c)
-                                                        (concat tbl-part "." c))
-                                                      tbl-cols))))
-                            (funcall (completion-table-case-fold (or qualified '()))
-                                     string pred action)))
-                        :exclusive t
-                        :annotation-function
-                        (lambda (cand)
-                          (let* ((cur-details (and buf (buffer-local-value
-                                                        'sql-datum--column-details buf)))
-                                 (detail-rows (when cur-details
-                                                (gethash resolved-key cur-details)))
-                                 (col-name (and (string-match-p "\\." cand)
-                                                (car (last (split-string cand "\\.")))))
-                                 (dtype (when (and detail-rows col-name)
-                                          (cl-some
-                                           (lambda (row)
-                                             (when (and (consp row) (>= (length row) 2)
-                                                        (string-equal-ignore-case
-                                                         (nth 0 row) col-name))
-                                               (nth 1 row)))
-                                           detail-rows))))
-                            (if dtype
-                                (format " [column: %s]" dtype)
-                              " [column]")))
-                        :exit-function
-                        (lambda (cand status)
-                          (when (eq status 'finished)
-                            (sql-datum--maybe-quote-completed
-                             cand comp-start dialect)))))))
+                    (list start end
+                          (lambda (string pred action)
+                            (let* ((cur-col-hash (and buf (buffer-local-value
+                                                           'sql-datum--columns buf)))
+                                   (tbl-cols (when cur-col-hash
+                                               (gethash resolved-key cur-col-hash)))
+                                   (qualified (when tbl-cols
+                                                (mapcar (lambda (c)
+                                                          (concat tbl-part "." c))
+                                                        tbl-cols))))
+                              (funcall (completion-table-case-fold (or qualified '()))
+                                       string pred action)))
+                          :exclusive t
+                          :annotation-function
+                          (lambda (cand)
+                            (let* ((cur-details (and buf (buffer-local-value
+                                                          'sql-datum--column-details buf)))
+                                   (detail-rows (when cur-details
+                                                  (gethash resolved-key cur-details)))
+                                   (col-name (and (string-match-p "\\." cand)
+                                                  (car (last (split-string cand "\\.")))))
+                                   (dtype (when (and detail-rows col-name)
+                                            (cl-some
+                                             (lambda (row)
+                                               (when (and (consp row) (>= (length row) 2)
+                                                          (string-equal-ignore-case
+                                                           (nth 0 row) col-name))
+                                                 (nth 1 row)))
+                                             detail-rows))))
+                              (if dtype
+                                  (format " [column: %s]" dtype)
+                                " [column]")))
+                          :exit-function
+                          (lambda (cand status)
+                            (when (eq status 'finished)
+                              (sql-datum--maybe-quote-completed
+                               cand comp-start dialect)))))))
               ;; --- Normal identifier completion (fallback) ---
               ;; Returns a DYNAMIC completion table that re-reads live
               ;; state from the SQLi buffer on every query.  This is

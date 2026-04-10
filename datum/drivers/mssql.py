@@ -205,8 +205,8 @@ class MSSQLDriver(BaseDriver):
                        IS_NULLABLE,
                        COLUMN_DEFAULT
                 FROM {db}.INFORMATION_SCHEMA.COLUMNS
-                WHERE TABLE_SCHEMA = ?
-                  AND TABLE_NAME   = ?
+                WHERE LOWER(TABLE_SCHEMA) = LOWER(?)
+                  AND LOWER(TABLE_NAME)   = LOWER(?)
                 ORDER BY ORDINAL_POSITION
             """, [schema, table])
         return super().sql_list_columns(schema, table)
