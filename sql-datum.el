@@ -171,6 +171,11 @@ three-part names are synthesized from the main cache for all dialects.")
   "Non-nil when the Python process is idle and ready for a command.
 Set by the `ready' envelope, cleared when a command is sent.")
 
+(defvar-local sql-datum--columns-fetched (make-hash-table :test #'equal)
+  "Set of table keys (downcased) for which column fetching has been attempted.
+Prevents repeated fetch attempts for the same table across capf invocations.
+Cleared on `sql-datum-refresh'.")
+
 (defvar sql-datum--trace-enabled nil
   "When non-nil, log diagnostic messages to `*datum-trace*' buffer.")
 
@@ -393,6 +398,7 @@ Handles partial envelope lines split across multiple filter calls."
            (clrhash sql-datum--columns)
            (clrhash sql-datum--column-details)
            (clrhash sql-datum--columns-pending)
+           (clrhash sql-datum--columns-fetched)
            (clrhash sql-datum--routine-signatures)
            (clrhash sql-datum--routine-types)
            (sql-datum--refresh-async (current-buffer))))))
@@ -1365,20 +1371,23 @@ additional entry maps the alias to the table."
   "Fetch columns for TABLE silently in the background.
 BUF is the SQLi process buffer.  COL-HASH is `sql-datum--columns',
 PENDING-HASH is `sql-datum--columns-pending'.
-Skips if TABLE is already cached or already in-flight.
+Skips if TABLE is already cached, already in-flight, or already
+attempted (via `sql-datum--columns-fetched').
 
 Used for background prefetching (e.g. inside dynamic completion
 tables).  For completion-time fetches, prefer the synchronous
 `sql-datum--fetch-columns-sync' which blocks briefly with timeout."
   ;; All cache keys are downcased — normalize the lookup key.
-  (let ((key (downcase table)))
+  (let ((key (downcase table))
+        (fetched-hash (buffer-local-value 'sql-datum--columns-fetched buf)))
     (sql-datum--trace "fetch-columns-async: table=%s key=%s cached=%s pending=%s ready=%s"
                       table key
                       (if (gethash key col-hash) "yes" "no")
                       (gethash key pending-hash)
                       (buffer-local-value 'sql-datum--ready buf))
     (unless (or (gethash key col-hash)
-                (gethash key pending-hash))
+                (gethash key pending-hash)
+                (gethash key fetched-hash))
       (let ((proc (get-buffer-process buf)))
         (when proc
           ;; The queue handles ordering — just enqueue the fetch.
@@ -1400,17 +1409,23 @@ where blocking with `accept-process-output' would freeze Emacs."
   "Fetch columns for TABLES, waiting until all arrive or timeout.
 Sends :columns TABLE :silent for each uncached table via the command
 queue, then polls with `accept-process-output' until all columns are
-cached or `sql-datum-column-fetch-timeout' expires."
+cached or `sql-datum-column-fetch-timeout' expires.
+Tables already in `sql-datum--columns-fetched' are skipped to prevent
+repeated fetch attempts across capf invocations."
   (let* ((proc (get-buffer-process buf))
          (col-hash (buffer-local-value 'sql-datum--columns buf))
-         (pending-hash (buffer-local-value 'sql-datum--columns-pending buf)))
+         (pending-hash (buffer-local-value 'sql-datum--columns-pending buf))
+         (fetched-hash (buffer-local-value 'sql-datum--columns-fetched buf)))
     (when (and proc col-hash pending-hash)
       (let ((needed nil))
         ;; Enqueue fetches for uncached tables via the normal queue path.
+        ;; Skip tables we have already attempted (even if they timed out).
         (dolist (tbl tables)
           (let ((key (downcase tbl)))
-            (unless (gethash key col-hash)
+            (unless (or (gethash key col-hash)
+                        (gethash key fetched-hash))
               (push key needed)
+              (puthash key t fetched-hash)
               (unless (gethash key pending-hash)
                 (sql-datum--fetch-columns-send tbl key buf proc pending-hash)))))
         (if (null needed)
@@ -2612,7 +2627,10 @@ Also re-fetches any cross-database caches built during this session."
          (xdb-cache (and buf (buffer-local-value
                               'sql-datum--xdb-cache buf))))
     (when buf
-      (sql-datum--refresh-async buf))
+      (sql-datum--refresh-async buf)
+      ;; Clear column fetch tracking so new completions re-fetch
+      (with-current-buffer buf
+        (clrhash sql-datum--columns-fetched)))
     ;; Re-fetch any previously introspected cross-databases
     (when xdb-cache
       (let ((dbs-to-refresh nil))
