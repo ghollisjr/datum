@@ -143,11 +143,29 @@ def _polars_type_str(dtype):
     return "string"  # safe fallback
 
 
+def _infer_polars_string_col(series):
+    """Infer a type key from a polars String series by checking all non-null values."""
+    non_null = series.drop_nulls().to_list()
+    values = [v for v in non_null if v != '']
+    if not values:
+        return "string"
+    if all(_is_int(v) for v in values):
+        return "int64"
+    if all(_is_float(v) for v in values):
+        return "float64"
+    return "string"
+
+
 def _import_polars(path, table_name, table_exists, cursor, connection, driver, fmt,
                    batch_size=1000):
     """Import a file via polars. Returns row count."""
     if fmt == "csv":
-        df = pl.read_csv(path, infer_schema_length=1000)
+        # Read all columns as strings to avoid polars misinterpreting
+        # varchar fields that happen to contain mostly-numeric data
+        # (e.g. an MRN column with mostly-integer values but some
+        # alphanumeric entries).  Type inference for DDL is done
+        # separately below using the full dataset.
+        df = pl.read_csv(path, infer_schema_length=0)
     elif fmt == "parquet":
         df = pl.read_parquet(path)
     elif fmt == "json":
@@ -158,7 +176,12 @@ def _import_polars(path, table_name, table_exists, cursor, connection, driver, f
     if not table_exists:
         col_types = []
         for name in headers:
-            py_type = _polars_type_str(df[name].dtype)
+            if fmt == "csv":
+                # All columns are String from infer_schema_length=0;
+                # infer types from actual values across the full dataset.
+                py_type = _infer_polars_string_col(df[name])
+            else:
+                py_type = _polars_type_str(df[name].dtype)
             sql_type = driver.python_type_to_sql(py_type)
             col_types.append((name, sql_type))
         ddl = _build_ddl(table_name, col_types, driver)
