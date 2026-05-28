@@ -212,6 +212,12 @@ class MSSQLDriver(BaseDriver):
         return super().sql_list_columns(schema, table)
 
     def sql_resolve_object_type(self, schema, name, database=None):
+        # Temp tables live in tempdb; resolve via OBJECT_ID
+        if name.startswith('#'):
+            return ("""
+                SELECT 'TABLE' AS object_type
+                WHERE OBJECT_ID('tempdb..' + ?) IS NOT NULL
+            """, [name])
         if database:
             db = self.quote_identifier(database)
             return (f"""
@@ -246,6 +252,25 @@ class MSSQLDriver(BaseDriver):
         """, [schema, name])
 
     def sql_get_definition(self, schema, name, object_type, database=None):
+        # Temp tables: get columns from tempdb via OBJECT_ID
+        if name.startswith('#') and object_type == 'TABLE':
+            return ("""
+                SELECT c.name                       AS COLUMN_NAME,
+                       TYPE_NAME(c.user_type_id)     AS DATA_TYPE,
+                       CASE c.is_nullable
+                           WHEN 1 THEN 'YES' ELSE 'NO'
+                       END                           AS IS_NULLABLE,
+                       c.max_length                  AS CHARACTER_MAXIMUM_LENGTH,
+                       c.precision                   AS NUMERIC_PRECISION,
+                       c.scale                       AS NUMERIC_SCALE,
+                       d.definition                  AS COLUMN_DEFAULT
+                FROM tempdb.sys.columns c
+                LEFT JOIN tempdb.sys.default_constraints d
+                       ON d.parent_object_id = c.object_id
+                      AND d.parent_column_id = c.column_id
+                WHERE c.object_id = OBJECT_ID('tempdb..' + ?)
+                ORDER BY c.column_id
+            """, [name])
         if database:
             db = self.quote_identifier(database)
             if object_type == 'TABLE':
