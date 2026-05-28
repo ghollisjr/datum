@@ -331,10 +331,16 @@ Handles partial envelope lines split across multiple filter calls."
         (setq sql-datum--partial-line last-line)
         (setq lines (butlast lines))))
     (dolist (line lines)
-      (if (string-match sql-datum--envelope-re line)
-          (sql-datum--handle-envelope (match-string 1 line)
-                                      (match-string 2 line))
-        (push line clean-lines)))
+      (cond
+       ((string-match sql-datum--envelope-re line)
+        (sql-datum--handle-envelope (match-string 1 line)
+                                    (match-string 2 line)))
+       ;; Safety net: suppress any line containing envelope markers
+       ;; that the regex didn't fully match (e.g. corrupted/truncated).
+       ((string-match-p "##DATUM:" line)
+        (sql-datum--trace "preoutput-filter: suppressed unmatched envelope fragment: %s"
+                          (substring line 0 (min 80 (length line)))))
+       (t (push line clean-lines))))
     (let ((result (string-join (nreverse clean-lines) "\n")))
       ;; When silent commands are pending, suppress the prompt and any
       ;; echoed command text.  The pty echoes the command back (e.g.
@@ -1009,6 +1015,26 @@ When DIALECT is nil, strip any known quote."
     (dolist (x list) (puthash x t h))
     h))
 
+(defun sql-datum--last-unquoted-dot (name)
+  "Return the position of the last dot in NAME that is outside quotes.
+Returns nil if there is no unquoted dot."
+  (let ((i (1- (length name)))
+        (in-quote nil)
+        (result nil))
+    ;; Scan backwards looking for an unquoted dot.
+    (while (and (>= i 0) (not result))
+      (let ((ch (aref name i)))
+        (cond
+         (in-quote
+          (when (or (eq ch ?\") (eq ch ?\`) (eq ch ?\[))
+            (setq in-quote nil)))
+         ((or (eq ch ?\") (eq ch ?\`) (eq ch ?\]))
+          (setq in-quote t))
+         ((eq ch ?.)
+          (setq result i))))
+      (setq i (1- i)))
+    result))
+
 (defun sql-datum--unquote-identifier (name)
   "Unquote all segments of a dotted SQL identifier NAME.
 \"public.\\\"test table\\\"\" → \"public.test table\"."
@@ -1023,22 +1049,34 @@ Matches against the full name, or if PREFIX has no dot, also against
 the portion after the last dot (so \"Pat\" matches \"dbo.PatientDim\").
 When DS-PREFIX is non-nil, skip the after-dot fallback for candidates
 that start with DS-PREFIX — their bare forms are already in the list."
-  (let ((bare-prefix (sql-datum--unquote-identifier prefix))
-        (bare-candidate (sql-datum--unquote-identifier candidate)))
-    (or (string-prefix-p prefix candidate t)
-        (string-prefix-p bare-prefix bare-candidate t)
-        (and (not (string-match-p "\\." prefix))
-             (string-match-p "\\." candidate)
-             ;; Skip after-dot match when candidate is in the default
-             ;; schema — the bare form is already a separate candidate.
-             (not (and ds-prefix (string-prefix-p ds-prefix candidate t)))
-             (let ((after-dot (car (last (sql-datum--split-identifier
-                                          candidate)))))
-               (or (string-prefix-p prefix after-dot t)
-                   (string-prefix-p
-                    bare-prefix
-                    (sql-datum--unquote-part after-dot)
-                    t)))))))
+  ;; Fast path: plain string-prefix-p handles the common unquoted case.
+  (or (string-prefix-p prefix candidate t)
+      ;; After-dot match: "Pat" matches "dbo.PatientDim" via the
+      ;; portion after the last dot.  Use `string-search' (cheap) to
+      ;; find the last dot instead of full split-identifier parsing.
+      (and (not (string-match-p "\\." prefix))
+           (let ((dot-pos (sql-datum--last-unquoted-dot candidate)))
+             (and dot-pos
+                  ;; Skip default-schema candidates — bare forms are
+                  ;; already separate candidates in the list.
+                  (not (and ds-prefix (string-prefix-p ds-prefix candidate t)))
+                  (string-prefix-p prefix (substring candidate (1+ dot-pos)) t))))
+      ;; Slow path: only when quotes are present in prefix or candidate.
+      (let ((has-quotes (or (string-match-p "[\"\\[`]" prefix)
+                            (string-match-p "[\"\\[`]" candidate))))
+        (when has-quotes
+          (let ((bare-prefix (sql-datum--unquote-identifier prefix))
+                (bare-candidate (sql-datum--unquote-identifier candidate)))
+            (or (string-prefix-p bare-prefix bare-candidate t)
+                (and (not (string-match-p "\\." prefix))
+                     (string-match-p "\\." candidate)
+                     (not (and ds-prefix (string-prefix-p ds-prefix candidate t)))
+                     (let ((after-dot (car (last (sql-datum--split-identifier
+                                                  candidate)))))
+                       (string-prefix-p
+                        bare-prefix
+                        (sql-datum--unquote-part after-dot)
+                        t)))))))))
 
 (defun sql-datum--make-completion-table (candidates &optional sort-fn ds-prefix)
   "Build a completion table that also matches bare table name portions.
@@ -1065,9 +1103,12 @@ bare forms are already in CANDIDATES."
              (push c result)))
          (nreverse result)))
       ('nil  ;; try-completion
-       (let ((matches (funcall (sql-datum--make-completion-table
-                                candidates nil ds-prefix)
-                               string pred 't)))
+       (let ((matches (let (result)
+                        (dolist (c candidates)
+                          (when (and (sql-datum--completion-match-p string c ds-prefix)
+                                     (or (null pred) (funcall pred c)))
+                            (push c result)))
+                        (nreverse result))))
          (cond ((null matches) nil)
                ((= (length matches) 1)
                 (if (string= (sql-datum--strip-leading-quotes string)
@@ -1794,86 +1835,118 @@ Completing a FUNCTION name auto-inserts parentheses."
                   (when (and stmt-tables buf
                              (sql-datum--explicit-completion-p))
                     (sql-datum--fetch-columns-sync stmt-tables buf))
+                  ;; Cache state for the dynamic completion table.
+                  ;; These variables track the last-seen source lists
+                  ;; (by identity) so we only rebuild candidates and
+                  ;; hash sets when introspection data actually changes.
+                  (let ((cache--tables nil)
+                        (cache--schemas nil)
+                        (cache--routines nil)
+                        (cache--col-hash nil)
+                        (cache--col-count nil)
+                        (cache--dbs nil)
+                        (cache--comp-table nil))
                   (list start end
                         (lambda (string pred action)
+                          ;; Check if source data has changed (identity check).
+                          ;; Lists are replaced wholesale on refresh, so `eq'
+                          ;; detects staleness cheaply.
                           (let* ((cur-tables (and buf (buffer-local-value 'sql-datum--tables buf)))
                                  (cur-schemas (and buf (buffer-local-value 'sql-datum--schemas buf)))
                                  (cur-routines (and buf (buffer-local-value 'sql-datum--routines buf)))
                                  (cur-col-hash (and buf (buffer-local-value 'sql-datum--columns buf)))
-                                 (cur-columns (when cur-col-hash
-                                                (let (all)
-                                                  (maphash (lambda (_k v)
-                                                             (setq all (append v all)))
-                                                           cur-col-hash)
-                                                  (delete-dups all))))
+                                 (cur-col-count (when cur-col-hash (hash-table-count cur-col-hash)))
                                  (cur-dbs (and buf (buffer-local-value 'sql-datum--databases buf)))
-                                 (bare-tables (when ds-prefix
-                                                (let (result)
-                                                  (dolist (tbl cur-tables)
-                                                    (when (string-prefix-p ds-prefix tbl t)
-                                                      (push (substring tbl (length ds-prefix)) result)))
-                                                  (nreverse result))))
-                                 (bare-routines (when ds-prefix
-                                                  (let (result)
-                                                    (dolist (r cur-routines)
-                                                      (when (string-prefix-p ds-prefix r t)
-                                                        (push (substring r (length ds-prefix)) result)))
-                                                    (nreverse result))))
-                                 ;; Re-check for async-fetched columns on every call
-                                 (cur-pending (and buf (buffer-local-value
-                                                         'sql-datum--columns-pending buf)))
-                                 (ctx-columns
-                                  (when (and stmt-tables cur-col-hash)
-                                    (let (result)
-                                      (dolist (tbl stmt-tables)
-                                        (let ((cols (gethash (downcase tbl) cur-col-hash)))
-                                          (if cols
-                                              (setq result (append cols result))
-                                            ;; Re-trigger fetch in case earlier attempt
-                                            ;; couldn't proceed (prompt not ready yet)
-                                            (when (and buf cur-pending)
-                                              (sql-datum--fetch-columns-async
-                                               tbl buf cur-col-hash cur-pending)))))
-                                      (delete-dups result))))
-                                 (effective-columns (or ctx-columns cur-columns))
-                                 (candidates (if ctx-columns
-                                                 (append ctx-columns cur-tables bare-tables cur-schemas
-                                                         cur-routines bare-routines
-                                                         cur-dbs)
-                                               (append cur-tables bare-tables cur-schemas
-                                                       cur-routines bare-routines
-                                                       effective-columns
-                                                       cur-dbs)))
-                                 ;; Build hash sets for annotation
-                                 (tables-set (sql-datum--make-hash-set
-                                              (append cur-tables bare-tables)))
-                                 (schemas-set (sql-datum--make-hash-set cur-schemas))
-                                 (routines-set (sql-datum--make-hash-set
-                                                (append cur-routines bare-routines)))
-                                 (columns-set (sql-datum--make-hash-set effective-columns))
-                                 (ctx-col-set (when ctx-columns
-                                                (sql-datum--make-hash-set ctx-columns)))
-                                 (dbs-set (when cur-dbs
-                                            (sql-datum--make-hash-set cur-dbs)))
-                                 (sort-fn (when effective-columns
-                                            (lambda (completions)
-                                              (let (cols others)
-                                                (dolist (c completions)
-                                                  (if (gethash c columns-set)
-                                                      (push c cols)
-                                                    (push c others)))
-                                                (nconc (nreverse cols) (nreverse others)))))))
-                            ;; Store hash sets for the annotation function
-                            (puthash 'tables tables-set ann-state)
-                            (puthash 'schemas schemas-set ann-state)
-                            (puthash 'routines routines-set ann-state)
-                            (puthash 'columns columns-set ann-state)
-                            (puthash 'ctx-columns ctx-col-set ann-state)
-                            (puthash 'dbs dbs-set ann-state)
-                            ;; Delegate to standard completion table
-                            (funcall (sql-datum--make-completion-table
-                                      candidates sort-fn ds-prefix)
-                                     string pred action)))
+                                 (stale (or (not (eq cur-tables cache--tables))
+                                            (not (eq cur-schemas cache--schemas))
+                                            (not (eq cur-routines cache--routines))
+                                            (not (eq cur-col-hash cache--col-hash))
+                                            (not (eql cur-col-count cache--col-count))
+                                            (not (eq cur-dbs cache--dbs)))))
+                            (when stale
+                              ;; Update identity trackers
+                              (setq cache--tables cur-tables
+                                    cache--schemas cur-schemas
+                                    cache--routines cur-routines
+                                    cache--col-hash cur-col-hash
+                                    cache--col-count cur-col-count
+                                    cache--dbs cur-dbs)
+                              ;; Rebuild derived data
+                              (let* ((cur-columns (when cur-col-hash
+                                                    (let (all)
+                                                      (maphash (lambda (_k v)
+                                                                 (setq all (append v all)))
+                                                               cur-col-hash)
+                                                      (delete-dups all))))
+                                     (bare-tables (when ds-prefix
+                                                    (let (result)
+                                                      (dolist (tbl cur-tables)
+                                                        (when (string-prefix-p ds-prefix tbl t)
+                                                          (push (substring tbl (length ds-prefix)) result)))
+                                                      (nreverse result))))
+                                     (bare-routines (when ds-prefix
+                                                      (let (result)
+                                                        (dolist (r cur-routines)
+                                                          (when (string-prefix-p ds-prefix r t)
+                                                            (push (substring r (length ds-prefix)) result)))
+                                                        (nreverse result))))
+                                     ;; Re-check for async-fetched columns
+                                     (cur-pending (and buf (buffer-local-value
+                                                             'sql-datum--columns-pending buf)))
+                                     (ctx-columns
+                                      (when (and stmt-tables cur-col-hash)
+                                        (let (result)
+                                          (dolist (tbl stmt-tables)
+                                            (let ((cols (gethash (downcase tbl) cur-col-hash)))
+                                              (if cols
+                                                  (setq result (append cols result))
+                                                ;; Re-trigger fetch in case earlier attempt
+                                                ;; couldn't proceed (prompt not ready yet)
+                                                (when (and buf cur-pending)
+                                                  (sql-datum--fetch-columns-async
+                                                   tbl buf cur-col-hash cur-pending)))))
+                                          (delete-dups result))))
+                                     (effective-columns (or ctx-columns cur-columns))
+                                     (candidates (if ctx-columns
+                                                     (append ctx-columns cur-tables bare-tables cur-schemas
+                                                             cur-routines bare-routines
+                                                             cur-dbs)
+                                                   (append cur-tables bare-tables cur-schemas
+                                                           cur-routines bare-routines
+                                                           effective-columns
+                                                           cur-dbs)))
+                                     ;; Build hash sets for annotation
+                                     (tables-set (sql-datum--make-hash-set
+                                                  (append cur-tables bare-tables)))
+                                     (schemas-set (sql-datum--make-hash-set cur-schemas))
+                                     (routines-set (sql-datum--make-hash-set
+                                                    (append cur-routines bare-routines)))
+                                     (columns-set (sql-datum--make-hash-set effective-columns))
+                                     (ctx-col-set (when ctx-columns
+                                                    (sql-datum--make-hash-set ctx-columns)))
+                                     (dbs-set (when cur-dbs
+                                                (sql-datum--make-hash-set cur-dbs)))
+                                     (sort-fn (when effective-columns
+                                                (lambda (completions)
+                                                  (let (cols others)
+                                                    (dolist (c completions)
+                                                      (if (gethash c columns-set)
+                                                          (push c cols)
+                                                        (push c others)))
+                                                    (nconc (nreverse cols) (nreverse others)))))))
+                                ;; Store hash sets for the annotation function
+                                (puthash 'tables tables-set ann-state)
+                                (puthash 'schemas schemas-set ann-state)
+                                (puthash 'routines routines-set ann-state)
+                                (puthash 'columns columns-set ann-state)
+                                (puthash 'ctx-columns ctx-col-set ann-state)
+                                (puthash 'dbs dbs-set ann-state)
+                                ;; Cache the built completion table
+                                (setq cache--comp-table (sql-datum--make-completion-table
+                                                         candidates sort-fn ds-prefix))))
+                            ;; Delegate to cached completion table
+                            (when cache--comp-table
+                              (funcall cache--comp-table string pred action))))
                         :exclusive t
                         :annotation-function
                         (lambda (cand)
@@ -1909,7 +1982,7 @@ Completing a FUNCTION name auto-inserts parentheses."
                                 (insert "()")
                                 (backward-char)
                                 (when-let ((msg (sql-datum-eldoc-function)))
-                                  (message "%s" msg))))))))))))))))
+                                  (message "%s" msg)))))))))))))))))
 
 
 ;;; ---------------------------------------------------------------------------

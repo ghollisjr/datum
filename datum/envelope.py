@@ -68,7 +68,7 @@ def result_file(path, fmt):
     _send("result-file", f"{path}:{fmt}")
 
 
-_CHUNK_MAX = 4000  # max chars per envelope line (conservative for comint)
+_CHUNK_MAX = 2000  # max JSON chars per envelope line (conservative for comint)
 
 
 def introspect(kind, items):
