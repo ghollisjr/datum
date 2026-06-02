@@ -2077,7 +2077,11 @@ for the `comint' buffer."
   ;; Datum connects asynchronously via a background pyodbc call, so
   ;; sql.el's login delay is unnecessary and causes a visible freeze.
   ;; Bind it to 0 here so other SQL products are unaffected.
-  (let ((sql-login-delay 0))
+  (let ((sql-login-delay 0)
+        ;; Capture and reset per-connection env so it doesn't leak
+        ;; to subsequent connections that don't set it.
+        (conn-environment sql-datum-environment))
+    (setq sql-datum-environment nil)
     (let ((parameters (append options
                               (unless (string-empty-p sql-server)
                                 (list "--server" sql-server))
@@ -2101,10 +2105,10 @@ for the `comint' buffer."
       ;; Inject per-connection environment variables (e.g. KRB5CCNAME)
       ;; by let-binding process-environment around the subprocess launch.
       (let ((process-environment
-             (if sql-datum-environment
+             (if conn-environment
                  (append (mapcar (lambda (pair)
                                    (format "%s=%s" (car pair) (cdr pair)))
-                                 sql-datum-environment)
+                                 conn-environment)
                          process-environment)
                process-environment)))
         (sql-comint product parameters buf-name))
