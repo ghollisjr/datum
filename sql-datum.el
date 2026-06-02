@@ -103,6 +103,14 @@ for MySQL, square brackets for MSSQL."
   :type 'boolean
   :group 'SQL)
 
+(defvar sql-datum-environment nil
+  "Per-connection environment variables for the datum subprocess.
+An alist of (VARIABLE . VALUE) pairs to set in the process
+environment when launching datum.  Set this per-connection in
+`sql-connection-alist' to control things like Kerberos tickets:
+
+  (sql-datum-environment ((\"KRB5CCNAME\" . \"/tmp/krb5cc_prod\")))")
+
 (defvar sql-datum--refresh-timer nil
   "Timer for periodic introspection refresh.")
 
@@ -2090,7 +2098,16 @@ for the `comint' buffer."
                             (list "--pass"
                                   (format "ENV=%s" sql-datum-password-variable)))
                         (list "--pass" password)))))
-      (sql-comint product parameters buf-name)
+      ;; Inject per-connection environment variables (e.g. KRB5CCNAME)
+      ;; by let-binding process-environment around the subprocess launch.
+      (let ((process-environment
+             (if sql-datum-environment
+                 (append (mapcar (lambda (pair)
+                                   (format "%s=%s" (car pair) (cdr pair)))
+                                 sql-datum-environment)
+                         process-environment)
+               process-environment)))
+        (sql-comint product parameters buf-name))
       (when sql-datum-password-variable
         (setenv sql-datum-password-variable))
       (sql-datum--setup-buffer (get-buffer (or buf-name "*SQL*"))))))
