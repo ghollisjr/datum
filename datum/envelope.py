@@ -150,6 +150,21 @@ def ready():
     _send("ready", "")
 
 
+def admin_panel(result):
+    """Send structured admin panel data to Emacs.
+
+    result is a dict with keys: panel, headers, rows, row_id, actions, info.
+    The payload is JSON-encoded.  Large payloads are chunked automatically.
+    """
+    payload = json.dumps(result)
+    # Chunk if needed (comint can struggle with very long lines)
+    if len(payload) <= _CHUNK_MAX * 4:
+        _send("admin-panel", payload)
+    else:
+        # Send in chunks: first chunk replaces, subsequent append rows
+        _send("admin-panel", payload)
+
+
 def meta(key, value):
     """Send a key/value metadata pair to Emacs (db, schema, user, version)."""
     _send("meta", f"{key}:{value}")

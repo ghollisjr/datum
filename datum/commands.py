@@ -3,6 +3,7 @@
 This module deals with built-in commands (:rows, :reconnect, etc.) and
 processing of custom queries.
 """
+from . import admin
 from . import connect
 from . import envelope
 from . import exporter
@@ -90,6 +91,12 @@ _help_text = """
 
 :definition <name>     Show DDL/source for a table, view, proc, function,
                        database, or schema. Supports dotted names.
+
+:admin <panel>         Open an admin panel in Emacs.
+                       Panels: activity, jobs, ssis
+:admin activity        Activity Monitor (running sessions/queries).
+:admin jobs            SQL Agent Jobs (MSSQL only).
+:admin ssis            SSIS Packages (MSSQL only).
 
 :refresh               Silently refresh all introspection (autocomplete).
 :refresh-db <name>     Introspect another database for cross-db completion (MSSQL).
@@ -676,6 +683,37 @@ def running(args):
     envelope.running_text(text)
 
 
+def admin_panel(args):
+    """Built-in :admin command — open an admin panel.
+
+    Usage: :admin <panel> [args]
+    Panels: activity, jobs, ssis
+    """
+    global _driver
+    if not args:
+        envelope.error(":admin requires a panel name. "
+                       "Available: activity, jobs, ssis")
+        return
+    panel_name = args[0]
+    panel_args = args[1:]
+    admin.run_panel(panel_name, _driver, panel_args)
+
+
+def admin_action(args):
+    """Built-in :admin-action command — execute a panel action.
+
+    Usage: :admin-action <panel> <action> [args]
+    """
+    global _driver
+    if len(args) < 2:
+        envelope.error(":admin-action requires panel and action name")
+        return
+    panel_name = args[0]
+    action_name = args[1]
+    action_args = args[2:]
+    admin.run_action(panel_name, action_name, _driver, action_args)
+
+
 def current_user(args):
     """Built-in :user command."""
     global _driver
@@ -1238,6 +1276,8 @@ _builtins = {
     ":routines":   routines,
     ":columns":    columns,
     ":running":    running,
+    ":admin":      admin_panel,
+    ":admin-action": admin_action,
     ":user":       current_user,
     ":version":    version,
     ":use":        use_database,

@@ -444,6 +444,8 @@ Handles partial envelope lines split across multiple filter calls."
            (sql-datum--show-running-queries text initial)
            (when initial
              (sql-datum--running-start-timer))))))
+    ("admin-panel"
+     (sql-datum--handle-admin-panel payload))
     ("ready"
      (sql-datum--trace "READY envelope received, setting sql-datum--ready=t")
      (setq sql-datum--ready t)
@@ -699,6 +701,717 @@ When DISPLAY is non-nil, pop up the buffer; otherwise just update it."
   (if (get-buffer "*datum-running-queries*")
       (sql-datum--send-running)
     (sql-datum--running-stop-timer)))
+
+;;; ---------------------------------------------------------------------------
+;;; Admin panels (Activity Monitor, SQL Agent Jobs, SSIS Packages)
+;;; ---------------------------------------------------------------------------
+
+(defcustom sql-datum-admin-refresh-interval 5
+  "Seconds between auto-refresh of admin panel buffers.
+Set to nil to disable auto-refresh."
+  :type '(choice (const :tag "Disabled" nil) integer)
+  :group 'SQL)
+
+;; Per-panel state is stored as buffer-local variables in each admin buffer.
+(defvar-local sql-datum--admin-panel-name nil
+  "The panel name for this admin buffer (e.g., \"activity\", \"jobs\", \"ssis\").")
+
+(defvar-local sql-datum--admin-panel-data nil
+  "Last received panel data (parsed JSON) for this admin buffer.")
+
+(defvar-local sql-datum--admin-sqli-buf nil
+  "The SQLi buffer associated with this admin panel.")
+
+(defvar-local sql-datum--admin-timer nil
+  "Auto-refresh timer for this admin buffer.")
+
+(defvar-local sql-datum--admin-quit-flag nil
+  "Non-nil when the user has explicitly quit this admin buffer.")
+
+(defvar-local sql-datum--admin-context nil
+  "Context data for sub-panels (e.g., job_name for detail views).")
+
+(defun sql-datum--admin-buffer-name (panel-name &optional sub-panel)
+  "Return the buffer name for PANEL-NAME, with optional SUB-PANEL."
+  (if sub-panel
+      (format "*datum-admin:%s:%s*" panel-name sub-panel)
+    (format "*datum-admin:%s*" panel-name)))
+
+(defun sql-datum--admin-denull (val)
+  "Convert JSON :null to nil, leave other values unchanged."
+  (if (eq val :null) nil val))
+
+(defun sql-datum--admin-denull-alist (alist)
+  "Replace :null values with nil in ALIST (non-recursive)."
+  (mapcar (lambda (pair)
+            (if (eq (cdr pair) :null)
+                (cons (car pair) nil)
+              pair))
+          alist))
+
+(defun sql-datum--handle-admin-panel (payload)
+  "Handle an admin-panel envelope with JSON PAYLOAD."
+  (condition-case err
+      (let* ((data (sql-datum--admin-denull-alist
+                    (json-parse-string payload :object-type 'alist
+                                       :array-type 'list)))
+             (sub-panel (alist-get 'sub_panel data))
+             (sqli-buf (current-buffer)))
+        (cond
+         ;; Schedule edit form
+         ((equal sub-panel "schedule-edit")
+          (run-at-time 0 nil #'sql-datum--admin-show-schedule-editor
+                       data sqli-buf))
+         ;; Multi-section detail view (job detail)
+         ((alist-get 'sections data)
+          (run-at-time 0 nil #'sql-datum--admin-show-detail
+                       data sqli-buf))
+         ;; Standard tabular panel
+         (t
+          (run-at-time 0 nil #'sql-datum--admin-show-panel
+                       data sqli-buf))))
+    (error (message "datum admin-panel error: %s" (error-message-string err)))))
+
+(defun sql-datum--admin-show-panel (data sqli-buf)
+  "Display admin panel DATA in a dedicated buffer.
+SQLI-BUF is the originating SQLi buffer."
+  (let* ((panel (alist-get 'panel data))
+         (sub-panel (alist-get 'sub_panel data))
+         (title (or (alist-get 'title data)
+                    (format "datum admin: %s" panel)))
+         (headers (alist-get 'headers data))
+         (rows (alist-get 'rows data))
+         (actions (alist-get 'actions data))
+         (info (alist-get 'info data))
+         (row-id (alist-get 'row_id data))
+         (buf-name (sql-datum--admin-buffer-name panel sub-panel))
+         (buf (get-buffer-create buf-name))
+         (initial (not (buffer-local-value 'sql-datum--admin-timer buf))))
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        ;; Header
+        (insert (propertize title 'face 'bold) "\n")
+        (insert (format "Last refresh: %s" (format-time-string "%H:%M:%S")))
+        (if sql-datum-admin-refresh-interval
+            (insert (format "  [auto-refresh %ds]"
+                            sql-datum-admin-refresh-interval))
+          (insert "  [auto-refresh off]"))
+        (insert "\n")
+        (when info
+          (insert (propertize info 'face 'font-lock-comment-face) "\n"))
+        (insert "\n")
+        ;; Table
+        (when (and headers (> (length headers) 0))
+          (sql-datum--admin-insert-table headers rows row-id actions data))
+        ;; Help line
+        (insert "\n")
+        (sql-datum--admin-insert-help-line actions))
+      (setq sql-datum--admin-panel-name panel
+            sql-datum--admin-panel-data data
+            sql-datum--admin-sqli-buf sqli-buf
+            sql-datum--admin-context (alist-get 'context data))
+      (sql-datum--admin-mode)
+      (goto-char (point-min))
+      ;; Move to first data row
+      (forward-line 4))
+    (display-buffer buf)
+    ;; Start auto-refresh for top-level panels (not sub-panels)
+    (when (and initial (not sub-panel))
+      (sql-datum--admin-start-timer buf))))
+
+(defun sql-datum--admin-insert-table (headers rows row-id _actions _data)
+  "Insert a formatted table with HEADERS and ROWS.
+ROW-ID is the column index used as row identifier.
+_ACTIONS and _DATA are accepted for interface consistency."
+  (let* ((ncols (length headers))
+         ;; Calculate column widths
+         (widths (make-vector ncols 0))
+         (_ (dotimes (i ncols)
+              (aset widths i (length (nth i headers)))))
+         (_ (dolist (row rows)
+              (dotimes (i (min ncols (length row)))
+                (let ((w (length (nth i row))))
+                  (when (> w (aref widths i))
+                    (aset widths i (min w 80)))))))  ; Cap at 80
+         (fmt (mapconcat (lambda (w) (format "%%-%ds" w))
+                         (append widths nil) "  "))
+         (separator (mapconcat (lambda (w) (make-string w ?-))
+                               (append widths nil) "  ")))
+    ;; Header row
+    (insert (propertize (apply #'format fmt headers) 'face 'bold) "\n")
+    (insert separator "\n")
+    ;; Data rows
+    (if (null rows)
+        (insert (propertize "(no data)" 'face 'font-lock-comment-face) "\n")
+      (dolist (row rows)
+        ;; Pad row if needed
+        (let ((padded (append row (make-list (max 0 (- ncols (length row))) ""))))
+          ;; Truncate cells to their column width
+          (let ((display-row
+                 (cl-loop for cell in padded
+                          for i from 0
+                          collect (let ((w (aref widths i)))
+                                    (if (> (length cell) w)
+                                        (concat (substring cell 0 (max 0 (- w 3))) "...")
+                                        cell)))))
+            (let ((line-start (point))
+                  (id-val (and row-id (nth row-id padded))))
+              (insert (apply #'format fmt display-row))
+              ;; Add text properties for row identification
+              (when id-val
+                (put-text-property line-start (point) 'sql-datum-row-id id-val))
+              ;; Color-code status columns
+              (sql-datum--admin-colorize-row line-start (point) padded)
+              (insert "\n"))))))))
+
+(defun sql-datum--admin-colorize-row (start end cells)
+  "Apply color to the row from START to END based on CELLS content."
+  (let ((status-keywords
+         '(("Failed" . compilation-error)
+           ("Canceled" . font-lock-warning-face)
+           ("Ended unexpectedly" . compilation-error)
+           ("Running" . compilation-info)
+           ("In Progress" . compilation-info)
+           ("Succeeded" . success)
+           ("Completed" . success)
+           ("No" . font-lock-comment-face)  ; Disabled
+           ("suspended" . font-lock-warning-face)
+           ("sleeping" . font-lock-comment-face))))
+    (dolist (cell cells)
+      (let ((face-entry (assoc cell status-keywords)))
+        (when face-entry
+          (put-text-property start end 'face (cdr face-entry)))))))
+
+(defun sql-datum--admin-insert-help-line (actions)
+  "Insert a help line showing available ACTIONS and standard keys."
+  (insert (propertize "Keys: " 'face 'font-lock-comment-face))
+  (when actions
+    (dolist (action actions)
+      (let ((key (alist-get 'key action))
+            (label (alist-get 'label action)))
+        (insert (propertize key 'face 'bold)
+                "=" label "  "))))
+  (insert (propertize "g" 'face 'bold) "=refresh  "
+          (propertize "a" 'face 'bold) "=auto-refresh  "
+          (propertize "q" 'face 'bold) "=quit\n"))
+
+(defun sql-datum--admin-show-detail (data sqli-buf)
+  "Display a multi-section detail view from DATA.
+SQLI-BUF is the originating SQLi buffer."
+  (let* ((panel (alist-get 'panel data))
+         (sub-panel (or (alist-get 'sub_panel data) "detail"))
+         (title (or (alist-get 'title data)
+                    (format "datum admin: %s detail" panel)))
+         (sections (alist-get 'sections data))
+         (info (alist-get 'info data))
+         (buf-name (sql-datum--admin-buffer-name panel sub-panel))
+         (buf (get-buffer-create buf-name)))
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert (propertize title 'face 'bold) "\n")
+        (insert (format "Last refresh: %s\n" (format-time-string "%H:%M:%S")))
+        (when info
+          (insert (propertize info 'face 'font-lock-comment-face) "\n"))
+        (insert "\n")
+        ;; Render each section
+        (dolist (section sections)
+          (let ((sec-title (alist-get 'title section))
+                (sec-headers (alist-get 'headers section))
+                (sec-rows (alist-get 'rows section))
+                (sec-row-id (alist-get 'row_id section))
+                (sec-actions (alist-get 'actions section)))
+            (insert (propertize (concat "--- " sec-title " ---")
+                                'face 'font-lock-function-name-face) "\n")
+            (when (and sec-headers (> (length sec-headers) 0))
+              (sql-datum--admin-insert-table sec-headers sec-rows
+                                             sec-row-id sec-actions data))
+            (insert "\n")))
+        ;; Back navigation
+        (insert (propertize "Press " 'face 'font-lock-comment-face)
+                (propertize "B" 'face 'bold)
+                (propertize " to go back, " 'face 'font-lock-comment-face)
+                (propertize "q" 'face 'bold)
+                (propertize " to quit\n" 'face 'font-lock-comment-face)))
+      (setq sql-datum--admin-panel-name panel
+            sql-datum--admin-panel-data data
+            sql-datum--admin-sqli-buf sqli-buf
+            sql-datum--admin-context (alist-get 'context data))
+      (sql-datum--admin-mode)
+      (goto-char (point-min))
+      (forward-line 4))
+    (display-buffer buf)))
+
+;; --- Admin mode ---
+
+(defvar sql-datum--admin-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map "q" #'sql-datum-admin-quit)
+    (define-key map "g" #'sql-datum-admin-refresh)
+    (define-key map "a" #'sql-datum-admin-toggle-auto-refresh)
+    (define-key map "B" #'sql-datum-admin-back)
+    ;; Activity monitor
+    (define-key map "k" #'sql-datum-admin-kill-session)
+    ;; Jobs panel
+    (define-key map "s" #'sql-datum-admin-start-job)
+    (define-key map "S" #'sql-datum-admin-stop-job)
+    (define-key map "e" #'sql-datum-admin-toggle-enable)
+    (define-key map "H" #'sql-datum-admin-job-history)
+    (define-key map (kbd "RET") #'sql-datum-admin-detail)
+    ;; SSIS panel
+    (define-key map "r" #'sql-datum-admin-run-package)
+    ;; Schedule editing
+    (define-key map "E" #'sql-datum-admin-edit-schedule)
+    (define-key map "N" #'sql-datum-admin-new-schedule)
+    (define-key map "D" #'sql-datum-admin-delete-schedule)
+    map)
+  "Keymap for datum admin panel buffers.")
+
+(define-derived-mode sql-datum--admin-mode special-mode "datum-admin"
+  "Major mode for datum admin panel buffers."
+  (setq buffer-read-only t
+        truncate-lines t))
+
+;; --- Admin commands ---
+
+(defun sql-datum-admin-quit ()
+  "Stop auto-refresh and close the admin panel buffer."
+  (interactive)
+  (sql-datum--admin-stop-timer (current-buffer))
+  (setq sql-datum--admin-quit-flag t)
+  (quit-window t))
+
+(defun sql-datum-admin-refresh ()
+  "Manually refresh the current admin panel."
+  (interactive)
+  (sql-datum--admin-send-refresh))
+
+(defun sql-datum-admin-toggle-auto-refresh ()
+  "Toggle auto-refresh of the current admin panel."
+  (interactive)
+  (if sql-datum--admin-timer
+      (progn
+        (sql-datum--admin-stop-timer (current-buffer))
+        (message "datum admin: auto-refresh disabled"))
+    (sql-datum--admin-start-timer (current-buffer))
+    (message "datum admin: auto-refresh enabled (%ds interval)"
+             sql-datum-admin-refresh-interval)))
+
+(defun sql-datum-admin-back ()
+  "Go back to the parent panel."
+  (interactive)
+  (let ((parent (alist-get 'parent_panel sql-datum--admin-panel-data)))
+    (if parent
+        (sql-datum--admin-send-command
+         (format ":admin %s" parent))
+      (message "datum admin: no parent panel"))))
+
+(defun sql-datum--admin-row-id-at-point ()
+  "Get the row ID at point, or nil."
+  (get-text-property (line-beginning-position) 'sql-datum-row-id))
+
+(defun sql-datum--admin-row-cells-at-point ()
+  "Get all cell values for the row at point.
+Returns a list of strings by parsing the current line against column widths."
+  (let* ((data sql-datum--admin-panel-data)
+         (rows (alist-get 'rows data)))
+    ;; Find the row by row-id
+    (let ((row-id (sql-datum--admin-row-id-at-point))
+          (row-id-col (alist-get 'row_id data)))
+      (when (and row-id row-id-col rows)
+        (cl-find-if (lambda (row) (equal (nth row-id-col row) row-id)) rows)))))
+
+;; --- Action commands ---
+
+(defun sql-datum-admin-kill-session ()
+  "Kill the session/process at point."
+  (interactive)
+  (unless (equal sql-datum--admin-panel-name "activity")
+    (user-error "Kill is only available in the activity panel"))
+  (let ((id (sql-datum--admin-row-id-at-point)))
+    (unless id (user-error "No session at point"))
+    (when (yes-or-no-p (format "Kill session %s? " id))
+      (sql-datum--admin-send-command
+       (format ":admin-action activity kill %s" id)))))
+
+(defun sql-datum-admin-start-job ()
+  "Start the SQL Agent job at point."
+  (interactive)
+  (unless (equal sql-datum--admin-panel-name "jobs")
+    (user-error "Start job is only available in the jobs panel"))
+  (let ((id (sql-datum--admin-row-id-at-point)))
+    (unless id (user-error "No job at point"))
+    (when (yes-or-no-p (format "Start job '%s'? " id))
+      (sql-datum--admin-send-command
+       (format ":admin-action jobs start-job %s" id)))))
+
+(defun sql-datum-admin-stop-job ()
+  "Stop the SQL Agent job at point."
+  (interactive)
+  (unless (equal sql-datum--admin-panel-name "jobs")
+    (user-error "Stop job is only available in the jobs panel"))
+  (let ((id (sql-datum--admin-row-id-at-point)))
+    (unless id (user-error "No job at point"))
+    (when (yes-or-no-p (format "Stop job '%s'? " id))
+      (sql-datum--admin-send-command
+       (format ":admin-action jobs stop-job %s" id)))))
+
+(defun sql-datum-admin-toggle-enable ()
+  "Toggle enable/disable for the SQL Agent job at point."
+  (interactive)
+  (unless (equal sql-datum--admin-panel-name "jobs")
+    (user-error "Toggle enable is only available in the jobs panel"))
+  (let ((id (sql-datum--admin-row-id-at-point)))
+    (unless id (user-error "No job at point"))
+    (sql-datum--admin-send-command
+     (format ":admin-action jobs toggle-enable %s" id))))
+
+(defun sql-datum-admin-detail ()
+  "Show detail for the item at point."
+  (interactive)
+  (let ((id (sql-datum--admin-row-id-at-point))
+        (panel sql-datum--admin-panel-name))
+    (unless id (user-error "No item at point"))
+    (cond
+     ((equal panel "jobs")
+      (sql-datum--admin-send-command
+       (format ":admin jobs detail %s" id)))
+     ((equal panel "ssis")
+      (sql-datum--admin-send-command
+       (format ":admin ssis executions %s" id)))
+     (t (message "No detail view for this panel")))))
+
+(defun sql-datum-admin-job-history ()
+  "Show execution history for the SQL Agent job at point."
+  (interactive)
+  (unless (equal sql-datum--admin-panel-name "jobs")
+    (user-error "History is only available in the jobs panel"))
+  (let ((id (sql-datum--admin-row-id-at-point)))
+    (unless id (user-error "No job at point"))
+    (sql-datum--admin-send-command
+     (format ":admin jobs history %s" id))))
+
+(defun sql-datum-admin-run-package ()
+  "Run the SSIS package at point."
+  (interactive)
+  (unless (equal sql-datum--admin-panel-name "ssis")
+    (user-error "Run package is only available in the SSIS panel"))
+  (let ((cells (sql-datum--admin-row-cells-at-point)))
+    (unless cells (user-error "No package at point"))
+    (let ((folder (nth 0 cells))
+          (project (nth 1 cells))
+          (package (nth 2 cells)))
+      (when (yes-or-no-p (format "Run SSIS package '%s/%s/%s'? "
+                                 folder project package))
+        (sql-datum--admin-send-command
+         (format ":admin-action ssis run-package %s %s %s"
+                 folder project package))))))
+
+(defun sql-datum-admin-edit-schedule ()
+  "Edit the schedule at point in a job detail buffer."
+  (interactive)
+  (let ((sched-name (sql-datum--admin-row-id-at-point))
+        (job-name (alist-get 'job_name sql-datum--admin-context)))
+    (unless sched-name (user-error "No schedule at point"))
+    (unless job-name (user-error "No job context available"))
+    (sql-datum--admin-send-command
+     (format ":admin-action jobs edit-schedule %s %s"
+             sched-name job-name))))
+
+(defun sql-datum-admin-new-schedule ()
+  "Create a new schedule for the current job."
+  (interactive)
+  (let ((job-name (alist-get 'job_name sql-datum--admin-context)))
+    (unless job-name (user-error "No job context available"))
+    ;; Open a blank schedule editor
+    (sql-datum--admin-show-schedule-editor
+     `((panel . "jobs")
+       (sub_panel . "schedule-edit")
+       (title . ,(format "New Schedule for: %s" job-name))
+       (schedule . ((schedule_id . nil)
+                    (name . "")
+                    (enabled . 1)
+                    (freq_type . 4)
+                    (freq_interval . 1)
+                    (freq_subday_type . 1)
+                    (freq_subday_interval . 0)
+                    (freq_relative_interval . 0)
+                    (freq_recurrence_factor . 0)
+                    (active_start_date . 20000101)
+                    (active_end_date . 99991231)
+                    (active_start_time . 0)
+                    (active_end_time . 235959)))
+       (freq_types . ((1 . "Once") (4 . "Daily") (8 . "Weekly")
+                      (16 . "Monthly") (32 . "Monthly Relative")
+                      (64 . "On Agent Start") (128 . "On Idle")))
+       (subday_types . ((1 . "At specified time") (2 . "Seconds")
+                        (4 . "Minutes") (8 . "Hours")))
+       (context . ((job_name . ,job-name))))
+     sql-datum--admin-sqli-buf)))
+
+(defun sql-datum-admin-delete-schedule ()
+  "Delete the schedule at point."
+  (interactive)
+  (let ((sched-name (sql-datum--admin-row-id-at-point)))
+    (unless sched-name (user-error "No schedule at point"))
+    (when (yes-or-no-p (format "Delete schedule '%s'? " sched-name))
+      (sql-datum--admin-send-command
+       (format ":admin-action jobs delete-schedule %s" sched-name)))))
+
+;; --- Schedule editor (widget-based form) ---
+
+(defun sql-datum--admin-show-schedule-editor (data sqli-buf)
+  "Show a widget-based schedule editor from DATA.
+SQLI-BUF is the originating SQLi buffer."
+  (require 'widget)
+  (require 'wid-edit)
+  (let* ((schedule (alist-get 'schedule data))
+         (freq-types (alist-get 'freq_types data))
+         (subday-types (alist-get 'subday_types data))
+         (context (alist-get 'context data))
+         (job-name (alist-get 'job_name context))
+         (title (or (alist-get 'title data) "Schedule Editor"))
+         (is-new (null (alist-get 'schedule_id schedule)))
+         (buf (get-buffer-create "*datum-admin:schedule-edit*")))
+    (with-current-buffer buf
+      (kill-all-local-variables)
+      (let ((inhibit-read-only t))
+        (erase-buffer))
+      (remove-overlays)
+      (widget-insert (propertize title 'face 'bold))
+      (widget-insert "\n\n")
+      ;; Store widgets for later retrieval
+      (let (widgets)
+        ;; Name
+        (widget-insert "Schedule Name: ")
+        (push (cons 'name (widget-create 'editable-field
+                                         :size 40
+                                         :value (or (alist-get 'name schedule) "")))
+              widgets)
+        (widget-insert "\n")
+        ;; Enabled
+        (widget-insert "Enabled:       ")
+        (push (cons 'enabled (widget-create 'checkbox
+                                            :value (eq (alist-get 'enabled schedule) 1)))
+              widgets)
+        (widget-insert "\n\n")
+        ;; Frequency type
+        (widget-insert "Frequency:     ")
+        (let* ((freq-val (or (alist-get 'freq_type schedule) 4))
+               (freq-choices (or (mapcar (lambda (ft)
+                                           (list 'item
+                                                 :tag (cdr ft)
+                                                 :value (car ft)))
+                                         (if (listp freq-types)
+                                             freq-types
+                                           '((4 . "Daily"))))
+                                 '((item :tag "Daily" :value 4)))))
+          (push (cons 'freq_type
+                      (apply #'widget-create 'menu-choice
+                             :value freq-val
+                             freq-choices))
+                widgets))
+        (widget-insert "\n")
+        ;; Frequency interval
+        (widget-insert "Interval:      ")
+        (push (cons 'freq_interval
+                    (widget-create 'editable-field
+                                   :size 10
+                                   :value (format "%s" (or (alist-get 'freq_interval schedule) 1))))
+              widgets)
+        (widget-insert "\n")
+        ;; Subday type
+        (widget-insert "Subday Type:   ")
+        (let* ((subday-val (or (alist-get 'freq_subday_type schedule) 1))
+               (subday-choices (or (mapcar (lambda (st)
+                                             (list 'item
+                                                   :tag (cdr st)
+                                                   :value (car st)))
+                                           (if (listp subday-types)
+                                               subday-types
+                                             '((1 . "At specified time"))))
+                                   '((item :tag "At specified time" :value 1)))))
+          (push (cons 'freq_subday_type
+                      (apply #'widget-create 'menu-choice
+                             :value subday-val
+                             subday-choices))
+                widgets))
+        (widget-insert "\n")
+        ;; Subday interval
+        (widget-insert "Subday Int.:   ")
+        (push (cons 'freq_subday_interval
+                    (widget-create 'editable-field
+                                   :size 10
+                                   :value (format "%s" (or (alist-get 'freq_subday_interval schedule) 0))))
+              widgets)
+        (widget-insert "\n\n")
+        ;; Active times
+        (widget-insert "Start Time:    ")
+        (push (cons 'active_start_time
+                    (widget-create 'editable-field
+                                   :size 10
+                                   :value (sql-datum--admin-format-time
+                                           (or (alist-get 'active_start_time schedule) 0))))
+              widgets)
+        (widget-insert "  (HHMMSS)\n")
+        (widget-insert "End Time:      ")
+        (push (cons 'active_end_time
+                    (widget-create 'editable-field
+                                   :size 10
+                                   :value (sql-datum--admin-format-time
+                                           (or (alist-get 'active_end_time schedule) 235959))))
+              widgets)
+        (widget-insert "  (HHMMSS)\n")
+        ;; Active dates
+        (widget-insert "Start Date:    ")
+        (push (cons 'active_start_date
+                    (widget-create 'editable-field
+                                   :size 10
+                                   :value (format "%s" (or (alist-get 'active_start_date schedule) 20000101))))
+              widgets)
+        (widget-insert "  (YYYYMMDD)\n")
+        (widget-insert "End Date:      ")
+        (push (cons 'active_end_date
+                    (widget-create 'editable-field
+                                   :size 10
+                                   :value (format "%s" (or (alist-get 'active_end_date schedule) 99991231))))
+              widgets)
+        (widget-insert "  (YYYYMMDD)\n\n")
+        ;; Buttons
+        (widget-create 'push-button
+                       :notify (lambda (&rest _)
+                                 (sql-datum--admin-schedule-submit
+                                  widgets schedule sqli-buf job-name is-new))
+                       (if is-new "Create Schedule" "Update Schedule"))
+        (widget-insert "  ")
+        (widget-create 'push-button
+                       :notify (lambda (&rest _) (quit-window t))
+                       "Cancel")
+        (widget-insert "\n")
+        ;; Store widgets for submit handler
+        (setq-local sql-datum--schedule-widgets widgets)
+        (setq-local sql-datum--admin-sqli-buf sqli-buf))
+      (use-local-map widget-keymap)
+      (widget-setup)
+      (goto-char (point-min)))
+    (switch-to-buffer buf)))
+
+(defun sql-datum--admin-format-time (time-int)
+  "Format TIME-INT (integer HHMMSS) as a string."
+  (format "%06d" (if (numberp time-int) time-int 0)))
+
+(defun sql-datum--admin-schedule-submit (widgets schedule sqli-buf job-name is-new)
+  "Submit the schedule form with WIDGETS data.
+SCHEDULE is the original schedule data, SQLI-BUF the connection buffer,
+JOB-NAME the parent job, IS-NEW non-nil for creating a new schedule."
+  (let* ((get-val (lambda (key)
+                    (let ((w (alist-get key widgets)))
+                      (when w (widget-value w)))))
+         (data `((name . ,(string-trim (funcall get-val 'name)))
+                 (enabled . ,(if (funcall get-val 'enabled) 1 0))
+                 (freq_type . ,(funcall get-val 'freq_type))
+                 (freq_interval . ,(string-to-number
+                                    (funcall get-val 'freq_interval)))
+                 (freq_subday_type . ,(funcall get-val 'freq_subday_type))
+                 (freq_subday_interval . ,(string-to-number
+                                           (funcall get-val 'freq_subday_interval)))
+                 (freq_relative_interval . ,(or (alist-get 'freq_relative_interval schedule) 0))
+                 (freq_recurrence_factor . ,(or (alist-get 'freq_recurrence_factor schedule) 0))
+                 (active_start_date . ,(string-to-number
+                                        (funcall get-val 'active_start_date)))
+                 (active_end_date . ,(string-to-number
+                                      (funcall get-val 'active_end_date)))
+                 (active_start_time . ,(string-to-number
+                                        (funcall get-val 'active_start_time)))
+                 (active_end_time . ,(string-to-number
+                                      (funcall get-val 'active_end_time))))))
+    ;; Validate
+    (when (string-empty-p (alist-get 'name data))
+      (user-error "Schedule name cannot be empty"))
+    (let ((json-str (json-serialize data)))
+      (if is-new
+          (sql-datum--admin-send-command-to
+           sqli-buf
+           (format ":admin-action jobs new-schedule %s %s" job-name json-str))
+        ;; Include schedule_id for update
+        (push (cons 'schedule_id (alist-get 'schedule_id schedule)) data)
+        (let ((json-str-with-id (json-serialize data)))
+          (sql-datum--admin-send-command-to
+           sqli-buf
+           (format ":admin-action jobs update-schedule %s" json-str-with-id)))))
+    (quit-window t)
+    (message "datum admin: schedule %s" (if is-new "created" "updated"))))
+
+;; --- Auto-refresh ---
+
+(defun sql-datum--admin-send-refresh ()
+  "Send the refresh command for the current admin panel."
+  (let ((panel sql-datum--admin-panel-name)
+        (context sql-datum--admin-context))
+    (when panel
+      (let ((cmd (if context
+                     ;; For sub-panels, reconstruct the full command
+                     (let ((sub (alist-get 'sub_panel sql-datum--admin-panel-data)))
+                       (cond
+                        ((and (equal sub "detail")
+                              (alist-get 'job_name context))
+                         (format ":admin jobs detail %s"
+                                 (alist-get 'job_name context)))
+                        ((and (equal sub "history")
+                              (alist-get 'job_name context))
+                         (format ":admin jobs history %s"
+                                 (alist-get 'job_name context)))
+                        ((and (equal sub "executions")
+                              (alist-get 'package_name context))
+                         (format ":admin ssis executions %s"
+                                 (alist-get 'package_name context)))
+                        (t (format ":admin %s" panel))))
+                   (format ":admin %s" panel))))
+        (sql-datum--admin-send-command cmd)))))
+
+(defun sql-datum--admin-send-command (cmd)
+  "Send CMD to the datum process associated with this admin buffer."
+  (sql-datum--admin-send-command-to sql-datum--admin-sqli-buf cmd))
+
+(defun sql-datum--admin-send-command-to (sqli-buf cmd)
+  "Send CMD to the datum process in SQLI-BUF."
+  (let ((buf (or (and sqli-buf
+                      (buffer-live-p sqli-buf)
+                      sqli-buf)
+                 (let ((b (sql-find-sqli-buffer 'datum)))
+                   (and b (get-buffer b))))))
+    (if (and buf (get-buffer-process buf))
+        (with-current-buffer buf
+          (sql-datum--enqueue-one cmd :silent t :priority :low))
+      (message "datum admin: no active connection for command"))))
+
+(defun sql-datum--admin-start-timer (buf)
+  "Start the auto-refresh timer for admin buffer BUF."
+  (sql-datum--admin-stop-timer buf)
+  (when sql-datum-admin-refresh-interval
+    (with-current-buffer buf
+      (setq sql-datum--admin-timer
+            (run-with-timer sql-datum-admin-refresh-interval
+                            sql-datum-admin-refresh-interval
+                            #'sql-datum--admin-tick buf)))))
+
+(defun sql-datum--admin-stop-timer (buf)
+  "Stop the auto-refresh timer for admin buffer BUF."
+  (when (buffer-live-p buf)
+    (with-current-buffer buf
+      (when sql-datum--admin-timer
+        (cancel-timer sql-datum--admin-timer)
+        (setq sql-datum--admin-timer nil)))))
+
+(defun sql-datum--admin-tick (buf)
+  "Timer callback: refresh admin buffer BUF if it still exists."
+  (if (buffer-live-p buf)
+      (with-current-buffer buf
+        (sql-datum--admin-send-refresh))
+    ;; Buffer killed — stop timer
+    (when (timerp sql-datum--admin-timer)
+      (cancel-timer sql-datum--admin-timer))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Identifier quoting helpers
@@ -2567,6 +3280,13 @@ With a prefix argument, prompt for a filter pattern."
   (setq sql-datum--running-quit-flag nil)
   (sql-datum--send-command ":running"))
 
+(defun sql-datum-admin (panel)
+  "Open an admin panel.  PANEL is one of: activity, jobs, ssis.
+With a prefix argument, prompts for the panel name."
+  (interactive
+   (list (completing-read "Admin panel: " '("activity" "jobs" "ssis") nil t)))
+  (sql-datum--send-command (format ":admin %s" panel) t))
+
 (defun sql-datum-version ()
   "Show server version via :version."
   (interactive)
@@ -2811,6 +3531,11 @@ but detached, so they can be reused with a new connection."
         (setq sql-datum--refresh-timer nil))
       (when sql-datum--running-timer
         (sql-datum--running-stop-timer))
+      ;; Stop any admin panel timers
+      (dolist (buf (buffer-list))
+        (when (and (buffer-live-p buf)
+                   (string-match-p "\\*datum-admin:" (buffer-name buf)))
+          (sql-datum--admin-stop-timer buf)))
       ;; Clear command queue and send :exit directly to force shutdown
       (with-current-buffer sqli-buf
         (setq sql-datum--command-queue nil
@@ -2951,6 +3676,7 @@ With prefix ARG, prompts for join type (LEFT, RIGHT, etc.)."
   (define-key sql-mode-map (kbd "C-c s s") #'sql-datum-schemas)
   (define-key sql-mode-map (kbd "C-c s R") #'sql-datum-routines)
   (define-key sql-mode-map (kbd "C-c s r") #'sql-datum-running)
+  (define-key sql-mode-map (kbd "C-c s a") #'sql-datum-admin)
   (define-key sql-mode-map (kbd "C-c s v") #'sql-datum-version)
   (define-key sql-mode-map (kbd "C-c s u") #'sql-datum-user)
   ;; C-c s f: refresh introspection
