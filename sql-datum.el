@@ -786,8 +786,14 @@ SQLI-BUF is the originating SQLi buffer."
          (row-id (alist-get 'row_id data))
          (buf-name (sql-datum--admin-buffer-name panel sub-panel))
          (buf (get-buffer-create buf-name))
-         (initial (not (buffer-local-value 'sql-datum--admin-timer buf))))
+         ;; Check if this is the first time *before* we touch the buffer
+         (initial (not (buffer-local-value 'sql-datum--admin-panel-name buf))))
     (with-current-buffer buf
+      ;; Only set the major mode on first display — calling the mode
+      ;; function kills all buffer-local variables, which would wipe
+      ;; the timer on every refresh cycle.
+      (when initial
+        (sql-datum--admin-mode))
       (let ((inhibit-read-only t))
         (erase-buffer)
         ;; Header
@@ -807,11 +813,11 @@ SQLI-BUF is the originating SQLi buffer."
         ;; Help line
         (insert "\n")
         (sql-datum--admin-insert-help-line actions))
+      ;; Set buffer-local state after mode init (so mode doesn't wipe them)
       (setq sql-datum--admin-panel-name panel
             sql-datum--admin-panel-data data
             sql-datum--admin-sqli-buf sqli-buf
             sql-datum--admin-context (alist-get 'context data))
-      (sql-datum--admin-mode)
       (goto-char (point-min))
       ;; Move to first data row
       (forward-line 4))
@@ -906,8 +912,11 @@ SQLI-BUF is the originating SQLi buffer."
          (sections (alist-get 'sections data))
          (info (alist-get 'info data))
          (buf-name (sql-datum--admin-buffer-name panel sub-panel))
-         (buf (get-buffer-create buf-name)))
+         (buf (get-buffer-create buf-name))
+         (initial (not (buffer-local-value 'sql-datum--admin-panel-name buf))))
     (with-current-buffer buf
+      (when initial
+        (sql-datum--admin-mode))
       (let ((inhibit-read-only t))
         (erase-buffer)
         (insert (propertize title 'face 'bold) "\n")
@@ -938,7 +947,6 @@ SQLI-BUF is the originating SQLi buffer."
             sql-datum--admin-panel-data data
             sql-datum--admin-sqli-buf sqli-buf
             sql-datum--admin-context (alist-get 'context data))
-      (sql-datum--admin-mode)
       (goto-char (point-min))
       (forward-line 4))
     (display-buffer buf)))
