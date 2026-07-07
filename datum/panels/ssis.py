@@ -128,7 +128,7 @@ def _package_list(cursor):
         "row_id": 2,  # Package name column
         "actions": [
             {"key": "r", "label": "Run package", "command": "run-package"},
-            {"key": "RET", "label": "Execution history", "command": "executions"},
+            {"key": "d", "label": "Execution history", "command": "executions"},
         ],
         "info": None,
     }

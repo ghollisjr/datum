@@ -731,6 +731,15 @@ Set to nil to disable auto-refresh."
 (defvar-local sql-datum--admin-context nil
   "Context data for sub-panels (e.g., job_name for detail views).")
 
+(defvar-local sql-datum--admin-sort-column nil
+  "Column index currently used for sorting, or nil for default order.")
+
+(defvar-local sql-datum--admin-sort-ascending t
+  "Non-nil when the current sort is ascending.")
+
+(defvar-local sql-datum--admin-header-line-count 0
+  "Number of header lines before the first data row.")
+
 (defun sql-datum--admin-buffer-name (panel-name &optional sub-panel)
   "Return the buffer name for PANEL-NAME, with optional SUB-PANEL."
   (if sub-panel
@@ -786,50 +795,103 @@ SQLI-BUF is the originating SQLi buffer."
          (row-id (alist-get 'row_id data))
          (buf-name (sql-datum--admin-buffer-name panel sub-panel))
          (buf (get-buffer-create buf-name))
-         ;; Check if this is the first time *before* we touch the buffer
          (initial (not (buffer-local-value 'sql-datum--admin-panel-name buf))))
     (with-current-buffer buf
-      ;; Only set the major mode on first display — calling the mode
-      ;; function kills all buffer-local variables, which would wipe
-      ;; the timer on every refresh cycle.
-      (when initial
-        (sql-datum--admin-mode))
-      (let ((inhibit-read-only t))
-        (erase-buffer)
-        ;; Header
-        (insert (propertize title 'face 'bold) "\n")
-        (insert (format "Last refresh: %s" (format-time-string "%H:%M:%S")))
-        (if sql-datum-admin-refresh-interval
-            (insert (format "  [auto-refresh %ds]"
-                            sql-datum-admin-refresh-interval))
-          (insert "  [auto-refresh off]"))
-        (insert "\n")
-        (when info
-          (insert (propertize info 'face 'font-lock-comment-face) "\n"))
-        (insert "\n")
-        ;; Table
-        (when (and headers (> (length headers) 0))
-          (sql-datum--admin-insert-table headers rows row-id actions data))
-        ;; Help line
-        (insert "\n")
-        (sql-datum--admin-insert-help-line actions))
-      ;; Set buffer-local state after mode init (so mode doesn't wipe them)
-      (setq sql-datum--admin-panel-name panel
-            sql-datum--admin-panel-data data
-            sql-datum--admin-sqli-buf sqli-buf
-            sql-datum--admin-context (alist-get 'context data))
-      (goto-char (point-min))
-      ;; Move to first data row
-      (forward-line 4))
+      ;; Save cursor state before redraw
+      (let ((saved-row-id (unless initial (sql-datum--admin-row-id-at-point)))
+            (saved-line (unless initial (line-number-at-pos)))
+            (saved-col (unless initial (current-column))))
+        ;; Only set the major mode on first display — calling the mode
+        ;; function kills all buffer-local variables, which would wipe
+        ;; the timer on every refresh cycle.
+        (when initial
+          (sql-datum--admin-mode))
+        ;; Apply sort if active
+        (when sql-datum--admin-sort-column
+          (setq rows (sql-datum--admin-sort-rows
+                      rows sql-datum--admin-sort-column
+                      sql-datum--admin-sort-ascending)))
+        (let ((inhibit-read-only t)
+              (header-lines 0))
+          (erase-buffer)
+          ;; Header
+          (insert (propertize title 'face 'bold) "\n")
+          (cl-incf header-lines)
+          (insert (format "Last refresh: %s" (format-time-string "%H:%M:%S")))
+          (if sql-datum-admin-refresh-interval
+              (insert (format "  [auto-refresh %ds]"
+                              sql-datum-admin-refresh-interval))
+            (insert "  [auto-refresh off]"))
+          (when sql-datum--admin-sort-column
+            (insert (format "  [sort: %s %s]"
+                            (nth sql-datum--admin-sort-column headers)
+                            (if sql-datum--admin-sort-ascending "asc" "desc"))))
+          (insert "\n")
+          (cl-incf header-lines)
+          (when info
+            (insert (propertize info 'face 'font-lock-comment-face) "\n")
+            (cl-incf header-lines))
+          (insert "\n")
+          (cl-incf header-lines)
+          ;; Table
+          (when (and headers (> (length headers) 0))
+            (sql-datum--admin-insert-table headers rows row-id)
+            ;; +2 for header row and separator
+            (cl-incf header-lines 2))
+          (setq sql-datum--admin-header-line-count header-lines)
+          ;; Help line
+          (insert "\n")
+          (sql-datum--admin-insert-help-line actions))
+        ;; Set buffer-local state after mode init
+        (setq sql-datum--admin-panel-name panel
+              sql-datum--admin-panel-data data
+              sql-datum--admin-sqli-buf sqli-buf
+              sql-datum--admin-context (alist-get 'context data))
+        ;; Restore cursor position
+        (sql-datum--admin-restore-cursor
+         saved-row-id saved-line saved-col row-id rows initial)))
     (display-buffer buf)
     ;; Start auto-refresh for top-level panels (not sub-panels)
     (when (and initial (not sub-panel))
       (sql-datum--admin-start-timer buf))))
 
-(defun sql-datum--admin-insert-table (headers rows row-id _actions _data)
+(defun sql-datum--admin-restore-cursor (saved-row-id saved-line saved-col
+                                        row-id _rows initial)
+  "Restore cursor after a panel redraw.
+Try to find SAVED-ROW-ID in the new data first (stable across reorder),
+fall back to SAVED-LINE/SAVED-COL, or go to first data row if INITIAL.
+_ROWS is accepted for interface consistency."
+  (cond
+   ;; First display — go to first data row
+   (initial
+    (goto-char (point-min))
+    (forward-line sql-datum--admin-header-line-count))
+   ;; Try to find the same row by ID
+   ((and saved-row-id row-id)
+    (goto-char (point-min))
+    (let ((found nil))
+      (while (and (not found) (not (eobp)))
+        (when (equal (get-text-property (point) 'sql-datum-row-id)
+                     saved-row-id)
+          (setq found t)
+          (move-to-column saved-col))
+        (unless found (forward-line 1)))
+      ;; ID might have disappeared (session ended, etc.)
+      (unless found
+        (goto-char (point-min))
+        (forward-line (min (1- saved-line) (count-lines (point-min) (point-max))))
+        (move-to-column saved-col))))
+   ;; No row-id — restore by line number
+   (saved-line
+    (goto-char (point-min))
+    (forward-line (min (1- saved-line) (count-lines (point-min) (point-max))))
+    (move-to-column saved-col))
+   ;; Shouldn't happen, but be safe
+   (t (goto-char (point-min)))))
+
+(defun sql-datum--admin-insert-table (headers rows row-id)
   "Insert a formatted table with HEADERS and ROWS.
-ROW-ID is the column index used as row identifier.
-_ACTIONS and _DATA are accepted for interface consistency."
+ROW-ID is the column index used as row identifier."
   (let* ((ncols (length headers))
          ;; Calculate column widths
          (widths (make-vector ncols 0))
@@ -843,33 +905,57 @@ _ACTIONS and _DATA are accepted for interface consistency."
          (fmt (mapconcat (lambda (w) (format "%%-%ds" w))
                          (append widths nil) "  "))
          (separator (mapconcat (lambda (w) (make-string w ?-))
-                               (append widths nil) "  ")))
-    ;; Header row
-    (insert (propertize (apply #'format fmt headers) 'face 'bold) "\n")
+                               (append widths nil) "  "))
+         ;; Compute column start positions for click detection
+         (col-starts (let ((pos 0) starts)
+                       (dotimes (i ncols)
+                         (push (cons i pos) starts)
+                         (setq pos (+ pos (aref widths i) 2)))
+                       (nreverse starts))))
+    ;; Header row — each column header is clickable for sorting
+    (let ((header-start (point)))
+      (insert (apply #'format fmt
+                     (cl-loop for h in headers
+                              for i from 0
+                              collect (let ((indicator
+                                            (cond
+                                             ((not (eql i sql-datum--admin-sort-column)) "")
+                                             (sql-datum--admin-sort-ascending " ^")
+                                             (t " v"))))
+                                        (concat h indicator)))))
+      (put-text-property header-start (point) 'face 'bold)
+      ;; Store column positions on header line for click-to-sort
+      (put-text-property header-start (point)
+                         'sql-datum-col-starts col-starts)
+      (insert "\n"))
     (insert separator "\n")
     ;; Data rows
     (if (null rows)
         (insert (propertize "(no data)" 'face 'font-lock-comment-face) "\n")
-      (dolist (row rows)
-        ;; Pad row if needed
-        (let ((padded (append row (make-list (max 0 (- ncols (length row))) ""))))
-          ;; Truncate cells to their column width
-          (let ((display-row
-                 (cl-loop for cell in padded
-                          for i from 0
-                          collect (let ((w (aref widths i)))
-                                    (if (> (length cell) w)
-                                        (concat (substring cell 0 (max 0 (- w 3))) "...")
+      (let ((row-index 0))
+        (dolist (row rows)
+          ;; Pad row if needed
+          (let ((padded (append row (make-list (max 0 (- ncols (length row))) ""))))
+            ;; Truncate cells to their column width
+            (let ((display-row
+                   (cl-loop for cell in padded
+                            for i from 0
+                            collect (let ((w (aref widths i)))
+                                      (if (> (length cell) w)
+                                          (concat (substring cell 0 (max 0 (- w 3))) "...")
                                         cell)))))
-            (let ((line-start (point))
-                  (id-val (and row-id (nth row-id padded))))
-              (insert (apply #'format fmt display-row))
-              ;; Add text properties for row identification
-              (when id-val
-                (put-text-property line-start (point) 'sql-datum-row-id id-val))
-              ;; Color-code status columns
-              (sql-datum--admin-colorize-row line-start (point) padded)
-              (insert "\n"))))))))
+              (let ((line-start (point))
+                    (id-val (and row-id (nth row-id padded))))
+                (insert (apply #'format fmt display-row))
+                ;; Add text properties for row identification and data
+                (when id-val
+                  (put-text-property line-start (point) 'sql-datum-row-id id-val))
+                (put-text-property line-start (point) 'sql-datum-row-index row-index)
+                (put-text-property line-start (point) 'sql-datum-row-data padded)
+                ;; Color-code status columns
+                (sql-datum--admin-colorize-row line-start (point) padded)
+                (insert "\n"))))
+          (cl-incf row-index))))))
 
 (defun sql-datum--admin-colorize-row (start end cells)
   "Apply color to the row from START to END based on CELLS content."
@@ -900,7 +986,128 @@ _ACTIONS and _DATA are accepted for interface consistency."
                 "=" label "  "))))
   (insert (propertize "g" 'face 'bold) "=refresh  "
           (propertize "a" 'face 'bold) "=auto-refresh  "
+          (propertize "o" 'face 'bold) "=sort  "
+          (propertize "i" 'face 'bold) "=inspect  "
           (propertize "q" 'face 'bold) "=quit\n"))
+
+;; --- Sorting ---
+
+(defun sql-datum--admin-numeric-string-p (s)
+  "Return non-nil if S is a string representing a number."
+  (and (not (string-empty-p s))
+       (string-match-p "\\`-?[0-9]+\\(?:\\.[0-9]*\\)?\\'" s)))
+
+(defun sql-datum--admin-sort-rows (rows col-index ascending)
+  "Sort ROWS by COL-INDEX.  ASCENDING controls direction.
+Uses numeric comparison when all non-empty values in the column are
+numbers, otherwise string comparison."
+  (let* ((sorted (copy-sequence rows))
+         ;; Probe the column to decide comparison mode
+         (all-numeric t))
+    (dolist (row sorted)
+      (let ((v (or (nth col-index row) "")))
+        (when (and (not (string-empty-p v))
+                   (not (sql-datum--admin-numeric-string-p v)))
+          (setq all-numeric nil))))
+    (sort sorted
+          (lambda (a b)
+            (let ((va (or (nth col-index a) ""))
+                  (vb (or (nth col-index b) "")))
+              ;; Empty strings sort last regardless of direction
+              (cond
+               ((and (string-empty-p va) (string-empty-p vb)) nil)
+               ((string-empty-p va) nil)  ; a sorts after b
+               ((string-empty-p vb) t)    ; a sorts before b
+               (all-numeric
+                (let ((na (string-to-number va))
+                      (nb (string-to-number vb)))
+                  (if ascending (< na nb) (> na nb))))
+               (t
+                (if ascending
+                    (string< va vb)
+                  (string< vb va)))))))
+    sorted))
+
+(defun sql-datum-admin-sort-by-column (col-index)
+  "Sort the current panel by column COL-INDEX.
+Toggles direction if already sorting by this column."
+  (if (eql col-index sql-datum--admin-sort-column)
+      ;; Toggle direction, or clear sort on third press
+      (if sql-datum--admin-sort-ascending
+          (setq sql-datum--admin-sort-ascending nil)
+        (setq sql-datum--admin-sort-column nil
+              sql-datum--admin-sort-ascending t))
+    ;; New column
+    (setq sql-datum--admin-sort-column col-index
+          sql-datum--admin-sort-ascending t))
+  ;; Re-render with current data
+  (when sql-datum--admin-panel-data
+    (sql-datum--admin-show-panel sql-datum--admin-panel-data
+                                 sql-datum--admin-sqli-buf)))
+
+(defun sql-datum-admin-sort ()
+  "Prompt for a column to sort by."
+  (interactive)
+  (let* ((data sql-datum--admin-panel-data)
+         (headers (alist-get 'headers data)))
+    (unless headers (user-error "No data to sort"))
+    (let* ((choices (cl-loop for h in headers
+                             for i from 0
+                             collect (cons (format "%d: %s%s" (1+ i) h
+                                                   (cond
+                                                    ((not (eql i sql-datum--admin-sort-column)) "")
+                                                    (sql-datum--admin-sort-ascending " [asc]")
+                                                    (t " [desc]")))
+                                           i)))
+           (choice (completing-read "Sort by column: " choices nil t))
+           (col (cdr (assoc choice choices))))
+      (when col
+        (sql-datum-admin-sort-by-column col)))))
+
+(defun sql-datum-admin-click-sort ()
+  "Sort by the column under the cursor on the header line."
+  (interactive)
+  ;; Are we on the header line?
+  (let ((col-starts (get-text-property (line-beginning-position)
+                                       'sql-datum-col-starts)))
+    (if col-starts
+        ;; Find which column the cursor is in
+        (let ((cur-col (current-column))
+              (target-col nil))
+          (dolist (entry col-starts)
+            (when (<= (cdr entry) cur-col)
+              (setq target-col (car entry))))
+          (when target-col
+            (sql-datum-admin-sort-by-column target-col)))
+      ;; Not on header line — treat RET normally
+      (sql-datum-admin-detail))))
+
+;; --- Row inspection ---
+
+(defun sql-datum-admin-inspect ()
+  "Show all column values for the row at point in a popup."
+  (interactive)
+  (let ((row-data (get-text-property (line-beginning-position) 'sql-datum-row-data))
+        (headers (alist-get 'headers sql-datum--admin-panel-data)))
+    (unless row-data (user-error "No data row at point"))
+    (let ((buf (get-buffer-create "*datum-admin:inspect*")))
+      (with-current-buffer buf
+        (let ((inhibit-read-only t))
+          (erase-buffer)
+          (insert (propertize "Row Detail" 'face 'bold) "\n")
+          (insert (make-string 40 ?-) "\n")
+          (cl-loop for h in headers
+                   for v in row-data
+                   for i from 0
+                   do (insert (propertize (format "%-20s" h)
+                                          'face 'font-lock-function-name-face)
+                              " " (or v "") "\n"))
+          (insert "\n" (propertize "Press q to close" 'face 'font-lock-comment-face) "\n"))
+        (special-mode)
+        (goto-char (point-min)))
+      (display-buffer buf
+                      '((display-buffer-below-selected)
+                        (window-height . fit-window-to-buffer))))))
 
 (defun sql-datum--admin-show-detail (data sqli-buf)
   "Display a multi-section detail view from DATA.
@@ -915,50 +1122,66 @@ SQLI-BUF is the originating SQLi buffer."
          (buf (get-buffer-create buf-name))
          (initial (not (buffer-local-value 'sql-datum--admin-panel-name buf))))
     (with-current-buffer buf
-      (when initial
-        (sql-datum--admin-mode))
-      (let ((inhibit-read-only t))
-        (erase-buffer)
-        (insert (propertize title 'face 'bold) "\n")
-        (insert (format "Last refresh: %s\n" (format-time-string "%H:%M:%S")))
-        (when info
-          (insert (propertize info 'face 'font-lock-comment-face) "\n"))
-        (insert "\n")
-        ;; Render each section
-        (dolist (section sections)
-          (let ((sec-title (alist-get 'title section))
-                (sec-headers (alist-get 'headers section))
-                (sec-rows (alist-get 'rows section))
-                (sec-row-id (alist-get 'row_id section))
-                (sec-actions (alist-get 'actions section)))
-            (insert (propertize (concat "--- " sec-title " ---")
-                                'face 'font-lock-function-name-face) "\n")
-            (when (and sec-headers (> (length sec-headers) 0))
-              (sql-datum--admin-insert-table sec-headers sec-rows
-                                             sec-row-id sec-actions data))
-            (insert "\n")))
-        ;; Back navigation
-        (insert (propertize "Press " 'face 'font-lock-comment-face)
-                (propertize "B" 'face 'bold)
-                (propertize " to go back, " 'face 'font-lock-comment-face)
-                (propertize "q" 'face 'bold)
-                (propertize " to quit\n" 'face 'font-lock-comment-face)))
-      (setq sql-datum--admin-panel-name panel
-            sql-datum--admin-panel-data data
-            sql-datum--admin-sqli-buf sqli-buf
-            sql-datum--admin-context (alist-get 'context data))
-      (goto-char (point-min))
-      (forward-line 4))
+      (let ((saved-line (unless initial (line-number-at-pos)))
+            (saved-col (unless initial (current-column))))
+        (when initial
+          (sql-datum--admin-mode))
+        (let ((inhibit-read-only t))
+          (erase-buffer)
+          (insert (propertize title 'face 'bold) "\n")
+          (insert (format "Last refresh: %s\n" (format-time-string "%H:%M:%S")))
+          (when info
+            (insert (propertize info 'face 'font-lock-comment-face) "\n"))
+          (insert "\n")
+          ;; Render each section
+          (dolist (section sections)
+            (let ((sec-title (alist-get 'title section))
+                  (sec-headers (alist-get 'headers section))
+                  (sec-rows (alist-get 'rows section))
+                  (sec-row-id (alist-get 'row_id section)))
+              (insert (propertize (concat "--- " sec-title " ---")
+                                  'face 'font-lock-function-name-face) "\n")
+              (when (and sec-headers (> (length sec-headers) 0))
+                (sql-datum--admin-insert-table sec-headers sec-rows sec-row-id))
+              (insert "\n")))
+          ;; Back navigation
+          (insert (propertize "Press " 'face 'font-lock-comment-face)
+                  (propertize "B" 'face 'bold)
+                  (propertize " to go back, " 'face 'font-lock-comment-face)
+                  (propertize "i" 'face 'bold)
+                  (propertize "=inspect, " 'face 'font-lock-comment-face)
+                  (propertize "q" 'face 'bold)
+                  (propertize " to quit\n" 'face 'font-lock-comment-face)))
+        (setq sql-datum--admin-panel-name panel
+              sql-datum--admin-panel-data data
+              sql-datum--admin-sqli-buf sqli-buf
+              sql-datum--admin-context (alist-get 'context data))
+        (if saved-line
+            (progn
+              (goto-char (point-min))
+              (forward-line (min (1- saved-line)
+                                 (count-lines (point-min) (point-max))))
+              (move-to-column saved-col))
+          (goto-char (point-min))
+          (forward-line 4))))
     (display-buffer buf)))
 
 ;; --- Admin mode ---
 
 (defvar sql-datum--admin-mode-map
   (let ((map (make-sparse-keymap)))
+    ;; Navigation and general
     (define-key map "q" #'sql-datum-admin-quit)
     (define-key map "g" #'sql-datum-admin-refresh)
     (define-key map "a" #'sql-datum-admin-toggle-auto-refresh)
     (define-key map "B" #'sql-datum-admin-back)
+    (define-key map "n" #'sql-datum-admin-next-row)
+    (define-key map "p" #'sql-datum-admin-prev-row)
+    ;; Sorting
+    (define-key map "o" #'sql-datum-admin-sort)
+    (define-key map (kbd "RET") #'sql-datum-admin-click-sort)
+    ;; Inspection
+    (define-key map "i" #'sql-datum-admin-inspect)
     ;; Activity monitor
     (define-key map "k" #'sql-datum-admin-kill-session)
     ;; Jobs panel
@@ -966,7 +1189,7 @@ SQLI-BUF is the originating SQLi buffer."
     (define-key map "S" #'sql-datum-admin-stop-job)
     (define-key map "e" #'sql-datum-admin-toggle-enable)
     (define-key map "H" #'sql-datum-admin-job-history)
-    (define-key map (kbd "RET") #'sql-datum-admin-detail)
+    (define-key map "d" #'sql-datum-admin-detail)
     ;; SSIS panel
     (define-key map "r" #'sql-datum-admin-run-package)
     ;; Schedule editing
@@ -1014,6 +1237,27 @@ SQLI-BUF is the originating SQLi buffer."
         (sql-datum--admin-send-command
          (format ":admin %s" parent))
       (message "datum admin: no parent panel"))))
+
+(defun sql-datum-admin-next-row ()
+  "Move to the next data row."
+  (interactive)
+  (let ((col (current-column)))
+    (forward-line 1)
+    ;; Skip non-data lines (separators, help text, section headers)
+    (while (and (not (eobp))
+                (not (get-text-property (point) 'sql-datum-row-data)))
+      (forward-line 1))
+    (move-to-column col)))
+
+(defun sql-datum-admin-prev-row ()
+  "Move to the previous data row."
+  (interactive)
+  (let ((col (current-column)))
+    (forward-line -1)
+    (while (and (not (bobp))
+                (not (get-text-property (point) 'sql-datum-row-data)))
+      (forward-line -1))
+    (move-to-column col)))
 
 (defun sql-datum--admin-row-id-at-point ()
   "Get the row ID at point, or nil."

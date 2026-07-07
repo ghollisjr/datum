@@ -252,7 +252,7 @@ def _job_list(cursor):
             {"key": "s", "label": "Start job", "command": "start-job"},
             {"key": "S", "label": "Stop job", "command": "stop-job"},
             {"key": "e", "label": "Enable/Disable toggle", "command": "toggle-enable"},
-            {"key": "RET", "label": "View detail", "command": "detail"},
+            {"key": "d", "label": "View detail", "command": "detail"},
             {"key": "H", "label": "View history", "command": "history"},
         ],
         "info": None,
