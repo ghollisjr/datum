@@ -740,6 +740,18 @@ Set to nil to disable auto-refresh."
 (defvar-local sql-datum--admin-header-line-count 0
   "Number of header lines before the first data row.")
 
+(defvar-local sql-datum--admin-col-positions nil
+  "List of (COL-INDEX . START-COLUMN) for cell navigation.")
+
+(defvar-local sql-datum--admin-saved-row-id nil
+  "Last known row ID at cursor, saved after each render for stable restore.")
+
+(defvar-local sql-datum--admin-saved-line nil
+  "Last known line number at cursor, saved after each render.")
+
+(defvar-local sql-datum--admin-saved-col nil
+  "Last known column at cursor, saved after each render.")
+
 (defun sql-datum--admin-buffer-name (panel-name &optional sub-panel)
   "Return the buffer name for PANEL-NAME, with optional SUB-PANEL."
   (if sub-panel
@@ -797,10 +809,22 @@ SQLI-BUF is the originating SQLi buffer."
          (buf (get-buffer-create buf-name))
          (initial (not (buffer-local-value 'sql-datum--admin-panel-name buf))))
     (with-current-buffer buf
-      ;; Save cursor state before redraw
-      (let ((saved-row-id (unless initial (sql-datum--admin-row-id-at-point)))
-            (saved-line (unless initial (line-number-at-pos)))
-            (saved-col (unless initial (current-column))))
+      ;; Save cursor state before redraw.  Use the window's point if
+      ;; the buffer is visible (works even when the user is in a
+      ;; minibuffer/company popup), otherwise fall back to buffer point.
+      (let* ((win (get-buffer-window buf t))
+             (prev-pos (cond
+                        (initial nil)
+                        (win (window-point win))
+                        (t (point))))
+             (saved-row-id (when prev-pos
+                             (get-text-property prev-pos 'sql-datum-row-id)))
+             (saved-line   (when prev-pos
+                             (line-number-at-pos prev-pos)))
+             (saved-col    (when prev-pos
+                             (save-excursion
+                               (goto-char prev-pos)
+                               (current-column)))))
         ;; Only set the major mode on first display — calling the mode
         ;; function kills all buffer-local variables, which would wipe
         ;; the timer on every refresh cycle.
@@ -849,7 +873,10 @@ SQLI-BUF is the originating SQLi buffer."
               sql-datum--admin-context (alist-get 'context data))
         ;; Restore cursor position
         (sql-datum--admin-restore-cursor
-         saved-row-id saved-line saved-col row-id rows initial)))
+         saved-row-id saved-line saved-col row-id rows initial)
+        ;; Also set window point so the visible cursor moves
+        (when-let ((w (get-buffer-window buf t)))
+          (set-window-point w (point)))))
     (display-buffer buf)
     ;; Start auto-refresh for top-level panels (not sub-panels)
     (when (and initial (not sub-panel))
@@ -912,6 +939,8 @@ ROW-ID is the column index used as row identifier."
                          (push (cons i pos) starts)
                          (setq pos (+ pos (aref widths i) 2)))
                        (nreverse starts))))
+    ;; Store column positions as buffer-local for cell navigation
+    (setq sql-datum--admin-col-positions col-starts)
     ;; Header row — each column header is clickable for sorting
     (let ((header-start (point)))
       (insert (apply #'format fmt
@@ -988,7 +1017,10 @@ ROW-ID is the column index used as row identifier."
           (propertize "a" 'face 'bold) "=auto-refresh  "
           (propertize "o" 'face 'bold) "=sort  "
           (propertize "i" 'face 'bold) "=inspect  "
-          (propertize "q" 'face 'bold) "=quit\n"))
+          (propertize "q" 'face 'bold) "=quit\n")
+  (insert (propertize "Nav: " 'face 'font-lock-comment-face)
+          "arrows=cell  TAB/S-TAB=next/prev cell  n/p=row  "
+          "RET=sort(header)/detail(row)\n"))
 
 ;; --- Sorting ---
 
@@ -1170,13 +1202,22 @@ SQLI-BUF is the originating SQLi buffer."
 
 (defvar sql-datum--admin-mode-map
   (let ((map (make-sparse-keymap)))
-    ;; Navigation and general
+    ;; Cell navigation — arrow keys jump between cells
+    (define-key map (kbd "<left>")  #'sql-datum-admin-cell-left)
+    (define-key map (kbd "<right>") #'sql-datum-admin-cell-right)
+    (define-key map (kbd "<up>")    #'sql-datum-admin-cell-up)
+    (define-key map (kbd "<down>")  #'sql-datum-admin-cell-down)
+    ;; Tab/S-Tab cycle columns (wrapping to next/prev row)
+    (define-key map (kbd "TAB")     #'sql-datum-admin-next-cell)
+    (define-key map (kbd "<backtab>") #'sql-datum-admin-prev-cell)
+    ;; Row navigation
+    (define-key map "n" #'sql-datum-admin-next-row)
+    (define-key map "p" #'sql-datum-admin-prev-row)
+    ;; General
     (define-key map "q" #'sql-datum-admin-quit)
     (define-key map "g" #'sql-datum-admin-refresh)
     (define-key map "a" #'sql-datum-admin-toggle-auto-refresh)
     (define-key map "B" #'sql-datum-admin-back)
-    (define-key map "n" #'sql-datum-admin-next-row)
-    (define-key map "p" #'sql-datum-admin-prev-row)
     ;; Sorting
     (define-key map "o" #'sql-datum-admin-sort)
     (define-key map (kbd "RET") #'sql-datum-admin-click-sort)
@@ -1202,7 +1243,14 @@ SQLI-BUF is the originating SQLi buffer."
 (define-derived-mode sql-datum--admin-mode special-mode "datum-admin"
   "Major mode for datum admin panel buffers."
   (setq buffer-read-only t
-        truncate-lines t))
+        truncate-lines t)
+  (add-hook 'post-command-hook #'sql-datum--admin-save-cursor nil t))
+
+(defun sql-datum--admin-save-cursor ()
+  "Save current cursor position to buffer-locals for stable refresh restore."
+  (setq sql-datum--admin-saved-row-id (sql-datum--admin-row-id-at-point)
+        sql-datum--admin-saved-line (line-number-at-pos)
+        sql-datum--admin-saved-col (current-column)))
 
 ;; --- Admin commands ---
 
@@ -1238,26 +1286,112 @@ SQLI-BUF is the originating SQLi buffer."
          (format ":admin %s" parent))
       (message "datum admin: no parent panel"))))
 
+(defun sql-datum--admin-navigable-line-p ()
+  "Return non-nil if the current line is a data row or the header row."
+  (or (get-text-property (point) 'sql-datum-row-data)
+      (get-text-property (point) 'sql-datum-col-starts)))
+
 (defun sql-datum-admin-next-row ()
-  "Move to the next data row."
+  "Move to the next data or header row."
   (interactive)
   (let ((col (current-column)))
     (forward-line 1)
-    ;; Skip non-data lines (separators, help text, section headers)
     (while (and (not (eobp))
-                (not (get-text-property (point) 'sql-datum-row-data)))
+                (not (sql-datum--admin-navigable-line-p)))
       (forward-line 1))
     (move-to-column col)))
 
 (defun sql-datum-admin-prev-row ()
-  "Move to the previous data row."
+  "Move to the previous data or header row."
   (interactive)
   (let ((col (current-column)))
     (forward-line -1)
     (while (and (not (bobp))
-                (not (get-text-property (point) 'sql-datum-row-data)))
+                (not (sql-datum--admin-navigable-line-p)))
       (forward-line -1))
     (move-to-column col)))
+
+(defun sql-datum--admin-current-col-index ()
+  "Return the column index the cursor is in, based on col-positions."
+  (when sql-datum--admin-col-positions
+    (let ((cur (current-column))
+          (result nil))
+      (dolist (entry sql-datum--admin-col-positions)
+        (when (<= (cdr entry) cur)
+          (setq result (car entry))))
+      result)))
+
+(defun sql-datum-admin-next-cell ()
+  "Move to the next column in the current row."
+  (interactive)
+  (unless sql-datum--admin-col-positions
+    (user-error "No table data"))
+  (let* ((cur (current-column))
+         (next-pos nil))
+    ;; Find the first column start that is after current position
+    (dolist (entry sql-datum--admin-col-positions)
+      (when (and (> (cdr entry) cur)
+                 (or (null next-pos) (< (cdr entry) next-pos)))
+        (setq next-pos (cdr entry))))
+    (if next-pos
+        (move-to-column next-pos)
+      ;; Wrap to first column of next row
+      (sql-datum-admin-next-row)
+      (move-to-column (cdar sql-datum--admin-col-positions)))))
+
+(defun sql-datum-admin-prev-cell ()
+  "Move to the previous column in the current row."
+  (interactive)
+  (unless sql-datum--admin-col-positions
+    (user-error "No table data"))
+  (let* ((cur (current-column))
+         (prev-pos nil))
+    ;; Find the last column start that is before current position
+    (dolist (entry sql-datum--admin-col-positions)
+      (when (< (cdr entry) cur)
+        (setq prev-pos (cdr entry))))
+    (if prev-pos
+        (move-to-column prev-pos)
+      ;; Wrap to last column of previous row
+      (sql-datum-admin-prev-row)
+      (move-to-column (cdar (last sql-datum--admin-col-positions))))))
+
+(defun sql-datum-admin-cell-up ()
+  "Move to the same column in the previous data or header row."
+  (interactive)
+  (sql-datum-admin-prev-row))
+
+(defun sql-datum-admin-cell-down ()
+  "Move to the same column in the next data or header row."
+  (interactive)
+  (sql-datum-admin-next-row))
+
+(defun sql-datum-admin-cell-left ()
+  "Move to the previous column, staying on the same row."
+  (interactive)
+  (unless sql-datum--admin-col-positions
+    (user-error "No table data"))
+  (let* ((cur (current-column))
+         (prev-pos nil))
+    (dolist (entry sql-datum--admin-col-positions)
+      (when (< (cdr entry) cur)
+        (setq prev-pos (cdr entry))))
+    (when prev-pos
+      (move-to-column prev-pos))))
+
+(defun sql-datum-admin-cell-right ()
+  "Move to the next column, staying on the same row."
+  (interactive)
+  (unless sql-datum--admin-col-positions
+    (user-error "No table data"))
+  (let* ((cur (current-column))
+         (next-pos nil))
+    (dolist (entry sql-datum--admin-col-positions)
+      (when (and (> (cdr entry) cur)
+                 (or (null next-pos) (< (cdr entry) next-pos)))
+        (setq next-pos (cdr entry))))
+    (when next-pos
+      (move-to-column next-pos))))
 
 (defun sql-datum--admin-row-id-at-point ()
   "Get the row ID at point, or nil."
