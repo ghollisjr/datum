@@ -877,7 +877,10 @@ SQLI-BUF is the originating SQLi buffer."
         ;; Also set window point so the visible cursor moves
         (when-let ((w (get-buffer-window buf t)))
           (set-window-point w (point)))))
-    (display-buffer buf)
+    ;; Only show the buffer on first creation — refreshes should not
+    ;; steal focus or force the buffer visible.
+    (when initial
+      (pop-to-buffer buf))
     ;; Start auto-refresh for top-level panels (not sub-panels)
     (when (and initial (not sub-panel))
       (sql-datum--admin-start-timer buf))))
