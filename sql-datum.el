@@ -1299,7 +1299,8 @@ SQLI-BUF is the originating SQLi buffer."
     (while (and (not (eobp))
                 (not (sql-datum--admin-navigable-line-p)))
       (forward-line 1))
-    (move-to-column col)))
+    (move-to-column col)
+    (sql-datum--admin-ensure-cell-visible)))
 
 (defun sql-datum-admin-prev-row ()
   "Move to the previous data or header row."
@@ -1309,7 +1310,8 @@ SQLI-BUF is the originating SQLi buffer."
     (while (and (not (bobp))
                 (not (sql-datum--admin-navigable-line-p)))
       (forward-line -1))
-    (move-to-column col)))
+    (move-to-column col)
+    (sql-datum--admin-ensure-cell-visible)))
 
 (defun sql-datum--admin-current-col-index ()
   "Return the column index the cursor is in, based on col-positions."
@@ -1337,7 +1339,8 @@ SQLI-BUF is the originating SQLi buffer."
         (move-to-column next-pos)
       ;; Wrap to first column of next row
       (sql-datum-admin-next-row)
-      (move-to-column (cdar sql-datum--admin-col-positions)))))
+      (move-to-column (cdar sql-datum--admin-col-positions)))
+    (sql-datum--admin-ensure-cell-visible)))
 
 (defun sql-datum-admin-prev-cell ()
   "Move to the previous column in the current row."
@@ -1354,7 +1357,8 @@ SQLI-BUF is the originating SQLi buffer."
         (move-to-column prev-pos)
       ;; Wrap to last column of previous row
       (sql-datum-admin-prev-row)
-      (move-to-column (cdar (last sql-datum--admin-col-positions))))))
+      (move-to-column (cdar (last sql-datum--admin-col-positions))))
+    (sql-datum--admin-ensure-cell-visible)))
 
 (defun sql-datum-admin-cell-up ()
   "Move to the same column in the previous data or header row."
@@ -1377,7 +1381,8 @@ SQLI-BUF is the originating SQLi buffer."
       (when (< (cdr entry) cur)
         (setq prev-pos (cdr entry))))
     (when prev-pos
-      (move-to-column prev-pos))))
+      (move-to-column prev-pos)
+      (sql-datum--admin-ensure-cell-visible))))
 
 (defun sql-datum-admin-cell-right ()
   "Move to the next column, staying on the same row."
@@ -1391,7 +1396,34 @@ SQLI-BUF is the originating SQLi buffer."
                  (or (null next-pos) (< (cdr entry) next-pos)))
         (setq next-pos (cdr entry))))
     (when next-pos
-      (move-to-column next-pos))))
+      (move-to-column next-pos)
+      (sql-datum--admin-ensure-cell-visible))))
+
+(defun sql-datum--admin-ensure-cell-visible ()
+  "Scroll horizontally so the current cell is visible in the window.
+Shows the cell start and tries to reveal as much of the cell as possible."
+  (when-let ((win (get-buffer-window (current-buffer))))
+    (let* ((col (current-column))
+           (win-width (window-body-width win))
+           (hscroll (window-hscroll win))
+           ;; Find end of current cell (next column start or end of line)
+           (cell-end col))
+      ;; Find the next column start to determine cell width
+      (when sql-datum--admin-col-positions
+        (let ((next nil))
+          (dolist (entry sql-datum--admin-col-positions)
+            (when (and (> (cdr entry) col)
+                       (or (null next) (< (cdr entry) next)))
+              (setq next (cdr entry))))
+          (setq cell-end (or next (save-excursion (end-of-line) (current-column))))))
+      ;; Scroll so that cell start is visible and as much of cell as possible
+      (cond
+       ;; Cell start is off-screen to the left
+       ((< col hscroll)
+        (set-window-hscroll win col))
+       ;; Cell end is off-screen to the right
+       ((> cell-end (+ hscroll win-width -1))
+        (set-window-hscroll win (max 0 (- cell-end win-width -1))))))))
 
 (defun sql-datum--admin-row-id-at-point ()
   "Get the row ID at point, or nil."
@@ -1791,10 +1823,13 @@ JOB-NAME the parent job, IS-NEW non-nil for creating a new schedule."
         (setq sql-datum--admin-timer nil)))))
 
 (defun sql-datum--admin-tick (buf)
-  "Timer callback: refresh admin buffer BUF if it still exists."
+  "Timer callback: refresh admin buffer BUF if it still exists.
+Skip refresh while the minibuffer is active (e.g. company-mode,
+completing-read) to avoid cursor position disruption."
   (if (buffer-live-p buf)
-      (with-current-buffer buf
-        (sql-datum--admin-send-refresh))
+      (unless (active-minibuffer-window)
+        (with-current-buffer buf
+          (sql-datum--admin-send-refresh)))
     ;; Buffer killed — stop timer
     (when (timerp sql-datum--admin-timer)
       (cancel-timer sql-datum--admin-timer))))
