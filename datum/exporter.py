@@ -118,13 +118,26 @@ def export_out_target(cursor):
         return
 
     elapsed = time.monotonic() - t_start
-    envelope.info(f":out - {rows_written} rows exported in {elapsed:.2f}s.")
+    rate = rows_written / elapsed if elapsed > 0 else 0
+    envelope.info(f":out - {rows_written:,} rows exported in {elapsed:.1f}s "
+                  f"({rate:,.0f} rows/s).")
     envelope.result_file(path, fmt)
 
 
 def _infer_format(path):
     ext = os.path.splitext(path)[1].lower()
     return {".csv": "csv", ".parquet": "parquet", ".json": "json"}.get(ext)
+
+
+def _export_progress(rows_written, t_start):
+    """Send a progress message with row count and rate."""
+    elapsed = time.monotonic() - t_start
+    if elapsed > 0 and rows_written > 0:
+        rate = rows_written / elapsed
+        envelope.info(f":out - {rows_written:,} rows fetched "
+                      f"[{rate:,.0f} rows/s]")
+    else:
+        envelope.info(f":out - {rows_written:,} rows fetched...")
 
 
 def _dedupe_headers(headers):
@@ -153,6 +166,9 @@ def _export_polars(path, cursor, fmt):
         envelope.warn(":out - duplicate column names detected; suffixed with _1, _2, etc.")
     batch_size = 50_000
     all_rows = []
+    t_start = time.monotonic()
+
+    envelope.info(":out - fetching results...")
 
     # Polars cannot stream from Python iterables — pl.DataFrame(),
     # pl.from_dicts(), and pl.from_records() all materialize fully in memory.
@@ -162,6 +178,7 @@ def _export_polars(path, cursor, fmt):
     rows = cursor.fetchmany(batch_size)
     while rows:
         all_rows.extend(rows)
+        _export_progress(len(all_rows), t_start)
         rows = cursor.fetchmany(batch_size)
 
     if not all_rows:
@@ -173,6 +190,7 @@ def _export_polars(path, cursor, fmt):
                    for i in range(len(headers))}
         df = pl.DataFrame(columns)
 
+    envelope.info(f":out - writing {len(all_rows):,} rows to {os.path.basename(path)}...")
     if fmt == "csv":
         df.write_csv(path)
     elif fmt == "parquet":
@@ -193,6 +211,8 @@ def _export_csv(path, cursor):
         envelope.warn(":out - duplicate column names detected; suffixed with _1, _2, etc.")
     rows_written = 0
     batch_size = 10_000
+    t_start = time.monotonic()
+    envelope.info(":out - fetching results...")
     with open(path, 'w', encoding='utf-8', newline='') as f:
         writer = csv.writer(f)
         writer.writerow(headers)
@@ -200,6 +220,7 @@ def _export_csv(path, cursor):
         while rows:
             writer.writerows(rows)
             rows_written += len(rows)
+            _export_progress(rows_written, t_start)
             rows = cursor.fetchmany(batch_size)
     return rows_written
 
@@ -217,6 +238,8 @@ def _export_arrow(path, cursor, fmt):
     batch_size = 10_000
     rows_written = 0
     batches = []
+    t_start = time.monotonic()
+    envelope.info(":out - fetching results...")
 
     rows = cursor.fetchmany(batch_size)
     while rows:
@@ -224,11 +247,13 @@ def _export_arrow(path, cursor, fmt):
         batch = pa.record_batch(columns, names=headers)
         batches.append(batch)
         rows_written += len(rows)
+        _export_progress(rows_written, t_start)
         rows = cursor.fetchmany(batch_size)
 
     if not batches:
         return 0
 
+    envelope.info(f":out - writing {rows_written:,} rows to {os.path.basename(path)}...")
     table = pa.Table.from_batches(batches)
 
     if fmt == "parquet":

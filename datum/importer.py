@@ -36,7 +36,33 @@ except ImportError:
     _HAVE_PYARROW = False
 
 
-def run(path, table_name, mode, connection, driver, batch_size=1000):
+# --- Progress reporting ---
+
+def _progress(rows_inserted, total, t_start):
+    """Send a progress message with count, percentage, and ETA."""
+    elapsed = time.monotonic() - t_start
+    if total and total > 0:
+        pct = rows_inserted / total * 100
+        if rows_inserted > 0 and elapsed > 0:
+            rate = rows_inserted / elapsed
+            remaining = (total - rows_inserted) / rate
+            mins, secs = divmod(int(remaining), 60)
+            eta = f"{mins}m{secs:02d}s" if mins else f"{secs}s"
+            envelope.info(f":in - {rows_inserted:,}/{total:,} rows "
+                          f"({pct:.0f}%) "
+                          f"[{rate:,.0f} rows/s, ~{eta} remaining]")
+        else:
+            envelope.info(f":in - {rows_inserted:,}/{total:,} rows ({pct:.0f}%)")
+    else:
+        if elapsed > 0 and rows_inserted > 0:
+            rate = rows_inserted / elapsed
+            envelope.info(f":in - {rows_inserted:,} rows "
+                          f"[{rate:,.0f} rows/s]")
+        else:
+            envelope.info(f":in - {rows_inserted:,} rows inserted so far...")
+
+
+def run(path, table_name, mode, connection, driver, batch_size=5000):
     """Entry point for :in command.
 
     path:       absolute path to the source file.
@@ -44,7 +70,7 @@ def run(path, table_name, mode, connection, driver, batch_size=1000):
     mode:       one of None (default, error if exists), ':insert', ':replace'.
     connection: live pyodbc connection.
     driver:     a BaseDriver instance for type mapping.
-    batch_size: number of rows per executemany call (default 1000).
+    batch_size: number of rows per executemany call (default 5000).
     """
     if not os.path.exists(path):
         envelope.error(f":in - file not found: {path}")
@@ -92,8 +118,9 @@ def run(path, table_name, mode, connection, driver, batch_size=1000):
                                       batch_size)
 
     elapsed = time.monotonic() - t_start
-    envelope.info(f":in - {rows_inserted} rows inserted into '{table_name}' "
-                  f"in {elapsed:.2f}s.")
+    rate = rows_inserted / elapsed if elapsed > 0 else 0
+    envelope.info(f":in - {rows_inserted:,} rows inserted into '{table_name}' "
+                  f"in {elapsed:.1f}s ({rate:,.0f} rows/s).")
 
 
 # --- Format dispatch ---
@@ -144,9 +171,17 @@ def _polars_type_str(dtype):
 
 
 def _infer_polars_string_col(series):
-    """Infer a type key from a polars String series by checking all non-null values."""
-    non_null = series.drop_nulls().to_list()
-    values = [v for v in non_null if v != '']
+    """Infer a type key from a polars String series by sampling non-null values."""
+    non_null = series.drop_nulls()
+    total = len(non_null)
+    if total == 0:
+        return "string"
+    # Sample up to 1000 values for type inference instead of checking all
+    if total > 1000:
+        sample = non_null.sample(1000, seed=42)
+    else:
+        sample = non_null
+    values = [v for v in sample.to_list() if v != '']
     if not values:
         return "string"
     if all(_is_int(v) for v in values):
@@ -157,14 +192,16 @@ def _infer_polars_string_col(series):
 
 
 def _import_polars(path, table_name, table_exists, cursor, connection, driver, fmt,
-                   batch_size=1000):
+                   batch_size=5000):
     """Import a file via polars. Returns row count."""
+    envelope.info(f":in - reading {os.path.basename(path)}...")
+
     if fmt == "csv":
         # Read all columns as strings to avoid polars misinterpreting
         # varchar fields that happen to contain mostly-numeric data
         # (e.g. an MRN column with mostly-integer values but some
         # alphanumeric entries).  Type inference for DDL is done
-        # separately below using the full dataset.
+        # separately below using a sample of the dataset.
         df = pl.read_csv(path, infer_schema_length=0)
     elif fmt == "parquet":
         df = pl.read_parquet(path)
@@ -172,13 +209,15 @@ def _import_polars(path, table_name, table_exists, cursor, connection, driver, f
         df = pl.read_ndjson(path)
 
     headers = df.columns
+    total = df.height
+    envelope.info(f":in - {total:,} rows loaded, preparing table...")
 
     if not table_exists:
         col_types = []
         for name in headers:
             if fmt == "csv":
                 # All columns are String from infer_schema_length=0;
-                # infer types from actual values across the full dataset.
+                # infer types from a sample of values.
                 py_type = _infer_polars_string_col(df[name])
             else:
                 py_type = _polars_type_str(df[name].dtype)
@@ -187,21 +226,22 @@ def _import_polars(path, table_name, table_exists, cursor, connection, driver, f
         ddl = _build_ddl(table_name, col_types, driver)
         cursor.execute(ddl)
         connection.commit()
-        envelope.info(f"Created table '{table_name}'.")
+        envelope.info(f"Created table '{table_name}' ({len(headers)} columns).")
 
     placeholders = ", ".join(["?"] * len(headers))
     insert_sql = f"INSERT INTO {table_name} VALUES ({placeholders})"
     cursor.fast_executemany = True
 
-    # Stream in batches
+    # Stream in batches with progress reporting
     rows_inserted = 0
-    total = df.height
+    t_start = time.monotonic()
 
     for offset in range(0, total, batch_size):
         chunk = df.slice(offset, batch_size)
         rows = chunk.rows()
         cursor.executemany(insert_sql, rows)
         rows_inserted += len(rows)
+        _progress(rows_inserted, total, t_start)
 
     connection.commit()
     return rows_inserted
@@ -210,7 +250,9 @@ def _import_polars(path, table_name, table_exists, cursor, connection, driver, f
 # --- CSV import (stdlib, no extra deps) ---
 
 def _import_csv(path, table_name, table_exists, cursor, connection, driver,
-                batch_size=1000):
+                batch_size=5000):
+    envelope.info(f":in - reading {os.path.basename(path)}...")
+
     with open(path, newline='', encoding='utf-8-sig') as f:
         reader = csv.reader(f)
         headers = next(reader)
@@ -226,13 +268,22 @@ def _import_csv(path, table_name, table_exists, cursor, connection, driver,
         ddl = _build_ddl(table_name, col_types, driver)
         cursor.execute(ddl)
         connection.commit()
-        envelope.info(f"Created table '{table_name}'.")
+        envelope.info(f"Created table '{table_name}' ({len(headers)} columns).")
 
     placeholders = ", ".join(["?"] * len(headers))
     insert_sql = f"INSERT INTO {table_name} VALUES ({placeholders})"
 
+    # Count total rows for progress (cheap scan)
+    total = 0
+    with open(path, newline='', encoding='utf-8-sig') as f:
+        for _ in f:
+            total += 1
+    total -= 1  # subtract header
+    envelope.info(f":in - {total:,} rows to insert...")
+
     cursor.fast_executemany = True
     rows_inserted = 0
+    t_start = time.monotonic()
 
     # Re-open and stream all rows including sample
     with open(path, newline='', encoding='utf-8-sig') as f:
@@ -245,6 +296,7 @@ def _import_csv(path, table_name, table_exists, cursor, connection, driver,
                 cursor.executemany(insert_sql, batch)
                 rows_inserted += len(batch)
                 batch = []
+                _progress(rows_inserted, total, t_start)
         if batch:
             cursor.executemany(insert_sql, batch)
             rows_inserted += len(batch)
@@ -287,13 +339,17 @@ def _is_float(s):
 # --- Arrow import (parquet, json) ---
 
 def _import_arrow(path, table_name, table_exists, cursor, connection, driver, fmt,
-                  batch_size=1000):
+                  batch_size=5000):
+    envelope.info(f":in - reading {os.path.basename(path)}...")
+
     if fmt == "parquet":
         table = pq.read_table(path)
     else:  # json
         table = pa_json.read_json(path)
 
     schema = table.schema
+    total = table.num_rows
+    envelope.info(f":in - {total:,} rows loaded, preparing table...")
 
     if not table_exists:
         col_types = []
@@ -304,7 +360,7 @@ def _import_arrow(path, table_name, table_exists, cursor, connection, driver, fm
         ddl = _build_ddl(table_name, col_types, driver)
         cursor.execute(ddl)
         connection.commit()
-        envelope.info(f"Created table '{table_name}'.")
+        envelope.info(f"Created table '{table_name}' ({len(schema)} columns).")
 
     placeholders = ", ".join(["?"] * len(schema))
     insert_sql = f"INSERT INTO {table_name} VALUES ({placeholders})"
@@ -312,12 +368,15 @@ def _import_arrow(path, table_name, table_exists, cursor, connection, driver, fm
 
     # Stream in batches via record batches to avoid loading everything at once
     rows_inserted = 0
+    t_start = time.monotonic()
+
     for batch in table.to_batches(max_chunksize=batch_size):
         rows = [tuple(batch.column(i)[j].as_py()
                       for i in range(batch.num_columns))
                 for j in range(batch.num_rows)]
         cursor.executemany(insert_sql, rows)
         rows_inserted += len(rows)
+        _progress(rows_inserted, total, t_start)
 
     connection.commit()
     return rows_inserted

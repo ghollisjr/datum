@@ -70,7 +70,7 @@ By default, export completion is reported in the minibuffer only."
   :type 'boolean
   :group 'SQL)
 
-(defcustom sql-datum-import-batch-size 1000
+(defcustom sql-datum-import-batch-size 5000
   "Number of rows per batch for :in imports.
 Lower values use less memory; higher values are faster.
 Override per-call with a prefix argument to `sql-datum-import'."

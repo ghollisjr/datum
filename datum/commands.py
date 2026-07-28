@@ -365,7 +365,7 @@ def in_import(args):
               "Example: :in /tmp/data.csv my_table")
         return
     # Extract :batch N before splitting flags/non-flags
-    batch_size = 1000
+    batch_size = 5000
     filtered_args = []
     i = 0
     while i < len(args):
