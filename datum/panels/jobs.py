@@ -172,13 +172,16 @@ def _job_list(cursor):
             CASE
                 WHEN ja.start_execution_date IS NOT NULL
                      AND ja.stop_execution_date IS NULL
-                THEN 'Running'
+                THEN 'Executing'
+                ELSE 'Idle'
+            END                                          AS [Status],
+            CASE
                 WHEN h.run_status = 0 THEN 'Failed'
                 WHEN h.run_status = 1 THEN 'Succeeded'
                 WHEN h.run_status = 2 THEN 'Retry'
                 WHEN h.run_status = 3 THEN 'Canceled'
-                ELSE 'Unknown'
-            END                                          AS [Last Status],
+                ELSE ''
+            END                                          AS [Last Result],
             -- For running jobs: show start time; for finished: show last start
             CASE
                 WHEN ja.start_execution_date IS NOT NULL
