@@ -129,7 +129,7 @@ def result_file(path, fmt):
     _send("result-file", f"{path}:{fmt}")
 
 
-_CHUNK_MAX = 2000  # max JSON chars per envelope line (conservative for comint)
+_CHUNK_MAX = 65536  # max JSON chars per envelope line
 
 
 def introspect(kind, items):
@@ -148,26 +148,24 @@ def introspect(kind, items):
         _send("introspect", f"{kind}:{payload}")
         return
 
-    # Chunk items into batches that fit within _CHUNK_MAX
+    # Chunk items into batches that fit within _CHUNK_MAX.
+    # Use incremental length estimation to avoid O(n^2) re-serialization.
     batch = []
+    batch_len = 2  # accounts for JSON array brackets []
     first = True
     for item in items:
-        batch.append(item)
-        # Check if this batch is getting large enough
-        if len(json.dumps(batch)) > _CHUNK_MAX:
-            if len(batch) > 1:
-                # Send all but the last (which pushed us over)
-                overflow = batch.pop()
-                msg_type = "introspect" if first else "introspect+"
-                _send(msg_type, f"{kind}:{json.dumps(batch)}")
-                first = False
-                batch = [overflow]
-            else:
-                # Single item exceeds limit — send it alone
-                msg_type = "introspect" if first else "introspect+"
-                _send(msg_type, f"{kind}:{json.dumps(batch)}")
-                first = False
-                batch = []
+        item_json = json.dumps(item)
+        # +2 for ", " separator (first item has no separator but [] accounts for it)
+        item_cost = len(item_json) + (2 if batch else 0)
+        if batch and batch_len + item_cost > _CHUNK_MAX:
+            msg_type = "introspect" if first else "introspect+"
+            _send(msg_type, f"{kind}:{json.dumps(batch)}")
+            first = False
+            batch = [item]
+            batch_len = 2 + len(item_json)
+        else:
+            batch.append(item)
+            batch_len += item_cost
     # Send remaining items
     if batch:
         msg_type = "introspect" if first else "introspect+"
