@@ -446,6 +446,8 @@ Handles partial envelope lines split across multiple filter calls."
              (sql-datum--running-start-timer))))))
     ("admin-panel"
      (sql-datum--handle-admin-panel payload))
+    ("bg-ready"
+     (sql-datum--trace "BG-READY: %s" payload))
     ("ready"
      (sql-datum--trace "READY envelope received, setting sql-datum--ready=t")
      (setq sql-datum--ready t)

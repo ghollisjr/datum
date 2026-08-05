@@ -4,6 +4,7 @@ This module deals with built-in commands (:rows, :reconnect, etc.) and
 processing of custom queries.
 """
 from . import admin
+from . import background
 from . import connect
 from . import envelope
 from . import exporter
@@ -417,7 +418,7 @@ def sql_type(args):
 
 # --- Introspection commands ---
 
-def _run_introspect(sql, kind, label, params=None, silent=False):
+def _run_introspect(sql, kind, label, params=None, silent=False, conn=None):
     """Run an introspection query, print results, and send an envelope.
 
     sql can be a plain SQL string, or when params is given, a parameterized
@@ -425,9 +426,11 @@ def _run_introspect(sql, kind, label, params=None, silent=False):
 
     When silent is True, skip all print output but still execute the query
     and send the envelope.
+
+    conn: optional pyodbc connection to use (e.g. the background connection).
     """
     try:
-        cursor = connect.get_connection().cursor()
+        cursor = (conn or connect.get_connection()).cursor()
         if params:
             cursor.execute(sql, params)
         else:
@@ -599,7 +602,7 @@ def routines(args):
         print(f"Error running routines query: {err}")
 
 
-def columns(args):
+def columns(args, conn=None):
     """Built-in :columns command."""
     global _driver
     if not args:
@@ -624,7 +627,7 @@ def columns(args):
     table = parts[-1]
     sql, params = _driver.sql_list_columns(schema, table, database=database)
     _run_introspect(sql, f"columns:{table_name}", f"columns for {table_name}",
-                    params=params, silent=silent)
+                    params=params, silent=silent, conn=conn)
 
 
 def running(args):
@@ -792,6 +795,9 @@ def use_database(args):
             envelope.meta("database", db)
         except Exception as err:
             print(f"Error switching database: {err}")
+    # Tell the background thread to switch databases too
+    if background.is_running():
+        background.switch_database(db)
 
 
 # --- Helpers ---
@@ -905,7 +911,7 @@ def _format_single_line_sql(text):
     return ''.join(out)
 
 
-def refresh_db(args):
+def refresh_db(args, conn=None):
     """Built-in :refresh-db command — introspect a specific remote database.
 
     Only works for MSSQL (cross-database three-part names).  Sends
@@ -920,7 +926,10 @@ def refresh_db(args):
         print(":refresh-db is only supported on MSSQL.")
         return
     database = args[0]
-    conn = connect.get_connection()
+    if conn is None and background.is_running():
+        background.submit(f"refresh-db:{database}", refresh_db, (args,))
+        return ""
+    conn = conn or connect.get_connection()
 
     # Schemas
     try:
@@ -992,10 +1001,13 @@ def refresh_db(args):
     envelope.introspect(f"xdb:{database}:done", [])
 
 
-def refresh_databases(args):
+def refresh_databases(args, conn=None):
     """Built-in :refresh-databases — refresh database list."""
     global _driver
-    conn = connect.get_connection()
+    if conn is None and background.is_running():
+        background.submit("refresh-databases", refresh_databases, (args,))
+        return ""
+    conn = conn or connect.get_connection()
     try:
         cursor = conn.cursor()
         cursor.execute(_driver.sql_list_databases)
@@ -1007,10 +1019,13 @@ def refresh_databases(args):
     return ""
 
 
-def refresh_schemas(args):
+def refresh_schemas(args, conn=None):
     """Built-in :refresh-schemas — refresh schema list."""
     global _driver
-    conn = connect.get_connection()
+    if conn is None and background.is_running():
+        background.submit("refresh-schemas", refresh_schemas, (args,))
+        return ""
+    conn = conn or connect.get_connection()
     try:
         cursor = conn.cursor()
         cursor.execute(_driver.sql_list_schemas)
@@ -1024,10 +1039,13 @@ def refresh_schemas(args):
     return ""
 
 
-def refresh_tables(args):
+def refresh_tables(args, conn=None):
     """Built-in :refresh-tables — refresh table list."""
     global _driver
-    conn = connect.get_connection()
+    if conn is None and background.is_running():
+        background.submit("refresh-tables", refresh_tables, (args,))
+        return ""
+    conn = conn or connect.get_connection()
     try:
         cursor = conn.cursor()
         cursor.execute(_driver.sql_list_tables)
@@ -1054,10 +1072,13 @@ def refresh_tables(args):
     return ""
 
 
-def refresh_routines(args):
+def refresh_routines(args, conn=None):
     """Built-in :refresh-routines — refresh routine list and signatures."""
     global _driver
-    conn = connect.get_connection()
+    if conn is None and background.is_running():
+        background.submit("refresh-routines", refresh_routines, (args,))
+        return ""
+    conn = conn or connect.get_connection()
     try:
         cursor = conn.cursor()
         cursor.execute(_driver.sql_list_routines)

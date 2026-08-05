@@ -1,5 +1,6 @@
 """REPL loop module."""
 
+from . import background
 from . import connect
 from . import environment
 from . import printer
@@ -56,6 +57,9 @@ def query_loop():
 
     connect.show_connection_banner_and_get_prompt_header()
 
+    # Start background introspection thread with its own connection.
+    background.start(connect.get_conn_string())
+
     # Emit metadata Emacs can use to populate the mode line.
     envelope.meta("server", connect.get_server_or_dsn())
     _emit_current_db_and_user()
@@ -94,6 +98,8 @@ def query_loop():
                   "Message:", message, "\n"
                   "---ERROR---", flush=True)
         query = prompt_for_query_or_command()
+
+    background.stop()
 
 
 def _emit_current_db_and_user():

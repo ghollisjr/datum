@@ -24,11 +24,14 @@ Message types:
 
 import json
 import sys
+import threading
 
 _SIGIL = "##DATUM"
 _END = "##"
 
 _mode = "stdout"  # "stdout" (default/REPL), "stderr", or "suppress"
+
+_stdout_lock = threading.Lock()
 
 
 def set_mode(mode):
@@ -38,11 +41,27 @@ def set_mode(mode):
 
 
 def _send(msg_type, payload):
-    """Write a single envelope line, respecting the current output mode."""
+    """Write a single envelope line, respecting the current output mode.
+
+    Thread-safe: uses _stdout_lock to prevent interleaved output from
+    the background introspection thread and the main REPL thread.
+
+    Uses dest.write() + dest.flush() instead of print() to guarantee
+    the text and newline are submitted in a single write() call.
+    Python's print() does two write() calls (text + end) which can
+    interleave with other threads on the same file object.
+
+    Background envelopes may land on the same line as the ``>`` prompt
+    (e.g. ``>##DATUM:introspect:...##``).  This is fine — Emacs's
+    preoutput filter uses ``string-match`` which matches anywhere in a
+    line, so the envelope is processed and the whole line consumed.
+    """
     if _mode == "suppress":
         return
     dest = sys.stderr if _mode == "stderr" else sys.stdout
-    print(f"{_SIGIL}:{msg_type}:{payload}{_END}", flush=True, file=dest)
+    with _stdout_lock:
+        dest.write(f"{_SIGIL}:{msg_type}:{payload}{_END}\n")
+        dest.flush()
 
 
 def info(message):
@@ -168,3 +187,8 @@ def admin_panel(result):
 def meta(key, value):
     """Send a key/value metadata pair to Emacs (db, schema, user, version)."""
     _send("meta", f"{key}:{value}")
+
+
+def bg_ready(task_name):
+    """Signal that a background introspection task has completed."""
+    _send("bg-ready", task_name)

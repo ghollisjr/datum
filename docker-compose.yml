@@ -60,6 +60,7 @@ services:
         condition: service_healthy
     volumes:
       - ./test-mssql.sql:/tmp/test-mssql.sql:ro
+      - ./test-mssql-big.sql:/tmp/test-mssql-big.sql:ro
       - ./docker/initdb/mssql-init.sh:/tmp/mssql-init.sh:ro
     entrypoint: ["bash", "/tmp/mssql-init.sh"]
 
