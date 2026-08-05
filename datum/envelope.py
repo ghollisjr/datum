@@ -23,8 +23,10 @@ Message types:
 """
 
 import json
+import os
 import sys
 import threading
+import time
 
 _SIGIL = "##DATUM"
 _END = "##"
@@ -32,6 +34,38 @@ _END = "##"
 _mode = "stdout"  # "stdout" (default/REPL), "stderr", or "suppress"
 
 _stdout_lock = threading.Lock()
+
+# Debug logging — enabled by setting DATUM_DEBUG_ENVELOPE to a file path.
+# Logs every _send() call with timestamp, thread name, message type,
+# and payload length.  Useful for diagnosing envelope leaking issues.
+_debug_file = None
+_debug_lock = threading.Lock()
+
+
+def _debug_init():
+    """Lazily open the debug log file if DATUM_DEBUG_ENVELOPE is set."""
+    global _debug_file
+    if _debug_file is not None:
+        return
+    path = os.environ.get("DATUM_DEBUG_ENVELOPE")
+    if path:
+        _debug_file = open(path, "a", buffering=1)  # line-buffered
+        _debug_file.write(f"\n=== datum envelope debug log started "
+                          f"{time.strftime('%Y-%m-%d %H:%M:%S')} ===\n")
+    else:
+        _debug_file = False  # sentinel: checked, not set
+
+
+def _debug_log(msg):
+    """Write a timestamped line to the debug log (if enabled)."""
+    _debug_init()
+    if not _debug_file:
+        return
+    ts = time.strftime("%H:%M:%S")
+    ms = int((time.time() % 1) * 1000)
+    thread = threading.current_thread().name
+    with _debug_lock:
+        _debug_file.write(f"[{ts}.{ms:03d}] [{thread}] {msg}\n")
 
 
 def set_mode(mode):
@@ -59,9 +93,17 @@ def _send(msg_type, payload):
     if _mode == "suppress":
         return
     dest = sys.stderr if _mode == "stderr" else sys.stdout
+    line = f"{_SIGIL}:{msg_type}:{payload}{_END}\n"
+    _debug_log(f"SEND {msg_type} len={len(line)} dest={'stderr' if dest is sys.stderr else 'stdout'}")
     with _stdout_lock:
-        dest.write(f"{_SIGIL}:{msg_type}:{payload}{_END}\n")
+        # Flush any Python-buffered data (from print() calls) first,
+        # then write directly to the file descriptor.  os.write() is a
+        # single write() syscall — atomic for data under PIPE_BUF (4096)
+        # — bypassing TextIOWrapper/BufferedWriter which can split or
+        # reorder bytes across multiple syscalls.
         dest.flush()
+        os.write(dest.fileno(), line.encode(dest.encoding or "utf-8"))
+    _debug_log(f"SENT {msg_type} ok")
 
 
 def info(message):

@@ -316,38 +316,124 @@ When comint splits a long output across multiple filter invocations,
 an envelope line may arrive in fragments.  We hold the incomplete
 fragment here until the next call completes it.")
 
+(defvar sql-datum--debug-log-file nil
+  "When non-nil, path to a file for debug logging.
+Set via `sql-datum-enable-debug-log'.  Captures preoutput filter
+inputs and outputs to help diagnose envelope leaking issues.")
+
+(defun sql-datum-enable-debug-log (path)
+  "Enable file-based debug logging to PATH.
+Logs every preoutput filter call with input/output details.
+Use this to diagnose envelope text leaking into the REPL."
+  (interactive "FDebug log file: ")
+  (setq sql-datum--debug-log-file path)
+  (with-temp-buffer
+    (insert (format "=== sql-datum debug log started %s ===\n"
+                    (format-time-string "%Y-%m-%d %H:%M:%S")))
+    (write-region (point-min) (point-max) path nil 'silent))
+  (message "datum: debug logging to %s" path))
+
+(defun sql-datum-disable-debug-log ()
+  "Disable file-based debug logging."
+  (interactive)
+  (setq sql-datum--debug-log-file nil)
+  (message "datum: debug logging disabled"))
+
+(defun sql-datum--debug-log (fmt &rest args)
+  "Write a timestamped line to the debug log file (if enabled)."
+  (when sql-datum--debug-log-file
+    (let ((msg (apply #'format fmt args))
+          (ts (format-time-string "%H:%M:%S.%3N")))
+      (write-region (format "[%s] %s\n" ts msg) nil
+                    sql-datum--debug-log-file t 'silent))))
+
 (defun sql-datum--preoutput-filter (output)
   "Strip envelope lines from OUTPUT and act on them.
 Installed as a `comint-preoutput-filter-functions' hook.
 Returns OUTPUT with all ##DATUM:...## lines removed.
 Handles partial envelope lines split across multiple filter calls."
+  (condition-case err
+      (sql-datum--preoutput-filter-1 output)
+    (error
+     ;; If the filter errors, log it and return output unmodified so
+     ;; we can diagnose the issue.  Without this, comint may deregister
+     ;; the filter entirely, causing ALL subsequent output to leak.
+     (sql-datum--debug-log "FILTER ERROR: %s" err)
+     (sql-datum--trace "preoutput-filter ERROR: %s" err)
+     (message "datum: preoutput filter error: %s" err)
+     output)))
+
+(defun sql-datum--preoutput-filter-1 (output)
+  "Inner implementation of the preoutput filter (called via condition-case)."
+  (let ((has-datum (string-match-p "##DATUM:" output)))
+    (when has-datum
+      (sql-datum--debug-log "INPUT len=%d ends-nl=%s partial=%s"
+                            (length output)
+                            (if (string-suffix-p "\n" output) "y" "n")
+                            (if sql-datum--partial-line
+                                (format "%d" (length sql-datum--partial-line))
+                              "nil"))
+      (sql-datum--debug-log "INPUT[0:200]: %s"
+                            (substring output 0 (min 200 (length output)))))
+    (sql-datum--trace "preoutput-filter: INPUT len=%d has-DATUM=%s ends-newline=%s"
+                      (length output)
+                      (if has-datum "yes" "no")
+                      (if (string-suffix-p "\n" output) "yes" "no")))
   (let ((lines (split-string output "\n"))
         (clean-lines nil))
     ;; Prepend any buffered partial line to the first line
     (when (and sql-datum--partial-line lines)
+      (sql-datum--debug-log "PREPEND partial %d chars"
+                            (length sql-datum--partial-line))
       (setcar lines (concat sql-datum--partial-line (car lines)))
       (setq sql-datum--partial-line nil))
     ;; Check if the last line is partial (output didn't end with newline).
-    ;; A partial line is one that looks like it could be the start of an
-    ;; envelope but doesn't have the closing ##.
+    ;; A partial line could be:
+    ;;  a) An envelope that started but has no closing ## yet.
+    ;;  b) A pty split in the middle of "##DATUM:" (e.g., line ends with "##D").
     (let ((last-line (car (last lines))))
       (when (and last-line
                  (not (string-empty-p last-line))
-                 (string-match-p "##DATUM:" last-line)
-                 (not (string-match-p "##DATUM:[^:]+:.*?##" last-line)))
-        ;; Incomplete envelope — buffer it for next call
+                 (or
+                  ;; Has ##DATUM: but no complete envelope → standard partial
+                  (and (string-match-p "##DATUM:" last-line)
+                       (not (string-match-p "##DATUM:[^:]+:.*?##" last-line)))
+                  ;; Ends with a partial "##DATUM:" prefix → pty split mid-marker
+                  (string-match-p "##D\\(A\\(T\\(U\\(M:?\\)?\\)?\\)?\\)?\\'" last-line)
+                  ;; Ends with # or ## but has no ##DATUM: → pty split at very
+                  ;; start of envelope marker.  The PTY can split "##DATUM:"
+                  ;; between the two "#" chars, yielding a line ending with
+                  ;; just "#" or "##".  Buffer it so the next chunk's "#DATUM:..."
+                  ;; gets the missing "#" prepended back.
+                  (and (not (string-match-p "##DATUM:" last-line))
+                       (string-match-p "#\\{1,2\\}\\'" last-line))))
+        (sql-datum--debug-log "BUFFER partial %d chars: %s"
+                              (length last-line)
+                              (substring last-line 0 (min 80 (length last-line))))
         (setq sql-datum--partial-line last-line)
         (setq lines (butlast lines))))
     (dolist (line lines)
       (cond
-       ((string-match sql-datum--envelope-re line)
-        (sql-datum--handle-envelope (match-string 1 line)
-                                    (match-string 2 line)))
-       ;; Safety net: suppress any line containing envelope markers
-       ;; that the regex didn't fully match (e.g. corrupted/truncated).
+       ;; Line contains envelope marker(s) — extract and process ALL matches.
+       ;; Multiple envelopes can end up on one line if the newline between
+       ;; them was lost in transit (pty buffering, Python I/O layering).
        ((string-match-p "##DATUM:" line)
-        (sql-datum--trace "preoutput-filter: suppressed unmatched envelope fragment: %s"
-                          (substring line 0 (min 80 (length line)))))
+        (let ((start 0)
+              (handled nil))
+          (while (string-match sql-datum--envelope-re line start)
+            (let ((etype (match-string 1 line))
+                  (epayload (match-string 2 line)))
+              (sql-datum--debug-log "MATCH %s payload=%d" etype (length epayload))
+              (condition-case handler-err
+                  (sql-datum--handle-envelope etype epayload)
+                (error
+                 (sql-datum--debug-log "HANDLER ERROR for %s: %s" etype handler-err))))
+            (setq start (match-end 0))
+            (setq handled t))
+          (unless handled
+            (sql-datum--debug-log "SUPPRESS unmatched %d chars: %s"
+                                  (length line)
+                                  (substring line 0 (min 120 (length line)))))))
        (t (push line clean-lines))))
     (let ((result (string-join (nreverse clean-lines) "\n")))
       ;; When silent commands are pending, suppress the prompt and any
@@ -371,6 +457,15 @@ Handles partial envelope lines split across multiple filter calls."
          ;; to a silent command because suppress-prompt-count > 0.
          ((string-match-p "\\`[^>]*\\'" result)
           (setq result ""))))
+      ;; LEAK DETECTION: if result still contains envelope markers,
+      ;; something went wrong — log it prominently.
+      (when (string-match-p "##DATUM:" result)
+        (sql-datum--debug-log "*** LEAK DETECTED *** result len=%d: %s"
+                              (length result)
+                              (substring result 0 (min 300 (length result))))
+        (sql-datum--debug-log "*** Original output len=%d: %s"
+                              (length output)
+                              (substring output 0 (min 300 (length output)))))
       result)))
 
 (defvar sql-datum--running-timer nil
