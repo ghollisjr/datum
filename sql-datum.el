@@ -197,19 +197,24 @@ Cleared on `sql-datum-refresh'.")
         (insert (format "[%s] %s\n" ts msg))))))
 
 
-(defvar-local sql-datum--suppress-prompt-count 0
-  "Number of upcoming prompts to suppress in the preoutput filter.
-Incremented by silent commands (e.g. M-. definition, background refresh).")
-
-(defvar-local sql-datum--prompt-suppressed nil
-  "Set to t by the preoutput filter when a prompt was just suppressed.
-Used internally by the preoutput filter's prompt-suppression logic.
-Readiness detection now uses `sql-datum--ready' (set by the `ready'
-envelope from Python) rather than this flag.")
+(defvar-local sql-datum--silent-in-flight nil
+  "Non-nil while a silent command is in-flight (sent but not yet ready).
+Set by `sql-datum--queue-send-next' for silent transactions, cleared
+by `sql-datum--queue-advance' when `ready' arrives.  The preoutput
+filter uses this to strip the PTY echo and prompt of silent commands.")
 
 (defvar-local sql-datum--refresh-in-progress nil
   "Non-nil while an async refresh chain is running.
 Prevents overlapping refresh chains.")
+
+(defvar-local sql-datum--bg-pending 0
+  "Number of background introspection tasks still in flight.
+Set when refresh-async starts, decremented by each bg-ready envelope.
+Drives the loading indicator in the mode line.")
+
+(defvar-local sql-datum--bg-total 0
+  "Total number of background tasks in the current refresh cycle.
+Used with `sql-datum--bg-pending' to show progress like \"loading 2/4\".")
 
 ;;; ---------------------------------------------------------------------------
 ;;; Command queue
@@ -281,11 +286,12 @@ ARGS are keyword args: :silent :done-fn :priority."
       (when proc
         (setq sql-datum--ready nil)
         (when (plist-get sql-datum--queue-current :silent)
-          (cl-incf sql-datum--suppress-prompt-count))
+          (setq sql-datum--silent-in-flight t))
         (comint-send-string proc (concat cmd "\n"))))))
 
 (defun sql-datum--queue-advance ()
   "Called when a `ready' envelope arrives.  Advance the queue state."
+  (setq sql-datum--silent-in-flight nil)
   (cond
    ;; Current transaction has more commands — send next
    (sql-datum--queue-remaining
@@ -436,27 +442,28 @@ Handles partial envelope lines split across multiple filter calls."
                                   (substring line 0 (min 120 (length line)))))))
        (t (push line clean-lines))))
     (let ((result (string-join (nreverse clean-lines) "\n")))
-      ;; When silent commands are pending, suppress the prompt and any
-      ;; echoed command text.  The pty echoes the command back (e.g.
-      ;; ":refresh-tables\r\n"), and Python emits "\n>" as the next
-      ;; prompt.  After envelope stripping these appear as residual text
-      ;; ending with ">".  We strip the trailing prompt when present and
-      ;; suppress all remaining text (echo/whitespace from silent cmd).
-      (setq sql-datum--prompt-suppressed nil)
-      (when (> sql-datum--suppress-prompt-count 0)
-        (cond
-         ;; Result ends with the ">" prompt — suppress everything
-         ;; (the echoed command, whitespace, and the prompt itself).
-         ((string-match-p "[\n\r ]*>\\'" result)
-          (setq result "")
-          (cl-decf sql-datum--suppress-prompt-count)
-          (setq sql-datum--prompt-suppressed t))
-         ;; Prompt hasn't arrived yet (output was split across chunks).
-         ;; Suppress the echoed command text and whitespace so they
-         ;; don't leak into the buffer.  We know this output belongs
-         ;; to a silent command because suppress-prompt-count > 0.
-         ((string-match-p "\\`[^>]*\\'" result)
-          (setq result ""))))
+      ;; Strip echoed command text and prompt from silent commands.
+      ;; When a silent command is in-flight, the PTY echoes the command
+      ;; (e.g. ":refresh-tables\r\n") and Python emits "\n>".  We strip
+      ;; both.  The flag is set by queue-send-next and cleared by
+      ;; queue-advance (which runs when the ready envelope is handled
+      ;; BEFORE this post-processing), so by the time we get here,
+      ;; the flag reflects the NEXT command's state — if another silent
+      ;; command was just dispatched, the flag is set again.
+      ;;
+      ;; We check both the flag AND whether the current queue transaction
+      ;; is silent, to catch both the echo (arrives before ready clears
+      ;; the flag) and the prompt (arrives after ready, but queue-send-next
+      ;; may have already set the flag for the next command).
+      (when (or sql-datum--silent-in-flight
+                (and sql-datum--queue-current
+                     (plist-get sql-datum--queue-current :silent)))
+        ;; Strip echoed command text (lines starting with ":")
+        (when (string-match "\\`[\n\r]*:[^\n]*[\n\r]*" result)
+          (setq result (substring result (match-end 0))))
+        ;; Strip trailing prompt
+        (when (string-match "[\n\r ]*>\\'" result)
+          (setq result (substring result 0 (match-beginning 0)))))
       ;; LEAK DETECTION: if result still contains envelope markers,
       ;; something went wrong — log it prominently.
       (when (string-match-p "##DATUM:" result)
@@ -499,11 +506,12 @@ Handles partial envelope lines split across multiple filter calls."
          (sql-datum--update-mode-line)
          (when (equal key "default-schema")
            (setq sql-datum--default-schema val))
-         ;; Database changed — clear stale completion state and refresh
+         ;; Database changed — clear per-table state and refresh.
+         ;; Don't clear lists (schemas, tables, routines) here — the incoming
+         ;; "introspect" (replace) envelopes will overwrite them atomically.
+         ;; This avoids a window where completion returns nothing while waiting
+         ;; for the new data to arrive from the background thread.
          (when (equal key "database")
-           (setq sql-datum--schemas nil)
-           (setq sql-datum--tables nil)
-           (setq sql-datum--routines nil)
            (clrhash sql-datum--columns)
            (clrhash sql-datum--column-details)
            (clrhash sql-datum--columns-pending)
@@ -542,7 +550,13 @@ Handles partial envelope lines split across multiple filter calls."
     ("admin-panel"
      (sql-datum--handle-admin-panel payload))
     ("bg-ready"
-     (sql-datum--trace "BG-READY: %s" payload))
+     (sql-datum--trace "BG-READY: %s" payload)
+     (when (> sql-datum--bg-pending 0)
+       (cl-decf sql-datum--bg-pending))
+     (sql-datum--update-mode-line)
+     (when (<= sql-datum--bg-pending 0)
+       (message "datum: introspection complete (%d tables, %d routines)"
+                (length sql-datum--tables) (length sql-datum--routines))))
     ("ready"
      (sql-datum--trace "READY envelope received, setting sql-datum--ready=t")
      (setq sql-datum--ready t)
@@ -571,7 +585,13 @@ Handles partial envelope lines split across multiple filter calls."
          (user     (gethash "user"     sql-datum--meta ""))
          (parts    (cl-remove-if #'string-empty-p
                                  (list dialect database server user)))
-         (label    (concat "[datum:" (string-join parts ":") "]")))
+         (loading  (when (and (boundp 'sql-datum--bg-pending)
+                              (> sql-datum--bg-pending 0))
+                     (format " loading %d/%d"
+                             (- sql-datum--bg-total sql-datum--bg-pending)
+                             sql-datum--bg-total)))
+         (label    (concat "[datum:" (string-join parts ":")
+                           (or loading "") "]")))
     (setq mode-name label))
   (force-mode-line-update))
 
@@ -3952,12 +3972,14 @@ REPL between each so user input is not blocked."
       (if sql-datum--refresh-in-progress
           (message "datum: refresh already in progress")
         (setq sql-datum--refresh-in-progress t)
-        (sql-datum--refresh-chain
-         '(":refresh-databases"
-           ":refresh-schemas"
-           ":refresh-tables"
-           ":refresh-routines")
-         buf)))))
+        (let ((commands '(":refresh-databases"
+                          ":refresh-schemas"
+                          ":refresh-tables"
+                          ":refresh-routines")))
+          (setq sql-datum--bg-total (length commands))
+          (setq sql-datum--bg-pending (length commands))
+          (sql-datum--update-mode-line)
+          (sql-datum--refresh-chain commands buf))))))
 
 (defun sql-datum-refresh ()
   "Refresh all introspection data (autocomplete candidates).
@@ -3982,11 +4004,13 @@ Also re-fetches any cross-database caches built during this session."
                  xdb-cache)
         (when dbs-to-refresh
           (with-current-buffer buf
-            (clrhash sql-datum--xdb-cache))
+            (clrhash sql-datum--xdb-cache)
+            ;; Each refresh-db is one additional bg task
+            (cl-incf sql-datum--bg-pending (length dbs-to-refresh))
+            (cl-incf sql-datum--bg-total (length dbs-to-refresh))
+            (sql-datum--update-mode-line))
           (dolist (db dbs-to-refresh)
-            (sql-datum--send-command (format ":refresh-db %s" db)))
-          (message "datum: refreshing introspection + %d cross-db cache(s)..."
-                   (length dbs-to-refresh))))))
+            (sql-datum--send-command (format ":refresh-db %s" db)))))))
   (unless (derived-mode-p 'sql-interactive-mode)
     (message "datum: refreshing introspection...")))
 

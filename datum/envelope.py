@@ -80,15 +80,10 @@ def _send(msg_type, payload):
     Thread-safe: uses _stdout_lock to prevent interleaved output from
     the background introspection thread and the main REPL thread.
 
-    Uses dest.write() + dest.flush() instead of print() to guarantee
-    the text and newline are submitted in a single write() call.
-    Python's print() does two write() calls (text + end) which can
-    interleave with other threads on the same file object.
-
-    Background envelopes may land on the same line as the ``>`` prompt
-    (e.g. ``>##DATUM:introspect:...##``).  This is fine — Emacs's
-    preoutput filter uses ``string-match`` which matches anywhere in a
-    line, so the envelope is processed and the whole line consumed.
+    With _CHUNK_MAX sized so each envelope line fits within PIPE_BUF
+    (4096 bytes), each os.write() completes quickly — the entire line
+    fits in the PTY buffer in one kernel operation, so the lock is
+    held only briefly even under heavy background output.
     """
     if _mode == "suppress":
         return
@@ -96,11 +91,6 @@ def _send(msg_type, payload):
     line = f"{_SIGIL}:{msg_type}:{payload}{_END}\n"
     _debug_log(f"SEND {msg_type} len={len(line)} dest={'stderr' if dest is sys.stderr else 'stdout'}")
     with _stdout_lock:
-        # Flush any Python-buffered data (from print() calls) first,
-        # then write directly to the file descriptor.  os.write() is a
-        # single write() syscall — atomic for data under PIPE_BUF (4096)
-        # — bypassing TextIOWrapper/BufferedWriter which can split or
-        # reorder bytes across multiple syscalls.
         dest.flush()
         os.write(dest.fileno(), line.encode(dest.encoding or "utf-8"))
     _debug_log(f"SENT {msg_type} ok")
@@ -129,7 +119,7 @@ def result_file(path, fmt):
     _send("result-file", f"{path}:{fmt}")
 
 
-_CHUNK_MAX = 65536  # max JSON chars per envelope line
+_CHUNK_MAX = 3500  # max JSON chars per envelope line (fits in PIPE_BUF with overhead)
 
 
 def introspect(kind, items):
@@ -163,6 +153,10 @@ def introspect(kind, items):
             first = False
             batch = [item]
             batch_len = 2 + len(item_json)
+            # Yield between chunks so the PTY buffer can drain and
+            # the main thread can acquire _stdout_lock for its own
+            # writes (ready envelope, prompt, query results).
+            time.sleep(0)
         else:
             batch.append(item)
             batch_len += item_cost
