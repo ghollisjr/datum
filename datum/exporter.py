@@ -165,6 +165,7 @@ def _export_polars(path, cursor, fmt):
     if deduped:
         envelope.warn(":out - duplicate column names detected; suffixed with _1, _2, etc.")
     batch_size = 50_000
+    cursor.arraysize = batch_size
     all_rows = []
     t_start = time.monotonic()
 
@@ -181,6 +182,9 @@ def _export_polars(path, cursor, fmt):
         _export_progress(len(all_rows), t_start)
         rows = cursor.fetchmany(batch_size)
 
+    t_fetch = time.monotonic()
+    fetch_elapsed = t_fetch - t_start
+
     if not all_rows:
         # Write an empty file with headers
         df = pl.DataFrame({h: [] for h in headers})
@@ -190,6 +194,8 @@ def _export_polars(path, cursor, fmt):
                    for i in range(len(headers))}
         df = pl.DataFrame(columns)
 
+    t_df = time.monotonic()
+
     envelope.info(f":out - writing {len(all_rows):,} rows to {os.path.basename(path)}...")
     if fmt == "csv":
         df.write_csv(path)
@@ -197,6 +203,10 @@ def _export_polars(path, cursor, fmt):
         df.write_parquet(path)
     elif fmt == "json":
         df.write_ndjson(path)
+
+    t_write = time.monotonic()
+    envelope.info(f":out - timing: fetch={fetch_elapsed:.1f}s "
+                  f"df={t_df - t_fetch:.1f}s write={t_write - t_df:.1f}s")
 
     return len(all_rows)
 
@@ -211,6 +221,7 @@ def _export_csv(path, cursor):
         envelope.warn(":out - duplicate column names detected; suffixed with _1, _2, etc.")
     rows_written = 0
     batch_size = 10_000
+    cursor.arraysize = batch_size
     t_start = time.monotonic()
     envelope.info(":out - fetching results...")
     with open(path, 'w', encoding='utf-8', newline='') as f:
@@ -222,6 +233,8 @@ def _export_csv(path, cursor):
             rows_written += len(rows)
             _export_progress(rows_written, t_start)
             rows = cursor.fetchmany(batch_size)
+    t_done = time.monotonic()
+    envelope.info(f":out - timing: fetch+write={t_done - t_start:.1f}s")
     return rows_written
 
 
@@ -236,6 +249,7 @@ def _export_arrow(path, cursor, fmt):
     if deduped:
         envelope.warn(":out - duplicate column names detected; suffixed with _1, _2, etc.")
     batch_size = 10_000
+    cursor.arraysize = batch_size
     rows_written = 0
     batches = []
     t_start = time.monotonic()
@@ -304,6 +318,7 @@ def export_resultset(path, cursor, prefix=None):
         print('\n(No output to export)')
         return
     batch_size = 100_000
+    cursor.arraysize = batch_size
     print('Writing resultset, one ! per', batch_size, 'rows:')
     with open(path, 'a', encoding='utf-8', newline='') as outputfile:
         if prefix:

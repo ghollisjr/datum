@@ -77,7 +77,12 @@ def query_loop():
             if query:
                 cursor = connect.get_connection().cursor()
                 params = prompt_parameters(query)
+                import time as _time
+                _t_exec = _time.monotonic()
                 cursor.execute(query, params)
+                _t_exec_done = _time.monotonic()
+                if exporter.has_out_target():
+                    envelope.info(f"query execute: {_t_exec_done - _t_exec:.1f}s")
                 row_count = cursor.rowcount
                 if exporter.has_out_target():
                     exporter.export_out_target(cursor)
