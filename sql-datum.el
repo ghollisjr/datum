@@ -111,6 +111,21 @@ environment when launching datum.  Set this per-connection in
 
   (sql-datum-environment ((\"KRB5CCNAME\" . \"/tmp/krb5cc_prod\")))")
 
+(defvar sql-datum-bcp nil
+  "Whether to use bcp for bulk CSV export on MSSQL connections.
+When non-nil, datum will use the bcp utility instead of pyodbc for
+CSV exports.  Set per-connection in `sql-connection-alist':
+
+  (sql-datum-bcp t)")
+
+(defvar sql-datum-bcp-extra nil
+  "Per-connection extra arguments for bcp (bulk CSV export).
+A list of strings passed as --bcp-extra flags when launching datum.
+Set this per-connection in `sql-connection-alist' for servers that
+need special bcp flags, e.g. to trust a self-signed certificate:
+
+  (sql-datum-bcp-extra (\"-u\"))")
+
 (defvar sql-datum--refresh-timer nil
   "Timer for periodic introspection refresh.")
 
@@ -3334,8 +3349,12 @@ for the `comint' buffer."
   (let ((sql-login-delay 0)
         ;; Capture and reset per-connection env so it doesn't leak
         ;; to subsequent connections that don't set it.
-        (conn-environment sql-datum-environment))
+        (conn-environment sql-datum-environment)
+        (use-bcp sql-datum-bcp)
+        (bcp-extra sql-datum-bcp-extra))
     (setq sql-datum-environment nil)
+    (setq sql-datum-bcp nil)
+    (setq sql-datum-bcp-extra nil)
     (let ((parameters (append options
                               (unless (string-empty-p sql-server)
                                 (list "--server" sql-server))
@@ -3356,6 +3375,15 @@ for the `comint' buffer."
                             (list "--pass"
                                   (format "ENV=%s" sql-datum-password-variable)))
                         (list "--pass" password)))))
+      ;; Enable bcp for bulk CSV export when requested.
+      (when use-bcp
+        (setf parameters (append parameters (list "--bcp"))))
+      ;; Append --bcp-extra flags for per-connection bcp settings.
+      (when bcp-extra
+        (setf parameters
+              (append parameters
+                      (mapcan (lambda (arg) (list "--bcp-extra" arg))
+                              bcp-extra))))
       ;; Inject per-connection environment variables (e.g. KRB5CCNAME)
       ;; by let-binding process-environment around the subprocess launch.
       (let ((process-environment

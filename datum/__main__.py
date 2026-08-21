@@ -4,11 +4,13 @@ Usage:
     datum (-h | --help)
     datum --list-drivers
     datum --conn-string=<connection_string> [--sql-type=<type>] [--config=<path>]
+          [--bcp] [--bcp-extra <arg>]...
           [--query=<sql> | --command=<cmd>] [--format=<fmt>]
     datum (--driver=<odbc_driver> | --dsn=<dsn>)
           [--server=<server> --database=<database>]
           [--user=<username> --pass=<password> --integrated]
           [--param <name=value>]...
+          [--bcp] [--bcp-extra <arg>]...
           [--sql-type=<type>]
           [--config=<path>]
           [--query=<sql> | --command=<cmd>] [--format=<fmt>]
@@ -43,6 +45,12 @@ Since ODBC is extensible, and drivers can support arbitrary parameters, they
 can be added in pairs using:
 
   --param <name=value>   You can add as many as needed.
+
+BCP options (for fast CSV export on MSSQL):
+
+  --bcp                  Use bcp utility for CSV exports instead of pyodbc.
+  --bcp-extra <arg>      Extra arguments to pass to bcp. Can be repeated.
+                         Example: --bcp-extra -u
 
 Optional parameters:
 

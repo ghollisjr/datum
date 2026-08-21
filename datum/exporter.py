@@ -21,9 +21,13 @@ Backend priority: polars > pyarrow > stdlib csv.
 import csv
 import json
 import os
+import shutil
+import subprocess
+import tempfile
 import time
 from pyodbc import ProgrammingError
 
+from . import connect
 from . import envelope
 
 # polars is optional (preferred)
@@ -42,6 +46,8 @@ except ImportError:
     _HAVE_PYARROW = False
 
 _config = {}
+_bcp_checked = False
+_bcp_path = None
 
 # State for the :out command. Set by commands.py, consumed and cleared here.
 _out_target = None   # absolute path string or None
@@ -52,6 +58,16 @@ def initialize_module(config):
     """Initialize this module with a reference to the global config."""
     global _config
     _config = config
+
+
+
+def _bcp_available():
+    """Return True if the bcp utility is on PATH (cached)."""
+    global _bcp_checked, _bcp_path
+    if not _bcp_checked:
+        _bcp_path = shutil.which("bcp")
+        _bcp_checked = True
+    return _bcp_path is not None
 
 
 # --- :out command state ---
@@ -75,7 +91,7 @@ def has_out_target():
     return _out_target is not None
 
 
-def export_out_target(cursor):
+def export_out_target(cursor, query=None, has_params=False):
     """Export cursor results to the :out target file, then clear the target.
 
     Called from datum.query_loop instead of printer.print_cursor_results
@@ -105,9 +121,24 @@ def export_out_target(cursor):
                        f"Install with: pip install polars")
         return
 
+    # Use bcp when explicitly enabled via --bcp flag
+    use_bcp = (connect.use_bcp()
+               and fmt == "csv"
+               and _bcp_available()
+               and query is not None
+               and not has_params)
+
     t_start = time.monotonic()
     try:
-        if _HAVE_POLARS:
+        if use_bcp:
+            rows_written = _export_bcp(path, query, cursor)
+            if rows_written is None:
+                # bcp failed, fall back
+                if _HAVE_POLARS:
+                    rows_written = _export_polars(path, cursor, fmt)
+                else:
+                    rows_written = _export_csv(path, cursor)
+        elif _HAVE_POLARS:
             rows_written = _export_polars(path, cursor, fmt)
         elif fmt == "csv":
             rows_written = _export_csv(path, cursor)
@@ -154,6 +185,64 @@ def _dedupe_headers(headers):
             seen[h] = 0
             result.append(h)
     return result, changed
+
+
+# --- BCP export (MSSQL fast path for CSV) ---
+
+def _export_bcp(path, query, cursor):
+    """Export query results via bcp utility. Returns row count, or None on failure."""
+    bcp_args = connect.get_bcp_args()
+    if bcp_args is None:
+        envelope.info(":out - bcp: can't build connection args, falling back.")
+        return None
+
+    headers = [col[0] for col in cursor.description]
+    headers, deduped = _dedupe_headers(headers)
+    if deduped:
+        envelope.warn(":out - duplicate column names detected; suffixed with _1, _2, etc.")
+
+    # bcp writes to a temp file, then we prepend headers
+    try:
+        fd, tmp_path = tempfile.mkstemp(prefix="bcp_", suffix=".csv")
+        os.close(fd)
+
+        cmd = [
+            "bcp", query, "queryout", tmp_path,
+            "-c", "-t,",
+        ] + bcp_args
+
+        envelope.info(":out - using bcp for bulk export...")
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+
+        if result.returncode != 0:
+            # bcp writes errors to stdout, not stderr
+            err_msg = (result.stderr.strip() or result.stdout.strip())
+            envelope.info(f":out - bcp failed (rc={result.returncode}), falling back. "
+                          f"{err_msg}")
+            return None
+
+        # Count rows and write final file with headers
+        rows_written = 0
+        with open(path, 'w', encoding='utf-8', newline='') as out_f:
+            out_f.write(",".join(headers) + "\n")
+            with open(tmp_path, 'r', encoding='utf-8') as bcp_f:
+                for line in bcp_f:
+                    out_f.write(line)
+                    rows_written += 1
+
+        return rows_written
+
+    except subprocess.TimeoutExpired:
+        envelope.info(":out - bcp timed out, falling back.")
+        return None
+    except Exception as err:
+        envelope.info(f":out - bcp error: {err}, falling back.")
+        return None
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
 
 
 # --- Polars export (preferred when available) ---

@@ -14,6 +14,8 @@ _pass = None
 _integrated = False
 _timeout = 0
 _params = None
+_bcp = False
+_bcp_extra = []
 
 # The first newline here is useful for spacing later
 _header_message = """
@@ -27,7 +29,9 @@ a new line or ";;" at the end of a query.
 def initialize_module(docopt_args, config):
     """Construct/deconstruct the connection string for the current session."""
     global _conn_string, _driver, _dsn, _server, _database, _user, _pass
-    global _integrated, _timeout, _params
+    global _integrated, _timeout, _params, _bcp, _bcp_extra
+    _bcp = docopt_args.get("--bcp", False)
+    _bcp_extra = docopt_args.get("--bcp-extra") or []
     _conn_string = docopt_args["--conn-string"]
     if docopt_args["--conn-string"]:
         # We will use the connection string as-is
@@ -44,6 +48,12 @@ def initialize_module(docopt_args, config):
                 _server = value
             if 'database' in lower:
                 _database = value
+            if 'trusted_connection' in lower and value.lower() in ('yes', '1', 'true'):
+                _integrated = True
+            if 'uid' in lower:
+                _user = value
+            if 'pwd' in lower:
+                _pass = value
         _timeout = config["command_timeout"]
         return
 
@@ -94,6 +104,62 @@ def get_server_or_dsn():
             if "=" in piece and "server" in piece.lower():
                 return piece.split("=", 1)[1]
     return "-"
+
+
+def use_bcp():
+    """Return True if --bcp was passed on the command line."""
+    return _bcp
+
+
+def get_bcp_args():
+    """Build bcp command-line args from the ODBC connection string.
+
+    Maps ODBC connection string keys to bcp flags.  Returns a list of
+    strings (e.g. ["-S", "server", "-d", "db", "-T", "-u"]) or None if
+    the connection string can't provide enough info for bcp.
+    """
+    if not _conn_string:
+        return None
+
+    # Parse connection string into a dict (case-insensitive keys)
+    opts = {}
+    for piece in _conn_string.split(";"):
+        if "=" not in piece:
+            continue
+        key, value = piece.split("=", 1)
+        opts[key.strip().lower()] = value.strip()
+
+    args = []
+
+    # Server (required)
+    server = opts.get("server")
+    if not server:
+        return None
+    args += ["-S", server]
+
+    # Database
+    db = opts.get("database")
+    if db:
+        args += ["-d", db]
+
+    # Authentication
+    if opts.get("trusted_connection", "").lower() in ("yes", "1", "true"):
+        args.append("-T")
+    else:
+        uid = opts.get("uid")
+        pwd = opts.get("pwd")
+        if uid:
+            args += ["-U", uid]
+        if pwd:
+            args += ["-P", pwd]
+
+    # Append any user-supplied extra bcp arguments (--bcp-extra).
+    # Flags like -u (trust cert) and -Y (encrypt) vary by bcp version,
+    # so they are left to the user to specify per-connection via
+    # sql-datum-bcp-extra in Emacs.
+    args += _bcp_extra
+
+    return args
 
 
 def get_connection(force_new=False):

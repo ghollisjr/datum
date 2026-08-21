@@ -85,7 +85,8 @@ def query_loop():
                     envelope.info(f"query execute: {_t_exec_done - _t_exec:.1f}s")
                 row_count = cursor.rowcount
                 if exporter.has_out_target():
-                    exporter.export_out_target(cursor)
+                    exporter.export_out_target(cursor, query=query,
+                                               has_params=bool(params))
                 elif config["csv_path"]:
                     exporter.export_cursor_results(cursor)
                 else:
