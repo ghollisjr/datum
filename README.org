@@ -220,6 +220,35 @@ Use =:force= to overwrite an existing file:
 >:out /tmp/results.parquet :force
 #+end_example
 
+*** BCP acceleration (MSSQL)
+
+On MSSQL, exporting tables with LOB columns (=varchar(max)=, =nvarchar(max)=)
+via pyodbc can be very slow because ODBC falls back to row-by-row =SQLGetData=
+for unbounded columns.  Microsoft's =bcp= utility bypasses this limitation
+using the TDS bulk protocol.
+
+To enable bcp for CSV exports, set =sql-datum-bcp= in your connection entry:
+
+#+begin_example elisp
+(my-mssql-connection
+ (sql-server "myserver.example.com,1433")
+ (sql-database "mydb")
+ (sql-datum-bcp t)
+ (sql-datum-bcp-extra ("-u")))  ;; -u = trust self-signed cert
+#+end_example
+
+The =--bcp= flag can also be passed directly on the command line.  Extra bcp
+arguments (like =-u= for trusting self-signed certificates) are passed via
+=--bcp-extra=.
+
+BCP is only used when all of these conditions are met:
+- =--bcp= was passed (or =sql-datum-bcp= is =t=)
+- The export format is CSV
+- =bcp= is on =PATH=
+- The query is not parameterized
+
+If bcp fails, datum falls back to the normal pyodbc export path automatically.
+
 ** Import (=:in=)
 
 Import a file into a SQL table.  Schema is inferred automatically.
@@ -694,6 +723,9 @@ time. The timer stops automatically when the buffer is no longer visible.
 | =sql-datum-auto-introspect=          | =t=              | Auto-run =:refresh= on connect       |
 | =sql-datum-refresh-interval=         | =nil=            | Periodic refresh interval (seconds)  |
 | =sql-datum-prefer-ansi-quotes=       | =nil=            | Use ANSI ="= quoting for all dialects |
+| =sql-datum-bcp=                      | =nil=            | Use bcp for CSV exports (MSSQL)      |
+| =sql-datum-bcp-extra=                | =nil=            | Extra bcp flags (e.g. =("-u")=)      |
+| =sql-datum-environment=              | =nil=            | Per-connection env vars (alist)      |
 
 * Envelope protocol
 
