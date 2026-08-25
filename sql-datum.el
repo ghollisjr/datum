@@ -103,6 +103,19 @@ for MySQL, square brackets for MSSQL."
   :type 'boolean
   :group 'SQL)
 
+(defcustom sql-datum-connect-buffer-display 'pop-to-buffer
+  "How to display the SQLi buffer after connecting.
+Controls what happens to your window/cursor when `sql-connect' creates
+a new datum connection.
+
+  `pop-to-buffer'    - Switch to the SQLi buffer (default, standard sql.el behavior).
+  `display-buffer'   - Show the SQLi buffer but keep cursor in the current buffer.
+  `nil'              - Don't display the SQLi buffer at all."
+  :type '(choice (const :tag "Switch to SQLi buffer" pop-to-buffer)
+                 (const :tag "Show but stay in current buffer" display-buffer)
+                 (const :tag "Don't display" nil))
+  :group 'SQL)
+
 (defvar sql-datum-environment nil
   "Per-connection environment variables for the datum subprocess.
 An alist of (VARIABLE . VALUE) pairs to set in the process
@@ -4287,6 +4300,23 @@ With prefix ARG, prompts for join type (LEFT, RIGHT, etc.)."
 ;; partial-completion/orderless don't treat "." as a word separator.
 (add-to-list 'completion-category-overrides
              '(sql-datum-identifier (styles basic)))
+
+;; Override buffer display behavior after connecting, controlled by
+;; `sql-datum-connect-buffer-display'.  sql-product-interactive calls
+;; sql-display-buffer which uses pop-to-buffer; we intercept it to
+;; support staying in the current buffer.
+(define-advice sql-display-buffer (:around (orig-fn buf)
+                                           sql-datum--connect-display)
+  "Respect `sql-datum-connect-buffer-display' for datum buffers."
+  (if (and buf
+           (with-current-buffer buf
+             (and (derived-mode-p 'sql-interactive-mode)
+                  (eq sql-product 'datum)))
+           (not (eq sql-datum-connect-buffer-display 'pop-to-buffer)))
+      (pcase sql-datum-connect-buffer-display
+        ('display-buffer (display-buffer buf))
+        ('nil nil))
+    (funcall orig-fn buf)))
 
 (unless (assoc 'datum sql-product-alist)
   (sql-add-product 'datum "Datum - ODBC Client"

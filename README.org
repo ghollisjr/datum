@@ -723,6 +723,7 @@ time. The timer stops automatically when the buffer is no longer visible.
 | =sql-datum-auto-introspect=          | =t=              | Auto-run =:refresh= on connect       |
 | =sql-datum-refresh-interval=         | =nil=            | Periodic refresh interval (seconds)  |
 | =sql-datum-prefer-ansi-quotes=       | =nil=            | Use ANSI ="= quoting for all dialects |
+| =sql-datum-connect-buffer-display=   | =pop-to-buffer=  | Buffer display after connecting (=display-buffer= / =nil=) |
 | =sql-datum-bcp=                      | =nil=            | Use bcp for CSV exports (MSSQL)      |
 | =sql-datum-bcp-extra=                | =nil=            | Extra bcp flags (e.g. =("-u")=)      |
 | =sql-datum-environment=              | =nil=            | Per-connection env vars (alist)      |
