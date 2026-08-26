@@ -1385,6 +1385,8 @@ SQLI-BUF is the originating SQLi buffer."
     (define-key map "E" #'sql-datum-admin-edit-schedule)
     (define-key map "N" #'sql-datum-admin-new-schedule)
     (define-key map "D" #'sql-datum-admin-delete-schedule)
+    ;; Query text (activity panel)
+    (define-key map (kbd "M-.") #'sql-datum-admin-query-text)
     map)
   "Keymap for datum admin panel buffers.")
 
@@ -1600,6 +1602,17 @@ Returns a list of strings by parsing the current line against column widths."
     (when (yes-or-no-p (format "Kill session %s? " id))
       (sql-datum--admin-send-command
        (format ":admin-action activity kill %s" id)))))
+
+(defun sql-datum-admin-query-text ()
+  "Show the full query text for the session at point."
+  (interactive)
+  (unless (equal sql-datum--admin-panel-name "activity")
+    (user-error "Query text is only available in the activity panel"))
+  (let ((id (sql-datum--admin-row-id-at-point)))
+    (unless id (user-error "No session at point"))
+    (xref-push-marker-stack)
+    (sql-datum--admin-send-command
+     (format ":admin-action activity query-text %s" id))))
 
 (defun sql-datum-admin-start-job ()
   "Start the SQL Agent job at point."
