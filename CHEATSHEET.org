@@ -54,6 +54,7 @@ directly.
 | =C-c s R= | List routines (=C-u= to filter with LIKE)  |
 | =C-c s v= | Server version                           |
 | =C-c s u= | Current user                             |
+| =C-c s a= | Admin panel (activity, jobs, ssis)         |
 | =C-c s w= | Copy last result to kill ring (org table)  |
 | =C-c s f= | Refresh introspection (+ cross-db caches) |
 | =C-c s F= | Toggle periodic auto-refresh (=C-u N= for interval) |
@@ -129,6 +130,34 @@ Respects =:chars= for column width. Timestamp shows last refresh.
 | =g= | Refresh              |
 | =a= | Toggle auto-refresh  |
 | =q= | Quit                 |
+
+* Admin Panels (=C-c s a=)
+
+Interactive, auto-refreshing panels for server administration.
+
+** Activity panel
+
+| Key   | Action                                     |
+|-------+--------------------------------------------|
+| =M-.= | Full query text with session metadata      |
+| =M-,= | Return to activity panel                  |
+| =k=   | Kill session                               |
+| =i=   | Inspect row                                |
+| =o=   | Sort by column                             |
+| =g=   | Refresh                                    |
+| =a=   | Toggle auto-refresh                        |
+| =q=   | Quit                                       |
+
+** Jobs panel (MSSQL)
+
+| Key   | Action                         |
+|-------+--------------------------------|
+| =d=   | Job detail (steps + schedules) |
+| =H=   | Job history                    |
+| =s= / =S= | Start / Stop job          |
+| =e=   | Enable/disable toggle          |
+| =E= / =N= / =D= | Edit / New / Delete schedule |
+| =B=   | Back to parent panel           |
 
 * Query Input
 

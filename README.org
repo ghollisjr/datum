@@ -486,6 +486,7 @@ dialect-aware: they use =TOP= / =NEWID()= / =OBJECT_ID()= on MSSQL and
 | =C-c s R= | =sql-datum-routines=     | List routines (=C-u= to filter with LIKE)                  |
 | =C-c s v= | =sql-datum-version=      | Show server version                                        |
 | =C-c s u= | =sql-datum-user=         | Show current user                                          |
+| =C-c s a= | =sql-datum-admin=        | Open admin panel (activity, jobs, ssis)                    |
 | =C-c s f= | =sql-datum-refresh=      | Refresh introspection data (including cross-db caches)     |
 | =C-c s w= | =sql-datum-copy-last-result= | Copy last result to kill ring (already org table format)    |
 | =C-c s F= | =sql-datum-toggle-auto-refresh= | Toggle periodic introspection refresh (=C-u N= for interval) |
@@ -708,6 +709,57 @@ results and respects =:chars= for column width.
 The buffer auto-refreshes every 5 seconds by default (customizable via
 =sql-datum-running-refresh-interval=). A timestamp shows the last refresh
 time. The timer stops automatically when the buffer is no longer visible.
+
+** Admin panels (=C-c s a=)
+
+Admin panels provide interactive, auto-refreshing views for server
+administration.  Press =C-c s a= and select a panel:
+
+- =activity= — Active sessions and queries (MSSQL, PostgreSQL)
+- =jobs= — SQL Agent jobs, steps, schedules, history (MSSQL)
+- =ssis= — SSIS packages (MSSQL)
+
+*** Activity panel
+
+Shows running sessions with SPID, user, database, status, wait type,
+duration, CPU, reads/writes, blocking info, and a preview of the SQL text.
+
+| Key   | Action                                         |
+|-------+------------------------------------------------|
+| =M-.= | Show full query text with session metadata     |
+| =M-,= | Return to the activity panel                   |
+| =k=   | Kill session (with confirmation)               |
+| =i=   | Inspect all column values for the row at point |
+| =o=   | Sort by column                                 |
+| =g=   | Refresh                                        |
+| =a=   | Toggle auto-refresh                            |
+| =q=   | Quit                                           |
+
+=M-.= opens the complete query text in a =sql-mode= buffer with session
+metadata as SQL comments (SPID, user, database, status, duration, host,
+program name, etc.).  The xref marker stack is used, so =M-,= returns to
+the activity panel.
+
+*** Jobs panel
+
+Shows SQL Agent jobs with status, enabled state, last run result, and
+next run time.
+
+| Key   | Action                         |
+|-------+--------------------------------|
+| =d=   | Job detail (steps + schedules) |
+| =H=   | Job history                    |
+| =s=   | Start job                      |
+| =S=   | Stop job                       |
+| =e=   | Enable/disable toggle          |
+| =E=   | Edit schedule (in detail view) |
+| =N=   | New schedule (in detail view)  |
+| =D=   | Delete schedule                |
+| =B=   | Back to parent panel           |
+| =i=   | Inspect row                    |
+| =g=   | Refresh                        |
+| =a=   | Toggle auto-refresh            |
+| =q=   | Quit                           |
 
 ** Customization
 
