@@ -58,6 +58,11 @@ def run_action(cursor, driver, action_name, args):
         _handle_schedule_action(cursor, action_name, args)
         return
 
+    if action_name in ("edit-step", "update-step",
+                        "new-step", "delete-step"):
+        _handle_step_action(cursor, action_name, args)
+        return
+
     if not args:
         envelope.error(f"Job action '{action_name}' requires a job name")
         return
@@ -162,6 +167,76 @@ def _handle_schedule_action(cursor, action_name, args):
         envelope.info(f"Deleted schedule: {args[0]}")
 
 
+def _handle_step_action(cursor, action_name, args):
+    """Handle step-related actions."""
+    from .. import envelope
+    from . import steps
+
+    if action_name == "edit-step":
+        # args: [step_id, job_name...]
+        if len(args) < 2:
+            envelope.error("edit-step requires step_id and job_name")
+            return
+        step_id = args[0]
+        job_name = " ".join(args[1:])
+        step = steps.get_step(cursor, job_name, step_id)
+        if not step:
+            envelope.error(f"Step not found: {step_id}")
+            return
+        envelope.admin_panel({
+            "panel": "jobs",
+            "sub_panel": "step-edit",
+            "title": f"Edit Step: {step['step_name']}",
+            "step": step,
+            "subsystems": steps.SUBSYSTEMS,
+            "step_actions": steps.STEP_ACTIONS,
+            "headers": [],
+            "rows": [],
+            "row_id": None,
+            "actions": [],
+            "info": None,
+            "context": {"job_name": job_name},
+        })
+
+    elif action_name == "update-step":
+        # args: [json-encoded step data]
+        if len(args) < 2:
+            envelope.error("update-step requires job_name and step data")
+            return
+        job_name = args[0]
+        try:
+            step_data = json.loads(args[1])
+        except json.JSONDecodeError as e:
+            envelope.error(f"Invalid step JSON: {e}")
+            return
+        steps.update_step(cursor, job_name, step_data)
+        envelope.info(f"Updated step: {step_data.get('step_name', '?')}")
+
+    elif action_name == "new-step":
+        # args: [job_name, json-encoded step data]
+        if len(args) < 2:
+            envelope.error("new-step requires job_name and step data")
+            return
+        job_name = args[0]
+        try:
+            step_data = json.loads(args[1])
+        except json.JSONDecodeError as e:
+            envelope.error(f"Invalid step JSON: {e}")
+            return
+        steps.create_step(cursor, job_name, step_data)
+        envelope.info(f"Created step: {step_data.get('step_name', '?')}")
+
+    elif action_name == "delete-step":
+        # args: [step_id, job_name...]
+        if len(args) < 2:
+            envelope.error("delete-step requires step_id and job_name")
+            return
+        step_id = args[0]
+        job_name = " ".join(args[1:])
+        steps.delete_step(cursor, job_name, step_id)
+        envelope.info(f"Deleted step {step_id}")
+
+
 def _job_list(cursor):
     """List all SQL Agent jobs with status information."""
     sql = """
@@ -175,6 +250,19 @@ def _job_list(cursor):
                 THEN 'Executing'
                 ELSE 'Idle'
             END                                          AS [Status],
+            CASE
+                WHEN ja.start_execution_date IS NOT NULL
+                     AND ja.stop_execution_date IS NULL
+                     AND ja.last_executed_step_id IS NOT NULL
+                THEN CAST(ja.last_executed_step_id AS VARCHAR)
+                     + ': '
+                     + ISNULL(
+                         (SELECT step_name FROM msdb.dbo.sysjobsteps
+                          WHERE job_id = j.job_id
+                            AND step_id = ja.last_executed_step_id),
+                         '?')
+                ELSE ''
+            END                                          AS [Current Step],
             CASE
                 WHEN h.run_status = 0 THEN 'Failed'
                 WHEN h.run_status = 1 THEN 'Succeeded'
@@ -239,7 +327,14 @@ def _job_list(cursor):
             WHERE job_id = j.job_id AND step_id = 0
             ORDER BY run_date DESC, run_time DESC
         ) h
-        ORDER BY j.name
+        ORDER BY
+            CASE
+                WHEN ja.start_execution_date IS NOT NULL
+                     AND ja.stop_execution_date IS NULL
+                THEN 0
+                ELSE 1
+            END,
+            j.name
     """
     cursor.execute(sql)
     headers = [col[0] for col in cursor.description]
@@ -267,31 +362,41 @@ def _job_detail(cursor, job_name):
     # Steps
     steps_sql = """
         SELECT
-            step_id                          AS [Step],
-            step_name                        AS [Name],
-            CASE subsystem
+            s.step_id                        AS [Step],
+            s.step_name                      AS [Name],
+            CASE
+                WHEN ja.start_execution_date IS NOT NULL
+                     AND ja.stop_execution_date IS NULL
+                     AND ja.last_executed_step_id = s.step_id
+                THEN 'Running'
+                ELSE ''
+            END                              AS [Status],
+            CASE s.subsystem
                 WHEN 'TSQL' THEN 'T-SQL'
                 WHEN 'CmdExec' THEN 'OS Cmd'
                 WHEN 'SSIS' THEN 'SSIS'
                 WHEN 'PowerShell' THEN 'PS'
-                ELSE subsystem
+                ELSE s.subsystem
             END                              AS [Type],
-            database_name                    AS [Database],
-            CASE on_success_action
+            s.database_name                  AS [Database],
+            CASE s.on_success_action
                 WHEN 1 THEN 'Quit success'
                 WHEN 2 THEN 'Quit fail'
                 WHEN 3 THEN 'Next step'
-                WHEN 4 THEN 'Go to step ' + CAST(on_success_step_id AS VARCHAR)
+                WHEN 4 THEN 'Go to step ' + CAST(s.on_success_step_id AS VARCHAR)
             END                              AS [On Success],
-            CASE on_fail_action
+            CASE s.on_fail_action
                 WHEN 1 THEN 'Quit success'
                 WHEN 2 THEN 'Quit fail'
                 WHEN 3 THEN 'Next step'
-                WHEN 4 THEN 'Go to step ' + CAST(on_fail_step_id AS VARCHAR)
+                WHEN 4 THEN 'Go to step ' + CAST(s.on_fail_step_id AS VARCHAR)
             END                              AS [On Failure]
-        FROM msdb.dbo.sysjobsteps
-        WHERE job_id = (SELECT job_id FROM msdb.dbo.sysjobs WHERE name = ?)
-        ORDER BY step_id
+        FROM msdb.dbo.sysjobsteps s
+        LEFT JOIN msdb.dbo.sysjobactivity ja
+            ON ja.job_id = s.job_id
+            AND ja.session_id = (SELECT MAX(session_id) FROM msdb.dbo.syssessions)
+        WHERE s.job_id = (SELECT job_id FROM msdb.dbo.sysjobs WHERE name = ?)
+        ORDER BY s.step_id
     """
     cursor.execute(steps_sql, [job_name])
     step_headers = [col[0] for col in cursor.description]
@@ -337,6 +442,12 @@ def _job_detail(cursor, job_name):
                 "title": "Steps",
                 "headers": step_headers,
                 "rows": step_rows,
+                "row_id": 0,
+                "actions": [
+                    {"key": "E", "label": "Edit step", "command": "edit-step"},
+                    {"key": "N", "label": "New step", "command": "new-step"},
+                    {"key": "D", "label": "Delete step", "command": "delete-step"},
+                ],
             },
             {
                 "title": "Schedules",

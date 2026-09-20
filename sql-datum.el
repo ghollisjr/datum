@@ -928,6 +928,10 @@ Set to nil to disable auto-refresh."
          ((equal sub-panel "schedule-edit")
           (run-at-time 0 nil #'sql-datum--admin-show-schedule-editor
                        data sqli-buf))
+         ;; Step edit form
+         ((equal sub-panel "step-edit")
+          (run-at-time 0 nil #'sql-datum--admin-show-step-editor
+                       data sqli-buf))
          ;; Multi-section detail view (job detail)
          ((alist-get 'sections data)
           (run-at-time 0 nil #'sql-datum--admin-show-detail
@@ -1320,9 +1324,13 @@ SQLI-BUF is the originating SQLi buffer."
                   (sec-rows (alist-get 'rows section))
                   (sec-row-id (alist-get 'row_id section)))
               (insert (propertize (concat "--- " sec-title " ---")
-                                  'face 'font-lock-function-name-face) "\n")
+                                  'face 'font-lock-function-name-face
+                                  'sql-datum-section sec-title) "\n")
               (when (and sec-headers (> (length sec-headers) 0))
-                (sql-datum--admin-insert-table sec-headers sec-rows sec-row-id))
+                (let ((table-start (point)))
+                  (sql-datum--admin-insert-table sec-headers sec-rows sec-row-id)
+                  (put-text-property table-start (point)
+                                     'sql-datum-section sec-title)))
               (insert "\n")))
           ;; Back navigation
           (insert (propertize "Press " 'face 'font-lock-comment-face)
@@ -1381,10 +1389,10 @@ SQLI-BUF is the originating SQLi buffer."
     (define-key map "d" #'sql-datum-admin-detail)
     ;; SSIS panel
     (define-key map "r" #'sql-datum-admin-run-package)
-    ;; Schedule editing
-    (define-key map "E" #'sql-datum-admin-edit-schedule)
-    (define-key map "N" #'sql-datum-admin-new-schedule)
-    (define-key map "D" #'sql-datum-admin-delete-schedule)
+    ;; Contextual editing (steps or schedules)
+    (define-key map "E" #'sql-datum-admin-edit-at-point)
+    (define-key map "N" #'sql-datum-admin-new-at-point)
+    (define-key map "D" #'sql-datum-admin-delete-at-point)
     ;; Query text (activity panel)
     (define-key map (kbd "M-.") #'sql-datum-admin-query-text)
     map)
@@ -1687,6 +1695,86 @@ Returns a list of strings by parsing the current line against column widths."
          (format ":admin-action ssis run-package %s %s %s"
                  folder project package))))))
 
+;; --- Contextual edit/new/delete dispatch ---
+
+(defun sql-datum-admin-edit-at-point ()
+  "Edit the step or schedule at point."
+  (interactive)
+  (pcase (get-text-property (line-beginning-position) 'sql-datum-section)
+    ("Steps"     (sql-datum-admin-edit-step))
+    ("Schedules" (sql-datum-admin-edit-schedule))
+    (_           (user-error "No editable item at point"))))
+
+(defun sql-datum-admin-new-at-point ()
+  "Create a new step or schedule, depending on cursor section."
+  (interactive)
+  (pcase (get-text-property (line-beginning-position) 'sql-datum-section)
+    ("Steps"     (sql-datum-admin-new-step))
+    ("Schedules" (sql-datum-admin-new-schedule))
+    (_           (user-error "No section at point for creating items"))))
+
+(defun sql-datum-admin-delete-at-point ()
+  "Delete the step or schedule at point."
+  (interactive)
+  (pcase (get-text-property (line-beginning-position) 'sql-datum-section)
+    ("Steps"     (sql-datum-admin-delete-step))
+    ("Schedules" (sql-datum-admin-delete-schedule))
+    (_           (user-error "No deletable item at point"))))
+
+;; --- Step action commands ---
+
+(defun sql-datum-admin-edit-step ()
+  "Edit the step at point in a job detail buffer."
+  (interactive)
+  (let ((step-id (sql-datum--admin-row-id-at-point))
+        (job-name (alist-get 'job_name sql-datum--admin-context)))
+    (unless step-id (user-error "No step at point"))
+    (unless job-name (user-error "No job context available"))
+    (sql-datum--admin-send-command
+      (format ":admin-action jobs edit-step %s %s"
+              step-id job-name))))
+
+(defun sql-datum-admin-new-step ()
+  "Create a new step for the current job."
+  (interactive)
+  (let ((job-name (alist-get 'job_name sql-datum--admin-context)))
+    (unless job-name (user-error "No job context available"))
+    ;; Open a blank step editor locally
+    (sql-datum--admin-show-step-editor
+     `((panel . "jobs")
+       (sub_panel . "step-edit")
+       (title . ,(format "New Step for: %s" job-name))
+       (step . ((step_id . nil)
+                (step_name . "")
+                (subsystem . "TSQL")
+                (command . "")
+                (database_name . "")
+                (retry_attempts . 0)
+                (retry_interval . 0)
+                (on_success_action . 3)
+                (on_success_step_id . 0)
+                (on_fail_action . 2)
+                (on_fail_step_id . 0)))
+       (subsystems . (("TSQL" . "T-SQL") ("CmdExec" . "OS Command")
+                      ("PowerShell" . "PowerShell") ("SSIS" . "SSIS")))
+       (step_actions . ((1 . "Quit with success") (2 . "Quit with failure")
+                        (3 . "Go to next step") (4 . "Go to step...")))
+       (context . ((job_name . ,job-name))))
+     sql-datum--admin-sqli-buf)))
+
+(defun sql-datum-admin-delete-step ()
+  "Delete the step at point."
+  (interactive)
+  (let ((step-id (sql-datum--admin-row-id-at-point))
+        (job-name (alist-get 'job_name sql-datum--admin-context)))
+    (unless step-id (user-error "No step at point"))
+    (unless job-name (user-error "No job context available"))
+    (when (yes-or-no-p (format "Delete step %s? " step-id))
+      (sql-datum--admin-send-command
+        (format ":admin-action jobs delete-step %s %s" step-id job-name)))))
+
+;; --- Schedule action commands ---
+
 (defun sql-datum-admin-edit-schedule ()
   "Edit the schedule at point in a job detail buffer."
   (interactive)
@@ -1921,6 +2009,186 @@ JOB-NAME the parent job, IS-NEW non-nil for creating a new schedule."
            (format ":admin-action jobs update-schedule %s" json-str-with-id)))))
     (quit-window t)
     (message "datum admin: schedule %s" (if is-new "created" "updated"))))
+
+;; --- Step editor (widget-based form) ---
+
+(defun sql-datum--admin-show-step-editor (data sqli-buf)
+  "Show a widget-based step editor from DATA.
+SQLI-BUF is the originating SQLi buffer."
+  (require 'widget)
+  (require 'wid-edit)
+  (let* ((step (alist-get 'step data))
+         (subsystems (alist-get 'subsystems data))
+         (step-actions (alist-get 'step_actions data))
+         (context (alist-get 'context data))
+         (job-name (alist-get 'job_name context))
+         (title (or (alist-get 'title data) "Step Editor"))
+         (is-new (null (alist-get 'step_id step)))
+         (buf (get-buffer-create "*datum-admin:step-edit*")))
+    (with-current-buffer buf
+      (kill-all-local-variables)
+      (let ((inhibit-read-only t))
+        (erase-buffer))
+      (remove-overlays)
+      (widget-insert (propertize title 'face 'bold))
+      (widget-insert "\n\n")
+      (let (widgets)
+        ;; Step Name
+        (widget-insert "Step Name:       ")
+        (push (cons 'step_name (widget-create 'editable-field
+                                              :size 40
+                                              :value (or (alist-get 'step_name step) "")))
+              widgets)
+        (widget-insert "\n")
+        ;; Subsystem
+        (widget-insert "Subsystem:       ")
+        (let* ((sub-val (or (alist-get 'subsystem step) "TSQL"))
+               (sub-choices (or (mapcar (lambda (s)
+                                          (list 'item
+                                                :tag (cdr s)
+                                                :value (car s)))
+                                        (if (listp subsystems)
+                                            subsystems
+                                          '(("TSQL" . "T-SQL"))))
+                                '((item :tag "T-SQL" :value "TSQL")))))
+          (push (cons 'subsystem
+                      (apply #'widget-create 'menu-choice
+                             :value sub-val
+                             sub-choices))
+                widgets))
+        (widget-insert "\n")
+        ;; Database
+        (widget-insert "Database:        ")
+        (push (cons 'database_name (widget-create 'editable-field
+                                                   :size 40
+                                                   :value (or (alist-get 'database_name step) "")))
+              widgets)
+        (widget-insert "\n\n")
+        ;; Command (multi-line text)
+        (widget-insert "Command:\n")
+        (push (cons 'command (widget-create 'text
+                                            :size 80
+                                            :value (or (alist-get 'command step) "")))
+              widgets)
+        (widget-insert "\n")
+        ;; Retry settings
+        (widget-insert "Retry Attempts:  ")
+        (push (cons 'retry_attempts
+                    (widget-create 'editable-field
+                                   :size 10
+                                   :value (format "%s" (or (alist-get 'retry_attempts step) 0))))
+              widgets)
+        (widget-insert "\n")
+        (widget-insert "Retry Interval:  ")
+        (push (cons 'retry_interval
+                    (widget-create 'editable-field
+                                   :size 10
+                                   :value (format "%s" (or (alist-get 'retry_interval step) 0))))
+              widgets)
+        (widget-insert "  (minutes)\n\n")
+        ;; On Success Action
+        (widget-insert "On Success:      ")
+        (let* ((act-val (or (alist-get 'on_success_action step) 3))
+               (act-choices (or (mapcar (lambda (a)
+                                          (list 'item
+                                                :tag (cdr a)
+                                                :value (car a)))
+                                        (if (listp step-actions)
+                                            step-actions
+                                          '((3 . "Go to next step"))))
+                                '((item :tag "Go to next step" :value 3)))))
+          (push (cons 'on_success_action
+                      (apply #'widget-create 'menu-choice
+                             :value act-val
+                             act-choices))
+                widgets))
+        (widget-insert "\n")
+        (widget-insert "On Success Step: ")
+        (push (cons 'on_success_step_id
+                    (widget-create 'editable-field
+                                   :size 10
+                                   :value (format "%s" (or (alist-get 'on_success_step_id step) 0))))
+              widgets)
+        (widget-insert "  (for \"Go to step...\")\n")
+        ;; On Failure Action
+        (widget-insert "On Failure:      ")
+        (let* ((act-val (or (alist-get 'on_fail_action step) 2))
+               (act-choices (or (mapcar (lambda (a)
+                                          (list 'item
+                                                :tag (cdr a)
+                                                :value (car a)))
+                                        (if (listp step-actions)
+                                            step-actions
+                                          '((2 . "Quit with failure"))))
+                                '((item :tag "Quit with failure" :value 2)))))
+          (push (cons 'on_fail_action
+                      (apply #'widget-create 'menu-choice
+                             :value act-val
+                             act-choices))
+                widgets))
+        (widget-insert "\n")
+        (widget-insert "On Failure Step: ")
+        (push (cons 'on_fail_step_id
+                    (widget-create 'editable-field
+                                   :size 10
+                                   :value (format "%s" (or (alist-get 'on_fail_step_id step) 0))))
+              widgets)
+        (widget-insert "  (for \"Go to step...\")\n\n")
+        ;; Buttons
+        (widget-create 'push-button
+                       :notify (lambda (&rest _)
+                                 (sql-datum--admin-step-submit
+                                  widgets step sqli-buf job-name is-new))
+                       (if is-new "Create Step" "Update Step"))
+        (widget-insert "  ")
+        (widget-create 'push-button
+                       :notify (lambda (&rest _) (quit-window t))
+                       "Cancel")
+        (widget-insert "\n")
+        (setq-local sql-datum--step-widgets widgets)
+        (setq-local sql-datum--admin-sqli-buf sqli-buf))
+      (use-local-map widget-keymap)
+      (widget-setup)
+      (goto-char (point-min)))
+    (switch-to-buffer buf)))
+
+(defun sql-datum--admin-step-submit (widgets step sqli-buf job-name is-new)
+  "Submit the step form with WIDGETS data.
+STEP is the original step data, SQLI-BUF the connection buffer,
+JOB-NAME the parent job, IS-NEW non-nil for creating a new step."
+  (let* ((get-val (lambda (key)
+                    (let ((w (alist-get key widgets)))
+                      (when w (widget-value w)))))
+         (data `((step_name . ,(string-trim (funcall get-val 'step_name)))
+                 (subsystem . ,(funcall get-val 'subsystem))
+                 (command . ,(funcall get-val 'command))
+                 (database_name . ,(string-trim (funcall get-val 'database_name)))
+                 (retry_attempts . ,(string-to-number
+                                     (funcall get-val 'retry_attempts)))
+                 (retry_interval . ,(string-to-number
+                                     (funcall get-val 'retry_interval)))
+                 (on_success_action . ,(funcall get-val 'on_success_action))
+                 (on_success_step_id . ,(string-to-number
+                                         (funcall get-val 'on_success_step_id)))
+                 (on_fail_action . ,(funcall get-val 'on_fail_action))
+                 (on_fail_step_id . ,(string-to-number
+                                      (funcall get-val 'on_fail_step_id))))))
+    ;; Validate
+    (when (string-empty-p (alist-get 'step_name data))
+      (user-error "Step name cannot be empty"))
+    (if is-new
+        (let ((json-str (json-serialize data)))
+          (sql-datum--admin-send-command-to
+           sqli-buf
+           (format ":admin-action jobs new-step %s %s" job-name json-str)))
+      ;; Include step_id for update
+      (push (cons 'step_id (alist-get 'step_id step)) data)
+      (let ((json-str (json-serialize data)))
+        (sql-datum--admin-send-command-to
+         sqli-buf
+         (format ":admin-action jobs update-step %s %s" job-name json-str)))))
+  (quit-window t)
+  (message "datum admin: step %s" (if is-new "created" "updated")))
 
 ;; --- Auto-refresh ---
 
