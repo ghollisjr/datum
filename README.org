@@ -497,7 +497,7 @@ dialect-aware: they use =TOP= / =NEWID()= / =OBJECT_ID()= on MSSQL and
 
 | Key             | Command                  | Description                          |
 |-----------------+--------------------------+--------------------------------------|
-| =C-c C-x c=     | =sql-connect=            | Connect to a named connection        |
+| =C-c C-x c=     | =sql-connect=            | Connect to a named connection (=C-u= for additional connection) |
 | =C-c C-x n=     | =sql-set-sqli-buffer=    | Switch active SQLi buffer            |
 | =C-c C-x s=     | =sql-datum-scratch=      | Open scratch SQL buffer (=C-u= for additional) |
 | =C-c C-x d=     | =sql-datum-disconnect=   | Disconnect session (scratch buffers kept)        |
