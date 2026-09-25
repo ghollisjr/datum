@@ -309,6 +309,50 @@ class BaseDriver(ABC):
         """Return a database that is safe to connect to while dropping another."""
         return None
 
+    # --- Database file management ---
+    #
+    # Only meaningful where a database is made of files the administrator
+    # sizes and places.  PostgreSQL manages its own storage, so it opts
+    # out rather than pretending.
+
+    supports_file_management = False
+
+    def database_files(self, cursor, name):
+        """Return the files making up database NAME.
+
+        Each entry is a dict with `logical`, `type`, `filegroup`,
+        `size_mb`, `growth`, `growth_unit`, `max_mb` and `path`.
+        """
+        return []
+
+    def database_filegroups(self, cursor, name):
+        """Return the filegroup names available in database NAME."""
+        return []
+
+    def file_options(self, cursor, name, current=None):
+        """Field descriptors for adding, or editing when CURRENT is given."""
+        return []
+
+    def sql_add_file(self, name, opts):
+        """Return statements adding a file to database NAME."""
+        raise NotImplementedError(
+            f"File management is not supported on {self.dialect_name}")
+
+    def sql_modify_file(self, name, opts, current):
+        """Return statements resizing or re-limiting an existing file."""
+        raise NotImplementedError(
+            f"File management is not supported on {self.dialect_name}")
+
+    def sql_remove_file(self, name, logical):
+        """Return statements removing a file from database NAME."""
+        raise NotImplementedError(
+            f"File management is not supported on {self.dialect_name}")
+
+    def sql_shrink_file(self, name, logical, target_mb):
+        """Return statements shrinking a file to TARGET_MB."""
+        raise NotImplementedError(
+            f"File management is not supported on {self.dialect_name}")
+
     # --- Server-side filesystem browsing ---
     #
     # Data and log files live on the server's filesystem, not the client's,

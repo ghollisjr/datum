@@ -666,6 +666,147 @@ class MSSQLDriver(BaseDriver):
                 "JOIN sys.databases d ON s.database_id = d.database_id "
                 "WHERE d.name = ? AND s.session_id <> @@SPID", [name])
 
+    # --- Database file management ---
+
+    supports_file_management = True
+
+    def database_files(self, cursor, name):
+        # sys.filegroups is scoped to the current database, so both views
+        # are addressed inside the target.  Joining the server-wide
+        # sys.master_files against the local sys.filegroups silently
+        # mislabels every filegroup whose id happens to exist in master.
+        db = self.quote_ddl_identifier(name)
+        cursor.execute(f"""
+            SELECT df.name, df.type_desc, fg.name,
+                   df.size * 8 / 1024,
+                   CASE WHEN df.is_percent_growth = 1 THEN df.growth
+                        ELSE df.growth * 8 / 1024 END,
+                   CASE WHEN df.is_percent_growth = 1 THEN '%' ELSE 'MB' END,
+                   CASE WHEN df.max_size IN (-1, 268435456) THEN 0
+                        ELSE df.max_size * 8 / 1024 END,
+                   df.physical_name
+            FROM {db}.sys.database_files df
+            LEFT JOIN {db}.sys.filegroups fg
+                ON fg.data_space_id = df.data_space_id
+            ORDER BY df.type, df.file_id
+        """)
+        return [{"logical": r[0], "type": r[1], "filegroup": r[2] or "",
+                 "size_mb": int(r[3] or 0), "growth": int(r[4] or 0),
+                 "growth_unit": r[5], "max_mb": int(r[6] or 0), "path": r[7]}
+                for r in cursor.fetchall()]
+
+    def database_filegroups(self, cursor, name):
+        db = self.quote_ddl_identifier(name)
+        try:
+            cursor.execute(f"SELECT name FROM {db}.sys.filegroups "
+                           f"WHERE type = 'FG' ORDER BY name")
+            return [r[0] for r in cursor.fetchall()]
+        except Exception:
+            return []
+
+    def file_options(self, cursor, name, current=None):
+        # Only the size limits can be altered on an existing file; its
+        # name, path, type and filegroup are fixed once created.
+        if current:
+            return [
+                {"key": "size_mb", "label": "Size", "type": "int",
+                 "default": current.get("size_mb", 0),
+                 "help": "MB; a file cannot be shrunk by lowering this"},
+                {"key": "growth", "label": "Autogrowth", "type": "int",
+                 "default": current.get("growth", 0),
+                 "help": "0 disables autogrowth"},
+                {"key": "growth_unit", "label": "Growth Unit", "type": "choice",
+                 "default": current.get("growth_unit", "MB"),
+                 "choices": [["MB", "Megabytes"], ["%", "Percent"]]},
+                {"key": "max_mb", "label": "Max Size", "type": "int",
+                 "default": current.get("max_mb", 0),
+                 "help": "MB; 0 for unlimited"},
+            ]
+        filegroups = self.database_filegroups(cursor, name)
+        defaults = self.default_paths(cursor)
+        return [
+            {"key": "logical", "label": "Logical Name", "type": "string",
+             "default": "", "required": True},
+            {"key": "file_type", "label": "File Type", "type": "choice",
+             "default": "ROWS",
+             "choices": [["ROWS", "Data"], ["LOG", "Log"]]},
+            {"key": "filegroup", "label": "Filegroup", "type": "choice",
+             "default": "PRIMARY",
+             "choices": [[f, f] for f in filegroups] or [["PRIMARY", "PRIMARY"]],
+             "help": "data files only; ignored for a log file"},
+            {"key": "directory", "label": "Directory", "type": "path",
+             "default": defaults.get("data", ""), "required": True},
+            {"key": "size_mb", "label": "Initial Size", "type": "int",
+             "default": 8, "help": "MB"},
+            {"key": "growth", "label": "Autogrowth", "type": "int",
+             "default": 64, "help": "0 disables autogrowth"},
+            {"key": "growth_unit", "label": "Growth Unit", "type": "choice",
+             "default": "MB",
+             "choices": [["MB", "Megabytes"], ["%", "Percent"]]},
+            {"key": "max_mb", "label": "Max Size", "type": "int",
+             "default": 0, "help": "MB; 0 for unlimited"},
+        ]
+
+    def _file_spec(self, logical, path, opts, include_name_only=False):
+        """Build the (NAME = ..., ...) spec shared by ADD and MODIFY."""
+        parts = [f"NAME = {self.quote_ddl_identifier(logical)}"]
+        if path:
+            parts.append(f"FILENAME = {self.quote_ddl_literal(path)}")
+        if opts.get("size_mb"):
+            parts.append(f"SIZE = {int(opts['size_mb'])}MB")
+        max_mb = opts.get("max_mb")
+        parts.append(f"MAXSIZE = {int(max_mb)}MB" if max_mb
+                     else "MAXSIZE = UNLIMITED")
+        growth = opts.get("growth")
+        if growth:
+            unit = "%" if opts.get("growth_unit") == "%" else "MB"
+            parts.append(f"FILEGROWTH = {int(growth)}{unit}")
+        else:
+            parts.append("FILEGROWTH = 0")
+        return "(" + ", ".join(parts) + ")"
+
+    def sql_add_file(self, name, opts):
+        db = self.quote_ddl_identifier(name)
+        logical = self.validate_identifier(opts.get("logical", ""))
+        directory = (opts.get("directory") or "").strip()
+        if not directory:
+            raise ValueError("a directory is required for the new file")
+        is_log = opts.get("file_type") == "LOG"
+        suffix = ".ldf" if is_log else ".ndf"
+        path = self.join_path(directory, f"{logical}{suffix}")
+        spec = self._file_spec(logical, path, opts)
+        if is_log:
+            return [f"ALTER DATABASE {db} ADD LOG FILE {spec}"]
+        filegroup = (opts.get("filegroup") or "").strip()
+        sql = f"ALTER DATABASE {db} ADD FILE {spec}"
+        if filegroup:
+            sql += f" TO FILEGROUP {self.quote_ddl_identifier(filegroup)}"
+        return [sql]
+
+    def sql_modify_file(self, name, opts, current):
+        db = self.quote_ddl_identifier(name)
+        logical = current["logical"]
+        if all(opts.get(k) == current.get(k)
+               for k in ("size_mb", "growth", "growth_unit", "max_mb")):
+            return []
+        return [f"ALTER DATABASE {db} MODIFY FILE "
+                f"{self._file_spec(logical, None, opts)}"]
+
+    def sql_remove_file(self, name, logical):
+        return [f"ALTER DATABASE {self.quote_ddl_identifier(name)} "
+                f"REMOVE FILE {self.quote_ddl_identifier(logical)}"]
+
+    def sql_shrink_file(self, name, logical, target_mb):
+        # DBCC SHRINKFILE only acts on the current database, so it is run
+        # through sp_executesql in the target's own context rather than
+        # issuing a USE that would move the shared session.
+        self.validate_identifier(name)
+        self.validate_identifier(logical)
+        inner = (f"DBCC SHRINKFILE ("
+                 f"{self.quote_ddl_literal(logical)}, {int(target_mb)})")
+        return [f"EXEC {self.quote_ddl_identifier(name)}..sp_executesql "
+                f"N{self.quote_ddl_literal(inner)}"]
+
     # --- Altering an existing database ---
 
     supports_database_alter = True

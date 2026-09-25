@@ -1448,7 +1448,8 @@ SQLI-BUF is the originating SQLi buffer."
     (define-key map "k" #'sql-datum-admin-kill-session)
     ;; Jobs panel
     (define-key map "s" #'sql-datum-admin-start-job)
-    (define-key map "S" #'sql-datum-admin-stop-job)
+    ;; S stops a job, but shrinks a file in the database files view.
+    (define-key map "S" #'sql-datum-admin-stop-or-shrink)
     (define-key map "e" #'sql-datum-admin-toggle-enable)
     (define-key map "H" #'sql-datum-admin-job-history)
     (define-key map "d" #'sql-datum-admin-detail)
@@ -1458,6 +1459,8 @@ SQLI-BUF is the originating SQLi buffer."
     (define-key map "E" #'sql-datum-admin-edit-at-point)
     (define-key map "N" #'sql-datum-admin-new-at-point)
     (define-key map "D" #'sql-datum-admin-delete-at-point)
+    ;; Databases panel: file management
+    (define-key map "F" #'sql-datum-admin-database-files)
     ;; Query text (activity panel)
     (define-key map (kbd "M-.") #'sql-datum-admin-query-text)
     map)
@@ -1770,8 +1773,9 @@ Returns a list of strings by parsing the current line against column widths."
   (pcase (get-text-property (line-beginning-position) 'sql-datum-section)
     ("Steps"     (sql-datum-admin-edit-step))
     ("Schedules" (sql-datum-admin-edit-schedule))
-    (_ (pcase sql-datum--admin-panel-name
-         ("databases" (sql-datum-admin-edit-database))
+    (_ (pcase (cons sql-datum--admin-panel-name (sql-datum--admin-sub-panel))
+         ('("databases" . "files") (sql-datum-admin-edit-file))
+         (`("databases" . ,_)      (sql-datum-admin-edit-database))
          (_ (user-error "No editable item at point"))))))
 
 (defun sql-datum-admin-new-at-point ()
@@ -1780,8 +1784,9 @@ Returns a list of strings by parsing the current line against column widths."
   (pcase (get-text-property (line-beginning-position) 'sql-datum-section)
     ("Steps"     (sql-datum-admin-new-step))
     ("Schedules" (sql-datum-admin-new-schedule))
-    (_ (pcase sql-datum--admin-panel-name
-         ("databases" (sql-datum-admin-new-database))
+    (_ (pcase (cons sql-datum--admin-panel-name (sql-datum--admin-sub-panel))
+         ('("databases" . "files") (sql-datum-admin-new-file))
+         (`("databases" . ,_)      (sql-datum-admin-new-database))
          (_ (user-error "No section at point for creating items"))))))
 
 (defun sql-datum-admin-delete-at-point ()
@@ -1790,8 +1795,9 @@ Returns a list of strings by parsing the current line against column widths."
   (pcase (get-text-property (line-beginning-position) 'sql-datum-section)
     ("Steps"     (sql-datum-admin-delete-step))
     ("Schedules" (sql-datum-admin-delete-schedule))
-    (_ (pcase sql-datum--admin-panel-name
-         ("databases" (sql-datum-admin-drop-database))
+    (_ (pcase (cons sql-datum--admin-panel-name (sql-datum--admin-sub-panel))
+         ('("databases" . "files") (sql-datum-admin-remove-file))
+         (`("databases" . ,_)      (sql-datum-admin-drop-database))
          (_ (user-error "No deletable item at point"))))))
 
 ;; --- Database wizard commands ---
@@ -1808,6 +1814,78 @@ Returns a list of strings by parsing the current line against column widths."
     (unless name (user-error "No database at point"))
     (sql-datum--admin-send-command
      (format ":admin-action databases edit-database %s" name))))
+
+;; --- Database file management ---
+
+(defun sql-datum--admin-sub-panel ()
+  "Return the sub-panel name of the current admin buffer, or nil."
+  (alist-get 'sub_panel sql-datum--admin-panel-data))
+
+(defun sql-datum--admin-file-payload (&optional extra)
+  "Return a base64 payload naming the current database and file at point."
+  (let ((database (alist-get 'database sql-datum--admin-context))
+        (logical (sql-datum--admin-row-id-at-point)))
+    (unless database (user-error "No database context available"))
+    (base64-encode-string
+     (encode-coding-string
+      (json-serialize (append `((database . ,database))
+                              (when logical `((logical . ,logical)))
+                              extra))
+      'utf-8)
+     t)))
+
+(defun sql-datum-admin-database-files ()
+  "Show the files making up the database at point."
+  (interactive)
+  (let ((name (sql-datum--admin-row-id-at-point)))
+    (unless name (user-error "No database at point"))
+    (setq sql-datum--admin-display-request "databases")
+    (sql-datum--admin-send-command
+     (format ":admin-action databases files %s" name))))
+
+(defun sql-datum-admin-new-file ()
+  "Add a file to the database whose files are listed."
+  (interactive)
+  (sql-datum--admin-send-command
+   (format ":admin-action databases new-file %s"
+           (sql-datum--admin-file-payload))))
+
+(defun sql-datum-admin-edit-file ()
+  "Edit the size limits of the file at point."
+  (interactive)
+  (unless (sql-datum--admin-row-id-at-point)
+    (user-error "No file at point"))
+  (sql-datum--admin-send-command
+   (format ":admin-action databases edit-file %s"
+           (sql-datum--admin-file-payload))))
+
+(defun sql-datum-admin-remove-file ()
+  "Remove the file at point from its database."
+  (interactive)
+  (let ((logical (sql-datum--admin-row-id-at-point)))
+    (unless logical (user-error "No file at point"))
+    (when (yes-or-no-p (format "Remove file '%s'? " logical))
+      (sql-datum--admin-send-command
+       (format ":admin-action databases remove-file %s"
+               (sql-datum--admin-file-payload))))))
+
+(defun sql-datum-admin-shrink-file ()
+  "Shrink the file at point."
+  (interactive)
+  (unless (sql-datum--admin-row-id-at-point)
+    (user-error "No file at point"))
+  (sql-datum--admin-send-command
+   (format ":admin-action databases shrink-file %s"
+           (sql-datum--admin-file-payload))))
+
+(defun sql-datum-admin-stop-or-shrink ()
+  "Shrink the file at point, or stop the job at point.
+`S' means stop in the jobs panel and shrink in the database files view."
+  (interactive)
+  (if (and (equal sql-datum--admin-panel-name "databases")
+           (equal (sql-datum--admin-sub-panel) "files"))
+      (sql-datum-admin-shrink-file)
+    (sql-datum-admin-stop-job)))
 
 (defun sql-datum-admin-drop-database ()
   "Open the drop-database confirmation for the database at point."

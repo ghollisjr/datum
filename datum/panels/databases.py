@@ -62,6 +62,20 @@ def run_action(cursor, driver, action_name, args):
             _new_database_form(cursor, driver, args)
         elif action_name == "browse-path":
             _browse_path(cursor, driver, args)
+        elif action_name == "files":
+            _files_panel(cursor, driver, args)
+        elif action_name == "new-file":
+            _file_form(cursor, driver, args, editing=False)
+        elif action_name == "edit-file":
+            _file_form(cursor, driver, args, editing=True)
+        elif action_name in ("add-file", "modify-file"):
+            _apply_file(cursor, driver, args, action_name)
+        elif action_name == "remove-file":
+            _remove_file(cursor, driver, args)
+        elif action_name == "shrink-file":
+            _shrink_form(cursor, driver, args)
+        elif action_name == "do-shrink-file":
+            _do_shrink(cursor, driver, args)
         elif action_name == "edit-database":
             _edit_database_form(cursor, driver, args)
         elif action_name == "alter-database":
@@ -161,6 +175,7 @@ def _database_list(cursor, driver):
         "actions": [
             {"key": "N", "label": "New database", "command": "new-database"},
             {"key": "E", "label": "Edit settings", "command": "edit-database"},
+            {"key": "F", "label": "Manage files", "command": "files"},
             {"key": "D", "label": "Drop database", "command": "drop-check"},
         ],
         "info": None,
@@ -208,6 +223,287 @@ def _new_database_form(cursor, driver, args=None):
         "info": None,
         "context": {},
     })
+
+
+# --- File management ---
+
+def _file_db_name(driver, args):
+    """Return the database named by a row action or a form payload."""
+    if not args:
+        raise ValueError("no database given")
+    try:
+        payload = _decode_payload(args)
+    except ValueError:
+        payload = {}
+    name = (payload.get("database")
+            or (payload.get("values") or {}).get("database")
+            or "")
+    if not name:
+        name = " ".join(args)
+        payload = {}
+    driver.validate_identifier(name)
+    return name, payload
+
+
+def _require_file_support(driver):
+    from .. import envelope
+
+    if driver.supports_file_management:
+        return True
+    envelope.error(
+        f"{driver.dialect_name} does not expose database files: "
+        f"PostgreSQL manages its own storage, and tablespaces are "
+        f"server-level rather than per-database")
+    return False
+
+
+def _files_panel(cursor, driver, args):
+    """List the files making up a database."""
+    from .. import envelope
+
+    if not _require_file_support(driver):
+        return
+    name, _ = _file_db_name(driver, args)
+    files = driver.database_files(cursor, name)
+    if not files:
+        envelope.error(f"No files found for database: {name}")
+        return
+
+    rows = [[f["logical"],
+             f["type"],
+             f["filegroup"],
+             f"{f['size_mb']} MB",
+             (f"{f['growth']} {f['growth_unit']}" if f["growth"] else "none"),
+             (f"{f['max_mb']} MB" if f["max_mb"] else "unlimited"),
+             f["path"]]
+            for f in files]
+
+    envelope.admin_panel({
+        "panel": "databases",
+        "sub_panel": "files",
+        "title": f"Files: {name}",
+        "headers": ["Logical Name", "Type", "Filegroup", "Size",
+                    "Autogrowth", "Max Size", "Path"],
+        "rows": rows,
+        "row_id": 0,  # logical name
+        "actions": [
+            {"key": "N", "label": "Add file", "command": "new-file"},
+            {"key": "E", "label": "Edit file", "command": "edit-file"},
+            {"key": "D", "label": "Remove file", "command": "remove-file"},
+            {"key": "S", "label": "Shrink file", "command": "shrink-file"},
+        ],
+        "info": f"Files of {name}",
+        "parent_panel": "databases",
+        "context": {"database": name},
+    })
+
+
+def _find_file(driver, cursor, database, logical):
+    """Return the named file's current settings, or None."""
+    for entry in driver.database_files(cursor, database):
+        if entry["logical"].lower() == logical.lower():
+            return entry
+    return None
+
+
+def _file_form(cursor, driver, args, editing):
+    """Send the add-file or edit-file form."""
+    from .. import envelope
+
+    if not _require_file_support(driver):
+        return
+    payload = _decode_payload(args) if args else {}
+    database = (payload.get("database")
+                or (payload.get("values") or {}).get("database") or "")
+    logical = (payload.get("logical")
+               or (payload.get("values") or {}).get("logical") or "")
+    if not database:
+        envelope.error("no database given")
+        return
+    driver.validate_identifier(database)
+
+    current = None
+    if editing:
+        if not logical:
+            envelope.error("no file given")
+            return
+        current = _find_file(driver, cursor, database, logical)
+        if not current:
+            envelope.error(f"File not found in {database}: {logical}")
+            return
+
+    values = dict(payload.get("values") or {})
+    values["database"] = database
+    if editing:
+        values["logical"] = current["logical"]
+
+    envelope.admin_panel({
+        "panel": "databases",
+        "sub_panel": "form",
+        "title": (f"Edit File: {logical} ({database})" if editing
+                  else f"Add File to {database}"),
+        "form": {
+            "fields": _clean_fields(
+                driver.file_options(cursor, database, current)),
+            "values": values,
+            "submit_action": "modify-file" if editing else "add-file",
+            "submit_label": "Apply" if editing else "Add File",
+            "notes": ([f"File {current['path']}"] if editing else []),
+        },
+        "headers": [],
+        "rows": [],
+        "row_id": None,
+        "actions": [],
+        "info": None,
+        "context": {"database": database},
+    })
+
+
+def _coerce_file_opts(driver, cursor, database, opts, current):
+    """Coerce the submitted file form against its descriptors."""
+    specs = {f["key"]: f
+             for f in driver.file_options(cursor, database, current)}
+    for key, spec in specs.items():
+        value = opts.get(key)
+        if spec.get("required") and not str(value or "").strip():
+            raise ValueError(f"{spec['label']} is required")
+        if spec.get("type") == "int" and value not in (None, ""):
+            try:
+                opts[key] = int(value)
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"{spec['label']} must be a number "
+                    f"(got {value!r})") from None
+    return opts
+
+
+def _apply_file(cursor, driver, args, action_name):
+    """Run ADD FILE or MODIFY FILE from the submitted form."""
+    from .. import envelope
+
+    if not _require_file_support(driver):
+        return
+    opts = _decode_payload(args)
+    database = (opts.get("database") or "").strip()
+    if not database:
+        envelope.error("the form did not say which database to change")
+        return
+    driver.validate_identifier(database)
+
+    if action_name == "modify-file":
+        logical = (opts.get("logical") or "").strip()
+        current = _find_file(driver, cursor, database, logical)
+        if not current:
+            envelope.error(f"File not found in {database}: {logical}")
+            return
+        opts = _coerce_file_opts(driver, cursor, database, opts, current)
+        stmts = driver.sql_modify_file(database, opts, current)
+        if not stmts:
+            envelope.info(f"No changes to apply to {logical}")
+            return
+        done = f"Updated file {logical} in {database}"
+    else:
+        opts = _coerce_file_opts(driver, cursor, database, opts, None)
+        stmts = driver.sql_add_file(database, opts)
+        done = f"Added file {opts.get('logical')} to {database}"
+
+    for sql in stmts:
+        cursor.execute(sql)
+        _commit(cursor)
+    envelope.info(done)
+
+
+def _remove_file(cursor, driver, args):
+    """Remove a file from a database."""
+    from .. import envelope
+
+    if not _require_file_support(driver):
+        return
+    payload = _decode_payload(args) if args else {}
+    database = (payload.get("database") or "").strip()
+    logical = (payload.get("logical") or "").strip()
+    if not (database and logical):
+        envelope.error("remove-file requires a database and a file")
+        return
+    driver.validate_identifier(database)
+    driver.validate_identifier(logical)
+
+    for sql in driver.sql_remove_file(database, logical):
+        cursor.execute(sql)
+        _commit(cursor)
+    envelope.info(f"Removed file {logical} from {database}")
+
+
+def _shrink_form(cursor, driver, args):
+    """Ask how far to shrink a file."""
+    from .. import envelope
+
+    if not _require_file_support(driver):
+        return
+    payload = _decode_payload(args) if args else {}
+    database = (payload.get("database") or "").strip()
+    logical = (payload.get("logical") or "").strip()
+    if not (database and logical):
+        envelope.error("shrink-file requires a database and a file")
+        return
+    driver.validate_identifier(database)
+    current = _find_file(driver, cursor, database, logical)
+    if not current:
+        envelope.error(f"File not found in {database}: {logical}")
+        return
+
+    envelope.admin_panel({
+        "panel": "databases",
+        "sub_panel": "form",
+        "title": f"Shrink File: {logical}",
+        "form": {
+            "fields": [
+                {"key": "target_mb", "label": "Target Size", "type": "int",
+                 "default": current["size_mb"],
+                 "help": "MB; shrinking below the used space has no effect"},
+            ],
+            "values": {"database": database, "logical": logical},
+            "submit_action": "do-shrink-file",
+            "submit_label": "Shrink File",
+            "notes": [f"File:         {current['path']}",
+                      f"Current size: {current['size_mb']} MB",
+                      "Shrinking fragments indexes and is slow on large "
+                      "files."],
+        },
+        "headers": [],
+        "rows": [],
+        "row_id": None,
+        "actions": [],
+        "info": None,
+        "context": {"database": database},
+    })
+
+
+def _do_shrink(cursor, driver, args):
+    """Run DBCC SHRINKFILE for the submitted target size."""
+    from .. import envelope
+
+    if not _require_file_support(driver):
+        return
+    opts = _decode_payload(args)
+    database = (opts.get("database") or "").strip()
+    logical = (opts.get("logical") or "").strip()
+    if not (database and logical):
+        envelope.error("the form did not say which file to shrink")
+        return
+    try:
+        target = int(opts.get("target_mb") or 0)
+    except (TypeError, ValueError):
+        envelope.error(f"Target size must be a number "
+                       f"(got {opts.get('target_mb')!r})")
+        return
+
+    for sql in driver.sql_shrink_file(database, logical, target):
+        cursor.execute(sql)
+        _commit(cursor)
+    after = _find_file(driver, cursor, database, logical)
+    size = f"{after['size_mb']} MB" if after else "unknown"
+    envelope.info(f"Shrank {logical} in {database} — now {size}")
 
 
 def _settings_context(cursor, driver, args):
