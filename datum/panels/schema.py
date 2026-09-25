@@ -400,8 +400,9 @@ def _edit_table_form(cursor, driver, args):
             "preview_action": "preview-alter-table",
             "notes": [
                 "Only the columns you change are altered.",
-                "Renaming a column here reads as dropping it and adding "
-                "another, which loses its data — the plan is shown first.",
+                "To rename a column, leave this form and press R on the "
+                "table: renaming here reads as dropping one column and "
+                "adding another, which loses the data.",
             ],
         },
         "headers": [],
@@ -439,9 +440,10 @@ def _alter_table(cursor, driver, args, action_name):
 
     # Dropping a column destroys its data, so the plan is shown and has
     # to be confirmed before anything runs.
-    _added, dropped, _changed = driver._diff_columns(opts, current)
+    added, dropped, _changed = driver._diff_columns(opts, current)
     if dropped and action_name != "confirm-alter-table":
-        _confirm_alter(driver, schema_name, table, opts, dropped, stmts)
+        _confirm_alter(driver, schema_name, table, opts, dropped, stmts,
+                       added)
         return
 
     for index, sql in enumerate(stmts):
@@ -458,7 +460,8 @@ def _alter_table(cursor, driver, args, action_name):
     _refresh_tables(cursor, driver, schema_name)
 
 
-def _confirm_alter(driver, schema_name, table, opts, dropped, stmts):
+def _confirm_alter(driver, schema_name, table, opts, dropped, stmts,
+                   added=None):
     """Ask before running a plan that drops columns."""
     from .. import envelope
 
@@ -467,6 +470,12 @@ def _confirm_alter(driver, schema_name, table, opts, dropped, stmts):
              "",
              f"These columns will be DROPPED, losing their data: {names}",
              ""]
+    # Someone who meant to rename a column sees it as a drop and an add,
+    # so the action that does it properly is named here.
+    if added:
+        notes += ["If you meant to rename a column, cancel and press R on "
+                  "the table instead — that keeps the data.",
+                  ""]
     notes += [" ".join(sql.split())[:110] for sql in stmts]
 
     values = dict(opts)
