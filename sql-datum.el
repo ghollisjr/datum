@@ -1490,7 +1490,7 @@ SQLI-BUF is the originating SQLi buffer."
     (define-key map "K" #'sql-datum-admin-database-backups)
     ;; Schema panel
     (define-key map "T" #'sql-datum-admin-schema-tables)
-    (define-key map "R" #'sql-datum-admin-restore)
+    (define-key map "R" #'sql-datum-admin-restore-or-rename)
     ;; Security panel: database user mappings
     (define-key map "U" #'sql-datum-admin-user-mappings)
     ;; Query text (activity panel)
@@ -1930,6 +1930,29 @@ Returns a list of strings by parsing the current line against column widths."
                (json-serialize `((schema . ,schema) (table . ,table)))
                'utf-8)
               t)))))
+
+(defun sql-datum-admin-rename-column ()
+  "Rename a column of the table at point."
+  (interactive)
+  (let ((schema (alist-get 'schema sql-datum--admin-context))
+        (table (sql-datum--admin-row-id-at-point)))
+    (unless (and schema table) (user-error "No table at point"))
+    (sql-datum--admin-send-command
+     (format ":admin-action schema rename-column %s"
+             (base64-encode-string
+              (encode-coding-string
+               (json-serialize `((schema . ,schema) (table . ,table)))
+               'utf-8)
+              t)))))
+
+(defun sql-datum-admin-restore-or-rename ()
+  "Rename a column in the tables view, or restore in the backups view.
+`R' means restore where backups are listed and rename where tables are."
+  (interactive)
+  (if (and (equal sql-datum--admin-panel-name "schema")
+           (equal (sql-datum--admin-sub-panel) "tables"))
+      (sql-datum-admin-rename-column)
+    (sql-datum-admin-restore)))
 
 (defun sql-datum-admin-drop-table ()
   "Drop the table at point."
@@ -2759,6 +2782,46 @@ typing outside a field silently corrupts the form layout."
      ((stringp raw) (string-trim raw))
      (t raw))))
 
+(defconst sql-datum--form-list-indent 12
+  "Width of the [INS] [DEL] prefix `editable-list' puts on each row.
+The legend above a column list is indented by this much so that its
+headings sit over the fields they name.")
+
+(defun sql-datum--form-list-widths (item)
+  "Return the rendered width of each sub-field in ITEM.
+
+A row only lines up if every field has a known width, which means the
+type menu has to be padded: `menu-choice' renders the chosen item's
+tag, so its width would otherwise follow whatever is selected."
+  (mapcar (lambda (col)
+            (let ((ctype (or (alist-get 'type col) "string")))
+              (cond
+               ;; A checkbox renders as [X], but the column has to be at
+               ;; least as wide as its heading or the legend is clipped.
+               ((equal ctype "bool")
+                (max 3 (length (or (alist-get 'label col) ""))))
+               ((equal ctype "choice")
+                (apply #'max 4 (mapcar (lambda (c) (length (nth 1 c)))
+                                       (alist-get 'choices col))))
+               (t (or (alist-get 'size col) 14)))))
+          item))
+
+(defun sql-datum--form-list-legend (spec)
+  "Return the heading line for the column list described by SPEC."
+  (let* ((item (alist-get 'item spec))
+         (widths (sql-datum--form-list-widths item)))
+    (concat (make-string sql-datum--form-list-indent ?\s)
+            (mapconcat (lambda (pair)
+                         (let ((label (or (alist-get 'label (car pair)) ""))
+                               (width (cdr pair)))
+                           (if (> (length label) width)
+                               (substring label 0 width)
+                             (concat label
+                                     (make-string (- width (length label))
+                                                  ?\s)))))
+                       (cl-mapcar #'cons item widths) " ")
+            "\n")))
+
 (defun sql-datum--form-create-widget (spec &optional values)
   "Create and return the widget for field SPEC.
 A value for this field in VALUES wins over the descriptor's default, so
@@ -2807,26 +2870,32 @@ a form rebuilt after browsing for a path comes back as the user left it."
                       (append (and (listp default) default) nil))
        (append
         '(group :format "%v\n")
-        (mapcar (lambda (col)
-                  (let ((ctype (or (alist-get 'type col) "string")))
-                    (cond
-                     ;; A checkbox shows nothing to say what it is for,
-                     ;; so it carries its own label.
-                     ((equal ctype "bool")
-                      (list 'checkbox
-                            :format (concat (or (alist-get 'label col) "")
-                                            " %[%v%]  ")))
-                     ((equal ctype "choice")
-                      (append
-                       (list 'menu-choice :format "%[%v%] ")
-                       (mapcar (lambda (c)
-                                 (list 'item :format "%t"
-                                       :tag (nth 1 c) :value (nth 0 c)))
-                               (alist-get 'choices col))))
-                     (t (list 'editable-field
-                              :size (or (alist-get 'size col) 14)
-                              :format "%v ")))))
-                (alist-get 'item spec)))))
+        (cl-mapcar
+         (lambda (col width)
+           (let ((ctype (or (alist-get 'type col) "string")))
+             (cond
+              ((equal ctype "bool")
+               (list 'checkbox
+                     :format (concat "%[%v%]"
+                                     (make-string (max 1 (- width 2)) ?\s))))
+              ((equal ctype "choice")
+               (append
+                (list 'menu-choice :format "%[%v%] ")
+                (mapcar (lambda (c)
+                          ;; Padding the tag fixes the rendered width, so
+                          ;; the fields after it stay in their columns
+                          ;; whatever type is selected.
+                          (let ((tag (nth 1 c)))
+                            (list 'item :format "%t"
+                                  :tag (concat tag
+                                               (make-string
+                                                (max 0 (- width (length tag)))
+                                                ?\s))
+                                  :value (nth 0 c))))
+                        (alist-get 'choices col))))
+              (t (list 'editable-field :size width :format "%v ")))))
+         (alist-get 'item spec)
+         (sql-datum--form-list-widths (alist-get 'item spec))))))
      ((equal type "list")
       ;; A repeating group: [INS] and [DEL] add and remove rows, and
       ;; `widget-value' yields a list of rows.
@@ -2945,13 +3014,8 @@ with `fields', `values', `submit_action', and optional `notes',
                                            'face 'font-lock-comment-face)))
               (widget-insert "\n")
               (widget-insert
-               (propertize
-                (concat "  each row: "
-                        (mapconcat (lambda (col)
-                                     (or (alist-get 'label col) ""))
-                                   (alist-get 'item spec) ", ")
-                        "\n")
-                'face 'font-lock-comment-face)))
+               (propertize (sql-datum--form-list-legend spec)
+                           'face 'font-lock-comment-face)))
              (t
               (widget-insert (format (format "%%-%ds  " label-width) label))))
             (push (cons (alist-get 'key spec)

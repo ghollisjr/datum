@@ -462,6 +462,12 @@ class PostgreSQLDriver(BaseDriver):
                          f"{self.quote_ddl_identifier(name)}")
         return stmts
 
+    def sql_rename_column(self, schema, table, old, new):
+        return [f"ALTER TABLE {self.quote_ddl_identifier(schema)}."
+                f"{self.quote_ddl_identifier(table)} RENAME COLUMN "
+                f"{self.quote_ddl_identifier(old)} TO "
+                f"{self.quote_ddl_identifier(new)}"]
+
     def _checked_type(self, column, sql_type):
         sql_type = str(sql_type or "").strip()
         if sql_type not in {t[0] for t in self.column_types()}:

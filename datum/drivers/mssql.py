@@ -1247,6 +1247,15 @@ class MSSQLDriver(BaseDriver):
                          f"{self.quote_ddl_identifier(name)}")
         return stmts
 
+    def sql_rename_column(self, schema, table, old, new):
+        # SQL Server renames through sp_rename rather than ALTER TABLE.
+        target = f"{self.validate_identifier(schema)}." \
+                 f"{self.validate_identifier(table)}." \
+                 f"{self.validate_identifier(old)}"
+        return [f"EXEC sp_rename {self.quote_ddl_literal(target)}, "
+                f"{self.quote_ddl_literal(self.validate_identifier(new))}, "
+                f"'COLUMN'"]
+
     def _checked_type(self, column, sql_type):
         sql_type = str(sql_type or "").strip()
         if sql_type not in {t[0] for t in self.column_types()}:

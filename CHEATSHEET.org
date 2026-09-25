@@ -209,13 +209,15 @@ Tables view (=T=):
 |-----+---------------------|
 | =N= | New table (builder) |
 | =E= | Alter columns       |
+| =R= | Rename a column     |
 | =D= | Drop table          |
 
 The builder takes columns as a list — name, type, nullable, primary key,
 default — with =[INS]= / =[DEL]= to add and remove rows.  Types are per
 dialect.  =E= edits an existing table's columns the same way and applies
 only what changed; anything that drops a column shows the plan and asks
-for the table name first.
+for the table name first.  =R= renames a column explicitly, which the
+editor cannot do without losing the data.
 
 ** Security panel
 

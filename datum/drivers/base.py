@@ -439,6 +439,16 @@ class BaseDriver(ABC):
         raise NotImplementedError(
             f"Table DDL is not supported on {self.dialect_name}")
 
+    def sql_rename_column(self, schema, table, old, new):
+        """Return statements renaming a column.
+
+        Offered separately from the column editor because a list of
+        columns cannot express a rename: by name alone it is
+        indistinguishable from dropping one and adding another.
+        """
+        raise NotImplementedError(
+            f"Renaming a column is not supported on {self.dialect_name}")
+
     def _diff_columns(self, opts, current):
         """Return (added, dropped, changed) comparing rows by name.
 

@@ -113,6 +113,10 @@ def run_action(cursor, driver, action_name, args):
         elif action_name in ("alter-table", "preview-alter-table",
                              "confirm-alter-table"):
             _alter_table(cursor, driver, args, action_name)
+        elif action_name == "rename-column":
+            _rename_column_form(cursor, driver, args)
+        elif action_name == "do-rename-column":
+            _do_rename_column(cursor, driver, args)
         elif action_name == "drop-table":
             _drop_table(cursor, driver, args)
         else:
@@ -268,6 +272,7 @@ def _tables_panel(cursor, driver, schema):
         "actions": [
             {"key": "N", "label": "New table", "command": "new-table"},
             {"key": "E", "label": "Alter columns", "command": "edit-table"},
+            {"key": "R", "label": "Rename column", "command": "rename-column"},
             {"key": "D", "label": "Drop table", "command": "drop-table"},
         ],
         "info": (f"Tables in {schema}" if rows
@@ -485,6 +490,75 @@ def _confirm_alter(driver, schema_name, table, opts, dropped, stmts):
         "info": None,
         "context": {"schema": schema_name},
     })
+
+
+def _rename_column_form(cursor, driver, args):
+    """Ask which column to rename, and to what."""
+    from .. import envelope
+
+    payload = _decode_payload(args) if args else {}
+    schema_name = (payload.get("schema") or "").strip()
+    table = (payload.get("table") or "").strip()
+    if not (schema_name and table):
+        envelope.error("rename-column requires a schema and a table")
+        return
+    driver.validate_identifier(schema_name)
+    driver.validate_identifier(table)
+
+    columns = driver.list_table_columns(cursor, schema_name, table)
+    if not columns:
+        envelope.error(f"Table not found: {schema_name}.{table}")
+        return
+
+    envelope.admin_panel({
+        "panel": "schema",
+        "sub_panel": "form",
+        "title": f"Rename a column in {schema_name}.{table}",
+        "form": {
+            "fields": [
+                {"key": "column", "label": "Column", "type": "choice",
+                 "default": columns[0][0],
+                 "choices": [[c[0], c[0]] for c in columns]},
+                {"key": "new_name", "label": "New Name", "type": "string",
+                 "default": "", "required": True},
+            ],
+            "values": {"schema": schema_name, "table": table},
+            "submit_action": "do-rename-column",
+            "submit_label": "Rename Column",
+            "notes": ["Renaming keeps the column's data; the column editor "
+                      "cannot, which is why this is separate."],
+        },
+        "headers": [],
+        "rows": [],
+        "row_id": None,
+        "actions": [],
+        "info": None,
+        "context": {"schema": schema_name},
+    })
+
+
+def _do_rename_column(cursor, driver, args):
+    from .. import envelope
+
+    opts = _decode_payload(args)
+    schema_name = (opts.get("schema") or "").strip()
+    table = (opts.get("table") or "").strip()
+    old = (opts.get("column") or "").strip()
+    new = (opts.get("new_name") or "").strip()
+    if not (schema_name and table and old):
+        envelope.error("rename-column requires a schema, table and column")
+        return
+    if not new:
+        envelope.error("New Name is required")
+        return
+    if old == new:
+        envelope.info(f"{old} already has that name")
+        return
+    for sql in driver.sql_rename_column(schema_name, table, old, new):
+        cursor.execute(sql)
+        _commit(cursor)
+    envelope.info(f"Renamed {old} to {new} in {schema_name}.{table}")
+    _refresh_tables(cursor, driver, schema_name)
 
 
 def _drop_table(cursor, driver, args):
