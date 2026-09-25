@@ -271,6 +271,35 @@ class BaseDriver(ABC):
         raise NotImplementedError(
             f"DROP DATABASE is not supported on {self.dialect_name}")
 
+    # --- Altering an existing database ---
+
+    supports_database_alter = False
+
+    def database_settings(self, cursor, name):
+        """Return the current settings of database NAME as a value map.
+
+        Keys match the descriptors returned by `settings_options`, so the
+        alter form can be shown already filled in with what is in force.
+        """
+        return {}
+
+    def settings_options(self, cursor, current):
+        """Return the field descriptors for the database settings form.
+
+        CURRENT is the map from `database_settings`; descriptors default
+        to those values so an untouched field means "leave as is".
+        """
+        return []
+
+    def sql_alter_database(self, name, opts, current):
+        """Return ALTER statements for the settings that actually changed.
+
+        Comparing against CURRENT keeps an unchanged form from issuing
+        statements that would take locks or fail for no reason.
+        """
+        raise NotImplementedError(
+            f"ALTER DATABASE is not supported on {self.dialect_name}")
+
     def sql_database_sessions(self, name):
         """Return (sql, params) counting active sessions on a database."""
         raise NotImplementedError(

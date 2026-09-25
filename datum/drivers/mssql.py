@@ -545,16 +545,47 @@ class MSSQLDriver(BaseDriver):
              "help": "blank uses the server's default data directory"},
             {"key": "data_size_mb", "label": "Data Initial Size", "type": "int",
              "default": 0, "help": "MB; 0 uses the server default"},
-            {"key": "data_growth_mb", "label": "Data Autogrowth", "type": "int",
-             "default": 0, "help": "MB; 0 uses the server default"},
+            {"key": "data_growth", "label": "Data Autogrowth", "type": "int",
+             "default": 0, "help": "0 uses the server default"},
+            {"key": "data_growth_unit", "label": "Data Growth Unit",
+             "type": "choice", "default": "MB",
+             "choices": [["MB", "Megabytes"], ["%", "Percent"]]},
+            {"key": "data_max_mb", "label": "Data Max Size", "type": "int",
+             "default": 0, "help": "MB; 0 for unlimited growth"},
             {"key": "log_dir", "label": "Log File Directory", "type": "path",
              "default": defaults.get("log", ""),
              "help": "blank uses the server's default log directory"},
             {"key": "log_size_mb", "label": "Log Initial Size", "type": "int",
              "default": 0, "help": "MB; 0 uses the server default"},
-            {"key": "log_growth_mb", "label": "Log Autogrowth", "type": "int",
-             "default": 0, "help": "MB; 0 uses the server default"},
+            {"key": "log_growth", "label": "Log Autogrowth", "type": "int",
+             "default": 0, "help": "0 uses the server default"},
+            {"key": "log_growth_unit", "label": "Log Growth Unit",
+             "type": "choice", "default": "MB",
+             "choices": [["MB", "Megabytes"], ["%", "Percent"]]},
+            {"key": "log_max_mb", "label": "Log Max Size", "type": "int",
+             "default": 0, "help": "MB; 0 for unlimited growth"},
+            {"key": "compatibility_level", "label": "Compatibility Level",
+             "type": "choice", "default": "",
+             "choices": [["", "Server default"]]
+                        + [[str(l), str(l)] for l in self._compat_levels(cursor)]},
         ]
+
+    def _compat_levels(self, cursor):
+        """Return the compatibility levels this server accepts, newest first."""
+        major = 0
+        if cursor is not None:
+            try:
+                cursor.execute(
+                    "SELECT CAST(SERVERPROPERTY('ProductMajorVersion') AS INT)")
+                row = cursor.fetchone()
+                major = int(row[0]) if row and row[0] else 0
+            except Exception:
+                major = 0
+        if not major:
+            return []
+        # 2008 is 100 and every release since has added ten.
+        newest = major * 10
+        return list(range(newest, 90, -10))
 
     def sql_create_database(self, opts):
         name = opts.get("name", "")
@@ -563,13 +594,19 @@ class MSSQLDriver(BaseDriver):
 
         # File clauses are only emitted when a path is supplied, since
         # SIZE/FILEGROWTH cannot appear without NAME/FILENAME.
-        def file_clause(logical, path, size_mb, growth_mb):
+        def file_clause(logical, path, size_mb, growth, growth_unit, max_mb):
             parts = [f"NAME = {self.quote_ddl_identifier(logical)}",
                      f"FILENAME = {self.quote_ddl_literal(path)}"]
             if size_mb:
                 parts.append(f"SIZE = {int(size_mb)}MB")
-            if growth_mb:
-                parts.append(f"FILEGROWTH = {int(growth_mb)}MB")
+            # MAXSIZE must precede FILEGROWTH in the file spec.
+            parts.append(f"MAXSIZE = {int(max_mb)}MB" if max_mb
+                         else "MAXSIZE = UNLIMITED")
+            if growth:
+                if growth_unit == "%":
+                    parts.append(f"FILEGROWTH = {int(growth)}%")
+                else:
+                    parts.append(f"FILEGROWTH = {int(growth)}MB")
             return "(" + ", ".join(parts) + ")"
 
         create = f"CREATE DATABASE {db}"
@@ -580,18 +617,27 @@ class MSSQLDriver(BaseDriver):
         if data_dir:
             create += "\n  ON PRIMARY " + file_clause(
                 name, self.join_path(data_dir, f"{name}.mdf"),
-                opts.get("data_size_mb"), opts.get("data_growth_mb"))
+                opts.get("data_size_mb"), opts.get("data_growth"),
+                opts.get("data_growth_unit"), opts.get("data_max_mb"))
         # LOG ON is only legal after an ON clause, so a log directory on
         # its own is ignored rather than emitted as invalid SQL.
         if log_dir and data_dir:
             create += "\n  LOG ON " + file_clause(
                 f"{name}_log", self.join_path(log_dir, f"{name}_log.ldf"),
-                opts.get("log_size_mb"), opts.get("log_growth_mb"))
+                opts.get("log_size_mb"), opts.get("log_growth"),
+                opts.get("log_growth_unit"), opts.get("log_max_mb"))
         collation = (opts.get("collation") or "").strip()
         if collation:
             # COLLATE takes a bare identifier, not a string literal.
             create += f"\n  COLLATE {self.validate_identifier(collation)}"
         stmts.append(create)
+
+        compat = str(opts.get("compatibility_level") or "").strip()
+        if compat:
+            if not compat.isdigit():
+                raise ValueError(f"Invalid compatibility level: {compat}")
+            stmts.append(
+                f"ALTER DATABASE {db} SET COMPATIBILITY_LEVEL = {int(compat)}")
 
         recovery = (opts.get("recovery_model") or "").strip()
         if recovery:
@@ -619,6 +665,138 @@ class MSSQLDriver(BaseDriver):
         return ("SELECT COUNT(*) FROM sys.dm_exec_sessions s "
                 "JOIN sys.databases d ON s.database_id = d.database_id "
                 "WHERE d.name = ? AND s.session_id <> @@SPID", [name])
+
+    # --- Altering an existing database ---
+
+    supports_database_alter = True
+
+    def database_settings(self, cursor, name):
+        cursor.execute("""
+            SELECT name, SUSER_SNAME(owner_sid), recovery_model_desc,
+                   compatibility_level, collation_name, is_read_only,
+                   is_auto_shrink_on, is_auto_close_on,
+                   is_auto_create_stats_on, is_auto_update_stats_on,
+                   user_access_desc
+            FROM sys.databases WHERE name = ?
+        """, [name])
+        row = cursor.fetchone()
+        if not row:
+            return {}
+        return {
+            "name": row[0],
+            "owner": row[1] or "",
+            "recovery_model": row[2] or "",
+            "compatibility_level": str(row[3] or ""),
+            "collation": row[4] or "",
+            "read_only": bool(row[5]),
+            "auto_shrink": bool(row[6]),
+            "auto_close": bool(row[7]),
+            "auto_create_stats": bool(row[8]),
+            "auto_update_stats": bool(row[9]),
+            "user_access": row[10] or "MULTI_USER",
+        }
+
+    def settings_options(self, cursor, current):
+        logins = self._lookup(cursor, """
+            SELECT name FROM sys.server_principals
+            WHERE type IN ('S', 'U', 'G') AND name NOT LIKE '##%'
+            ORDER BY name
+        """)
+        collations = self._lookup(
+            cursor, "SELECT name FROM sys.fn_helpcollations() ORDER BY name")
+        levels = self._compat_levels(cursor)
+        return [
+            {"key": "name", "label": "Name", "type": "string",
+             "default": current.get("name", ""), "required": True,
+             "help": "changing this renames the database"},
+            {"key": "owner", "label": "Owner",
+             "type": "choice" if logins else "string",
+             "default": current.get("owner", ""),
+             "choices": [[n, n] for n in logins] if logins else None},
+            {"key": "recovery_model", "label": "Recovery Model",
+             "type": "choice", "default": current.get("recovery_model", ""),
+             "choices": [["FULL", "Full"], ["SIMPLE", "Simple"],
+                         ["BULK_LOGGED", "Bulk-logged"]]},
+            {"key": "compatibility_level", "label": "Compatibility Level",
+             "type": "choice",
+             "default": current.get("compatibility_level", ""),
+             "choices": [[str(l), str(l)] for l in levels] or
+                        [[current.get("compatibility_level", ""),
+                          current.get("compatibility_level", "")]]},
+            {"key": "collation", "label": "Collation",
+             "type": "completing" if collations else "string",
+             "default": current.get("collation", ""),
+             "completions": collations or None},
+            {"key": "user_access", "label": "Access", "type": "choice",
+             "default": current.get("user_access", "MULTI_USER"),
+             "choices": [["MULTI_USER", "Multi user"],
+                         ["SINGLE_USER", "Single user"],
+                         ["RESTRICTED_USER", "Restricted user"]]},
+            {"key": "read_only", "label": "Read Only", "type": "bool",
+             "default": current.get("read_only", False)},
+            {"key": "auto_shrink", "label": "Auto Shrink", "type": "bool",
+             "default": current.get("auto_shrink", False)},
+            {"key": "auto_close", "label": "Auto Close", "type": "bool",
+             "default": current.get("auto_close", False)},
+            {"key": "auto_create_stats", "label": "Auto Create Statistics",
+             "type": "bool", "default": current.get("auto_create_stats", True)},
+            {"key": "auto_update_stats", "label": "Auto Update Statistics",
+             "type": "bool", "default": current.get("auto_update_stats", True)},
+        ]
+
+    def sql_alter_database(self, name, opts, current):
+        db = self.quote_ddl_identifier(name)
+        stmts = []
+
+        def changed(key):
+            return key in opts and opts[key] != current.get(key)
+
+        # Renaming last would target a name that no longer exists, so the
+        # other statements are emitted against the original name first.
+        for key, clause in (("read_only", "READ_ONLY"),
+                            ("auto_shrink", "AUTO_SHRINK"),
+                            ("auto_close", "AUTO_CLOSE"),
+                            ("auto_create_stats", "AUTO_CREATE_STATISTICS"),
+                            ("auto_update_stats", "AUTO_UPDATE_STATISTICS")):
+            if changed(key):
+                if key == "read_only":
+                    stmts.append(f"ALTER DATABASE {db} SET "
+                                 f"{'READ_ONLY' if opts[key] else 'READ_WRITE'}")
+                else:
+                    stmts.append(f"ALTER DATABASE {db} SET {clause} "
+                                 f"{'ON' if opts[key] else 'OFF'}")
+
+        if changed("recovery_model"):
+            value = opts["recovery_model"]
+            if value not in ("FULL", "SIMPLE", "BULK_LOGGED"):
+                raise ValueError(f"Unknown recovery model: {value}")
+            stmts.append(f"ALTER DATABASE {db} SET RECOVERY {value}")
+
+        if changed("compatibility_level"):
+            value = str(opts["compatibility_level"])
+            if not value.isdigit():
+                raise ValueError(f"Invalid compatibility level: {value}")
+            stmts.append(
+                f"ALTER DATABASE {db} SET COMPATIBILITY_LEVEL = {int(value)}")
+
+        if changed("collation"):
+            stmts.append(f"ALTER DATABASE {db} COLLATE "
+                         f"{self.validate_identifier(opts['collation'])}")
+
+        if changed("user_access"):
+            value = opts["user_access"]
+            if value not in ("MULTI_USER", "SINGLE_USER", "RESTRICTED_USER"):
+                raise ValueError(f"Unknown access mode: {value}")
+            stmts.append(f"ALTER DATABASE {db} SET {value}")
+
+        if changed("owner"):
+            stmts.append(f"ALTER AUTHORIZATION ON DATABASE::{db} "
+                         f"TO {self.quote_ddl_identifier(opts['owner'])}")
+
+        if changed("name"):
+            stmts.append(f"ALTER DATABASE {db} MODIFY NAME = "
+                         f"{self.quote_ddl_identifier(opts['name'])}")
+        return stmts
 
     def python_type_to_sql(self, python_type):
         return _MSSQL_TYPE_MAP.get(python_type, "NVARCHAR(MAX)")

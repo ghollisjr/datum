@@ -62,6 +62,12 @@ def run_action(cursor, driver, action_name, args):
             _new_database_form(cursor, driver, args)
         elif action_name == "browse-path":
             _browse_path(cursor, driver, args)
+        elif action_name == "edit-database":
+            _edit_database_form(cursor, driver, args)
+        elif action_name == "alter-database":
+            _alter_database(cursor, driver, args)
+        elif action_name == "preview-alter":
+            _preview_alter(cursor, driver, args)
         elif action_name == "create-database":
             _create_database(cursor, driver, args)
         elif action_name == "preview-create":
@@ -154,6 +160,7 @@ def _database_list(cursor, driver):
         "row_id": 0,  # Database name column
         "actions": [
             {"key": "N", "label": "New database", "command": "new-database"},
+            {"key": "E", "label": "Edit settings", "command": "edit-database"},
             {"key": "D", "label": "Drop database", "command": "drop-check"},
         ],
         "info": None,
@@ -201,6 +208,136 @@ def _new_database_form(cursor, driver, args=None):
         "info": None,
         "context": {},
     })
+
+
+def _settings_context(cursor, driver, args):
+    """Resolve the database whose settings are being edited.
+
+    Returns (name, current_settings).  The name comes from the row the
+    user acted on, or from the payload when the form is being rebuilt.
+    """
+    payload = {}
+    name = ""
+    if args:
+        first = args[0]
+        # The row action passes a bare name; the form passes a payload.
+        try:
+            payload = _decode_payload(args)
+            name = (payload.get("name_original")
+                    or (payload.get("values") or {}).get("name_original")
+                    or "")
+        except ValueError:
+            name = " ".join(args)
+            payload = {}
+        if not name:
+            name = first
+    if not name:
+        raise ValueError("no database given")
+    driver.validate_identifier(name)
+    return name, driver.database_settings(cursor, name), payload
+
+
+def _edit_database_form(cursor, driver, args):
+    """Send the database settings form, filled in with what is in force."""
+    from .. import envelope
+
+    if not driver.supports_database_alter:
+        envelope.error(f"Editing database settings is not supported on "
+                       f"{driver.dialect_name}")
+        return
+
+    name, current, payload = _settings_context(cursor, driver, args)
+    if not current:
+        envelope.error(f"Database not found: {name}")
+        return
+
+    fields = _clean_fields(driver.settings_options(cursor, current))
+    # Values from a form being rebuilt win over what the server reports.
+    values = dict(payload.get("values") or {})
+    values["name_original"] = name
+
+    envelope.admin_panel({
+        "panel": "databases",
+        "sub_panel": "form",
+        "title": f"Database Settings: {name}",
+        "form": {
+            "fields": fields,
+            "values": values,
+            "submit_action": "alter-database",
+            "submit_label": "Apply Changes",
+            "preview_action": "preview-alter",
+            "notes": [f"Editing {name} on {driver.dialect_name}.",
+                      "Only the settings you change are applied."],
+        },
+        "headers": [],
+        "rows": [],
+        "row_id": None,
+        "actions": [],
+        "info": None,
+        "context": {"database": name},
+    })
+
+
+def _alter_statements(cursor, driver, args):
+    """Return (name, statements) for the submitted settings form."""
+    opts = _decode_payload(args)
+    name = (opts.get("name_original") or "").strip()
+    if not name:
+        raise ValueError("the form did not say which database to alter")
+    driver.validate_identifier(name)
+    current = driver.database_settings(cursor, name)
+    if not current:
+        raise ValueError(f"database not found: {name}")
+
+    specs = {f["key"]: f for f in driver.settings_options(cursor, current)}
+    for key, spec in specs.items():
+        if spec.get("required") and not str(opts.get(key) or "").strip():
+            raise ValueError(f"{spec['label']} is required")
+        if spec.get("type") == "int" and opts.get(key) not in (None, ""):
+            try:
+                opts[key] = int(opts[key])
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"{spec['label']} must be a number "
+                    f"(got {opts[key]!r})") from None
+    return name, driver.sql_alter_database(name, opts, current)
+
+
+def _preview_alter(cursor, driver, args):
+    """Show the ALTER statements without running them."""
+    from .. import envelope
+
+    name, stmts = _alter_statements(cursor, driver, args)
+    if not stmts:
+        envelope.info(f"No changes to apply to {name}")
+        return
+    envelope.definition(f"ALTER DATABASE {name}", ";\n\n".join(stmts) + ";")
+
+
+def _alter_database(cursor, driver, args):
+    """Apply the submitted settings changes."""
+    from .. import envelope
+
+    if not driver.supports_database_alter:
+        envelope.error(f"Editing database settings is not supported on "
+                       f"{driver.dialect_name}")
+        return
+
+    name, stmts = _alter_statements(cursor, driver, args)
+    if not stmts:
+        envelope.info(f"No changes to apply to {name}")
+        return
+    for index, sql in enumerate(stmts):
+        try:
+            cursor.execute(sql)
+            _commit(cursor)
+        except Exception as err:
+            envelope.error(
+                f"Applied {index} of {len(stmts)} changes to '{name}' before "
+                f"failing — {_db_error(err)}. Statement: "
+                f"{' '.join(sql.split())[:160]}")
+            return
+    envelope.info(f"Applied {len(stmts)} change(s) to {name}")
 
 
 def _browse_path(cursor, driver, args):

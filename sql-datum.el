@@ -1770,7 +1770,9 @@ Returns a list of strings by parsing the current line against column widths."
   (pcase (get-text-property (line-beginning-position) 'sql-datum-section)
     ("Steps"     (sql-datum-admin-edit-step))
     ("Schedules" (sql-datum-admin-edit-schedule))
-    (_           (user-error "No editable item at point"))))
+    (_ (pcase sql-datum--admin-panel-name
+         ("databases" (sql-datum-admin-edit-database))
+         (_ (user-error "No editable item at point"))))))
 
 (defun sql-datum-admin-new-at-point ()
   "Create a new item, depending on cursor section or current panel."
@@ -1798,6 +1800,14 @@ Returns a list of strings by parsing the current line against column widths."
   "Open the create-database wizard."
   (interactive)
   (sql-datum--admin-send-command ":admin-action databases new-database"))
+
+(defun sql-datum-admin-edit-database ()
+  "Edit the settings of the database at point."
+  (interactive)
+  (let ((name (sql-datum--admin-row-id-at-point)))
+    (unless name (user-error "No database at point"))
+    (sql-datum--admin-send-command
+     (format ":admin-action databases edit-database %s" name))))
 
 (defun sql-datum-admin-drop-database ()
   "Open the drop-database confirmation for the database at point."

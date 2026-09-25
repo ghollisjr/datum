@@ -369,6 +369,85 @@ class PostgreSQLDriver(BaseDriver):
         return ("SELECT COUNT(*) FROM pg_stat_activity "
                 "WHERE datname = ? AND pid <> pg_backend_pid()", [name])
 
+    # --- Altering an existing database ---
+    #
+    # Encoding and locale are fixed at creation time on PostgreSQL, so
+    # they are deliberately absent here.
+
+    supports_database_alter = True
+
+    def database_settings(self, cursor, name):
+        cursor.execute("""
+            SELECT d.datname, r.rolname, d.datconnlimit, t.spcname,
+                   d.datallowconn
+            FROM pg_database d
+            LEFT JOIN pg_roles r ON d.datdba = r.oid
+            LEFT JOIN pg_tablespace t ON d.dattablespace = t.oid
+            WHERE d.datname = ?
+        """, [name])
+        row = cursor.fetchone()
+        if not row:
+            return {}
+        return {
+            "name": row[0],
+            "owner": row[1] or "",
+            "connection_limit": int(row[2]) if row[2] is not None else -1,
+            "tablespace": row[3] or "",
+            "allow_connections": bool(row[4]),
+        }
+
+    def settings_options(self, cursor, current):
+        roles = self._lookup(cursor, r"""
+            SELECT rolname FROM pg_roles
+            WHERE rolname NOT LIKE 'pg\_%' ORDER BY rolname
+        """)
+        tablespaces = self._lookup(
+            cursor, "SELECT spcname FROM pg_tablespace ORDER BY spcname")
+        return [
+            {"key": "name", "label": "Name", "type": "string",
+             "default": current.get("name", ""), "required": True,
+             "help": "changing this renames the database"},
+            {"key": "owner", "label": "Owner",
+             "type": "choice" if roles else "string",
+             "default": current.get("owner", ""),
+             "choices": [[r, r] for r in roles] if roles else None},
+            {"key": "tablespace", "label": "Tablespace",
+             "type": "choice" if tablespaces else "string",
+             "default": current.get("tablespace", ""),
+             "choices": [[t, t] for t in tablespaces] if tablespaces else None,
+             "help": "moving a tablespace rewrites the database files"},
+            {"key": "connection_limit", "label": "Connection Limit",
+             "type": "int", "default": current.get("connection_limit", -1),
+             "help": "-1 for unlimited"},
+            {"key": "allow_connections", "label": "Allow Connections",
+             "type": "bool", "default": current.get("allow_connections", True)},
+        ]
+
+    def sql_alter_database(self, name, opts, current):
+        db = self.quote_ddl_identifier(name)
+        stmts = []
+
+        def changed(key):
+            return key in opts and opts[key] != current.get(key)
+
+        if changed("owner"):
+            stmts.append(f"ALTER DATABASE {db} OWNER TO "
+                         f"{self.quote_ddl_identifier(opts['owner'])}")
+        if changed("connection_limit"):
+            stmts.append(f"ALTER DATABASE {db} CONNECTION LIMIT "
+                         f"{int(opts['connection_limit'])}")
+        if changed("allow_connections"):
+            stmts.append(f"ALTER DATABASE {db} ALLOW_CONNECTIONS "
+                         f"{'true' if opts['allow_connections'] else 'false'}")
+        if changed("tablespace"):
+            stmts.append(f"ALTER DATABASE {db} SET TABLESPACE "
+                         f"{self.quote_ddl_identifier(opts['tablespace'])}")
+        # Renamed last so the statements above address the original name.
+        if changed("name"):
+            stmts.append(f"ALTER DATABASE {db} RENAME TO "
+                         f"{self.quote_ddl_identifier(opts['name'])}")
+        return stmts
+
     def python_type_to_sql(self, python_type):
         return _POSTGRES_TYPE_MAP.get(python_type, "TEXT")
 
