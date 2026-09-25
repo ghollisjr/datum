@@ -561,6 +561,9 @@ class MSSQLDriver(BaseDriver):
                 "SELECT full_filesystem_path, is_directory, size_in_bytes, "
                 "       last_write_time "
                 "FROM sys.dm_os_enumerate_filesystem(?, N'*') "
+                # The DMV walks the whole subtree, reporting the depth of
+                # each entry.  Only the directory itself was asked for.
+                "WHERE level = 0 "
                 "ORDER BY is_directory DESC, full_filesystem_path", [path])
             rows = cursor.fetchall()
             entries = []

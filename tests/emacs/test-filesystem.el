@@ -32,7 +32,7 @@
    "\"/var/opt/mssql/log/archive\"],"
    "[\"file\",\"errorlog\",\"1327517\",\"2026-09-25 12:39:48\","
    "\"/var/opt/mssql/log/errorlog\"]],"
-   "\"row_id\":4,"
+   "\"row_id\":4,\"display_columns\":4,"
    "\"actions\":[{\"key\":\"RET\",\"label\":\"Open directory\"},"
    "{\"key\":\"^\",\"label\":\"Parent directory\"},"
    "{\"key\":\"v\",\"label\":\"View file\"},"
@@ -191,6 +191,48 @@
                       t)))
 
 
+
+(message "\n=== the listing looks like dired ===")
+
+(with-current-buffer (test-fs--panel)
+  (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+    ;; The directory is named once, at the top.
+    (test-fs-assert "the directory is named in the title"
+                    (string-match-p "Server files: /var/opt/mssql/log" text))
+    ;; Each row shows a bare name, not a path repeated down the column.
+    (test-fs-assert "a row shows the bare name"
+                    (string-match-p "^file  errorlog" text))
+    (test-fs-assert "the path column is not drawn"
+                    (not (string-match-p "/var/opt/mssql/log/errorlog" text)))
+    (test-fs-assert "and its header is not drawn either"
+                    (not (string-match-p "Path" text))))
+  ;; But the path is still there to navigate and copy with.
+  (test-fs-assert "the row still carries its full path"
+                  (progn (test-fs--goto "errorlog")
+                         (equal (sql-datum--admin-fs-row)
+                                '("file" "/var/opt/mssql/log/errorlog"))))
+  (test-fs-assert "so w still copies the full path"
+                  (progn (test-fs--goto "errorlog")
+                         (sql-datum-admin-copy-path)
+                         (equal (car kill-ring)
+                                "/var/opt/mssql/log/errorlog")))
+  ;; Hiding a trailing column must not shift the drawn ones, or sorting
+  ;; by a header would sort a different column.
+  (test-fs-assert "the drawn columns keep their indices"
+                  (equal (mapcar #'car sql-datum--admin-col-positions)
+                         '(0 1 2 3)))
+  (test-fs-assert "sorting by Name still sorts names"
+                  (progn (sql-datum-admin-sort-by-column 1)
+                         (goto-char (point-min))
+                         (let (names)
+                           (while (not (eobp))
+                             (let ((c (sql-datum--admin-row-cells-at-point)))
+                               (when c (push (nth 1 c) names)))
+                             (forward-line 1))
+                           (setq names (nreverse names))
+                           (equal names (sort (copy-sequence names)
+                                              #'string<))))))
+
 (message "\n=== Windows drives ===")
 
 ;; A drive root's ".." leads to the drive list, which is the only top
@@ -201,7 +243,7 @@
    "\"headers\":[\"Type\",\"Name\",\"Size\",\"Modified\",\"Path\"],"
    "\"rows\":[[\"dir\",\"..\",\"\",\"drive list\",\":drives\"],"
    "[\"dir\",\"Data\",\"\",\"2026-09-25 12:00:00\",\"C:\\\\Data\"]],"
-   "\"row_id\":4,\"actions\":[],"
+   "\"row_id\":4,\"display_columns\":4,\"actions\":[],"
    "\"info\":\"C: — 1 directory, 0 files\","
    "\"context\":{\"path\":\"C:\\\\\"}}"))
 
@@ -212,7 +254,7 @@
    "\"rows\":[[\"dir\",\"C:\",\"115730000000\",\"DRIVE_FIXED\","
    "\"C:\\\\\"],"
    "[\"dir\",\"D:\",\"900000000\",\"DRIVE_FIXED\",\"D:\\\\\"]],"
-   "\"row_id\":4,\"actions\":[],"
+   "\"row_id\":4,\"display_columns\":4,\"actions\":[],"
    "\"info\":\"2 drives — Free is in bytes\","
    "\"context\":{\"path\":\":drives\"}}"))
 

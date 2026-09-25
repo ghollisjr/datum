@@ -1101,7 +1101,8 @@ SQLI-BUF is the originating SQLi buffer."
           (cl-incf header-lines)
           ;; Table
           (when (and headers (> (length headers) 0))
-            (sql-datum--admin-insert-table headers rows row-id)
+            (sql-datum--admin-insert-table
+             headers rows row-id (alist-get 'display_columns data))
             ;; +2 for header row and separator
             (cl-incf header-lines 2))
           (setq sql-datum--admin-header-line-count header-lines)
@@ -1174,10 +1175,19 @@ _ROWS is accepted for interface consistency."
    ;; Shouldn't happen, but be safe
    (t (goto-char (point-min)))))
 
-(defun sql-datum--admin-insert-table (headers rows row-id)
+(defun sql-datum--admin-insert-table (headers rows row-id &optional shown)
   "Insert a formatted table with HEADERS and ROWS.
-ROW-ID is the column index used as row identifier."
-  (let* ((ncols (length headers))
+ROW-ID is the column index used as row identifier.
+
+SHOWN, when given, is how many of the leading columns to display.  The
+rest are still carried on each row — as the row id, and for `i' — but
+are not drawn.  The filesystem panel uses this to keep each entry's
+full path without showing it against every line, the way dired shows
+the directory once at the top and bare names below.  Only trailing
+columns can be dropped, so the indices of the drawn ones are unchanged
+and sorting still lines up."
+  (let* ((ncols (min (length headers) (or shown (length headers))))
+         (headers (seq-take headers ncols))
          ;; Calculate column widths
          (widths (make-vector ncols 0))
          (_ (dotimes (i ncols)
@@ -1222,10 +1232,14 @@ ROW-ID is the column index used as row identifier."
       (let ((row-index 0))
         (dolist (row rows)
           ;; Pad row if needed
-          (let ((padded (append row (make-list (max 0 (- ncols (length row))) ""))))
+          (let ((padded (append row
+                                (make-list
+                                 (max 0 (- (max ncols (1+ (or row-id 0)))
+                                           (length row)))
+                                 ""))))
             ;; Truncate cells to their column width
             (let ((display-row
-                   (cl-loop for cell in padded
+                   (cl-loop for cell in (seq-take padded ncols)
                             for i from 0
                             collect (let ((w (aref widths i)))
                                       (if (> (length cell) w)

@@ -124,6 +124,50 @@ class TestListing:
         assert listing.get("PG_VERSION") == "file"
         assert listing.get("base") == "dir"
 
+    def test_only_the_directory_itself_is_listed(self, mssql_env):
+        from datum.panels import filesystem
+
+        cursor, driver = mssql_env
+        # sys.dm_os_enumerate_filesystem walks the whole subtree and
+        # reports each entry's depth; without filtering on it the panel
+        # showed everything underneath rather than one directory.
+        # /var/opt/mssql has subdirectories that themselves hold files.
+        listed = "/var/opt/mssql"
+        entries = driver.browse_path(cursor, listed)
+        assert entries, "nothing listed"
+        assert any(e["is_dir"] for e in entries), "no subdirectory to recurse into"
+        for entry in entries:
+            parent = driver.parent_path(entry["path"])
+            assert parent == listed, (
+                f"{entry['path']} is not directly in {listed}")
+
+    def test_a_deeper_directory_lists_its_own_children(self, mssql_env):
+        from datum.panels import filesystem
+
+        cursor, driver = mssql_env
+        entries = driver.browse_path(cursor, "/var/opt/mssql/data")
+        for entry in entries:
+            assert driver.parent_path(entry["path"]) == "/var/opt/mssql/data"
+
+    def test_postgres_lists_one_directory_too(self, pg_env):
+        cursor, driver = pg_env
+        cursor.execute("SHOW data_directory")
+        data_dir = cursor.fetchone()[0]
+        for entry in driver.browse_path(cursor, data_dir):
+            assert driver.parent_path(entry["path"]) == data_dir
+
+    def test_the_path_is_carried_but_not_drawn(self, mssql_env):
+        from datum.panels import filesystem
+
+        cursor, driver = mssql_env
+        panel = filesystem.get_data(cursor, driver, ["/var/opt/mssql/log"])
+        # The row keeps its path, for navigation and for `w`...
+        assert panel["headers"][4] == "Path"
+        assert all(r[4] for r in panel["rows"] if r[1] != "..")
+        # ...but only the first four columns are drawn, so each line
+        # shows a bare name the way dired does.
+        assert panel["display_columns"] == 4
+
     def test_a_size_is_a_plain_number_so_the_column_sorts(self, mssql_env):
         from datum.panels import filesystem
 

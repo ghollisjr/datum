@@ -85,6 +85,7 @@ def _drives_panel(cursor, driver):
         "headers": ["Type", "Name", "Free", "Kind", "Path"],
         "rows": rows,
         "row_id": 4,
+        "display_columns": 4,
         "actions": [
             {"key": "RET", "label": "Open drive", "command": "open"},
             {"key": "w", "label": "Copy path", "command": None},
@@ -167,6 +168,10 @@ def get_data(cursor, driver, args):
         # Navigation works off the full path, which the server gave us
         # rather than us assembling it from a separator we guessed.
         "row_id": 4,
+        # The path is carried on every row but not drawn: the directory
+        # is named once in the title, and the rows show bare names, the
+        # way dired does it.
+        "display_columns": 4,
         "actions": actions,
         "info": f"{path} — {dirs} director{'y' if dirs == 1 else 'ies'}, "
                 f"{files} file{'' if files == 1 else 's'}",

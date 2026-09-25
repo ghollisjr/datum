@@ -1082,6 +1082,12 @@ Server 2019 and later, falling back to =xp_fixeddrives= on older ones.
 PostgreSQL has no portable way to enumerate drives, so nothing is
 invented for it: on Windows a PostgreSQL server stops at the drive root.
 
+The listing is of that directory only, not of what is under it, and
+each row shows a bare name — the directory itself is named once in the
+title, as dired does it.  Each row still carries its full path, so
+navigation and =w= use the path the server reported rather than one
+assembled here; =i= shows it along with the rest of the row.
+
 Sizes are shown as plain byte counts rather than prettified, so that
 sorting the column with =o= sorts numerically.
 
