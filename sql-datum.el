@@ -3180,11 +3180,11 @@ CONFIRM-WIDGET must match it.  OVERRIDE-ACTION replaces the submit action
       ;; `_split_command_line' on the Python side does not understand
       ;; backslash escapes, so a value containing a double quote (a
       ;; Windows path, say) would otherwise be split incorrectly.
-      (sql-datum--admin-send-command-to
+      (sql-datum--admin-send-with-payload
        sqli-buf
-       (format ":admin-action %s %s %s" panel action
-               (base64-encode-string
-                (encode-coding-string (json-serialize payload) 'utf-8) t)))
+       (format ":admin-action %s %s" panel action)
+       (base64-encode-string
+        (encode-coding-string (json-serialize payload) 'utf-8) t))
       (unless override-action
         (quit-window t)
         (message "datum admin: %s sent" action)))))
@@ -3216,19 +3216,19 @@ rebuilds the form.")
   "Leave the form to browse the server for a path for FIELD-KEY."
   (let* ((collected (sql-datum--form-collect-values widgets values))
          (current (cdr (assoc-string field-key collected))))
-    (sql-datum--admin-send-command-to
+    (sql-datum--admin-send-with-payload
      sqli-buf
-     (format ":admin-action %s browse-path %s" panel
-             (base64-encode-string
-              (encode-coding-string
-               (json-serialize
-                `((path . ,(if (stringp current) current ""))
-                  (field . ,field-key)
-                  (values . ,collected)
-                  (return_action . ,(or (alist-get 'submit_action form)
-                                        "new-database"))))
-               'utf-8)
-              t)))))
+     (format ":admin-action %s browse-path" panel)
+     (base64-encode-string
+      (encode-coding-string
+       (json-serialize
+        `((path . ,(if (stringp current) current ""))
+          (field . ,field-key)
+          (values . ,collected)
+          (return_action . ,(or (alist-get 'submit_action form)
+                                "new-database"))))
+       'utf-8)
+      t))))
 
 (defvar sql-datum--path-browser-mode-map
   (let ((map (make-sparse-keymap)))
@@ -3256,19 +3256,19 @@ rebuilds the form.")
 (defun sql-datum--path-browser-send (path &optional field)
   "Re-list PATH on the server, keeping the pending form values."
   (let ((ctx sql-datum--browser-context))
-    (sql-datum--admin-send-command-to
+    (sql-datum--admin-send-with-payload
      sql-datum--admin-sqli-buf
-     (format ":admin-action databases browse-path %s"
-             (base64-encode-string
-              (encode-coding-string
-               (json-serialize
-                `((path . ,(or path ""))
-                  (field . ,(or field (alist-get 'field ctx) ""))
-                  (values . ,(or (alist-get 'values ctx) '()))
-                  (return_action . ,(or (alist-get 'return_action ctx)
-                                        "new-database"))))
-               'utf-8)
-              t)))))
+     ":admin-action databases browse-path"
+     (base64-encode-string
+      (encode-coding-string
+       (json-serialize
+        `((path . ,(or path ""))
+          (field . ,(or field (alist-get 'field ctx) ""))
+          (values . ,(or (alist-get 'values ctx) '()))
+          (return_action . ,(or (alist-get 'return_action ctx)
+                                "new-database"))))
+       'utf-8)
+      t))))
 
 (defun sql-datum--path-browser-entry ()
   "Return (PATH . IS-DIR) for the line at point, or nil."
@@ -3301,13 +3301,13 @@ rebuilds the form.")
     (when (and chosen field)
       ;; Pushed to the head so it wins over the stale value behind it.
       (push (cons (intern field) chosen) values))
-    (sql-datum--admin-send-command-to
+    (sql-datum--admin-send-with-payload
      sql-datum--admin-sqli-buf
-     (format ":admin-action databases %s %s" action
-             (base64-encode-string
-              (encode-coding-string
-               (json-serialize `((values . ,values))) 'utf-8)
-              t)))
+     (format ":admin-action databases %s" action)
+     (base64-encode-string
+      (encode-coding-string
+       (json-serialize `((values . ,values))) 'utf-8)
+      t))
     (quit-window t)))
 
 (defun sql-datum-path-browser-select ()
@@ -3423,6 +3423,50 @@ rebuilds the form.")
         (with-current-buffer buf
           (sql-datum--enqueue-one cmd :silent t :priority :low))
       (message "datum admin: no active connection for command"))))
+
+(defconst sql-datum--max-command-length 3900
+  "Longest command line sent to the datum process.
+
+A pty in canonical mode truncates input at 4095 bytes and says nothing
+about it, so a longer command arrives cut in half — a base64 payload
+then fails to decode.  Anything above this is sent in chunks instead,
+with headroom left for the command around them.")
+
+(defun sql-datum--admin-send-commands-to (sqli-buf commands)
+  "Send COMMANDS to the datum process in SQLI-BUF as one transaction.
+Queuing them together keeps them in order and stops anything else being
+interleaved between them."
+  (let ((buf (or (and sqli-buf (buffer-live-p sqli-buf) sqli-buf)
+                 (let ((b (sql-find-sqli-buffer 'datum)))
+                   (and b (get-buffer b))))))
+    (if (and buf (get-buffer-process buf))
+        (with-current-buffer buf
+          (sql-datum--enqueue (list :commands commands
+                                    :silent t
+                                    :priority :low)))
+      (message "datum admin: no active connection for command"))))
+
+(defun sql-datum--admin-send-with-payload (sqli-buf prefix payload)
+  "Send PREFIX with PAYLOAD appended, chunking PAYLOAD when it is long.
+
+A payload that would push the line past what a pty carries is sent as
+`:admin-payload' chunks first, and PREFIX then refers to them with
+@payload."
+  (if (<= (+ (length prefix) (length payload) 1)
+          sql-datum--max-command-length)
+      (sql-datum--admin-send-command-to
+       sqli-buf (concat prefix " " payload))
+    (let ((size (- sql-datum--max-command-length 20))
+          (start 0)
+          (chunks nil))
+      (while (< start (length payload))
+        (let ((end (min (length payload) (+ start size))))
+          (push (concat ":admin-payload " (substring payload start end))
+                chunks)
+          (setq start end)))
+      (sql-datum--admin-send-commands-to
+       sqli-buf (append (nreverse chunks)
+                        (list (concat prefix " @payload")))))))
 
 (defun sql-datum--admin-start-timer (buf)
   "Start the auto-refresh timer for admin buffer BUF."

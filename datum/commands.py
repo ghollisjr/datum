@@ -702,18 +702,45 @@ def admin_panel(args):
     admin.run_panel(panel_name, _driver, panel_args)
 
 
+# A pty in canonical mode truncates any input line at 4095 bytes without
+# saying so, and a form payload — a table's full column list, say —
+# passes that easily.  Emacs sends such a payload as :admin-payload
+# chunks first and then names it with @payload in the action.
+_payload_chunks = []
+
+_PAYLOAD_MARKER = "@payload"
+
+
+def admin_payload(args):
+    """Built-in :admin-payload command — accumulate one payload chunk."""
+    if not args:
+        envelope.error(":admin-payload requires a chunk")
+        return
+    _payload_chunks.append(args[0])
+
+
 def admin_action(args):
     """Built-in :admin-action command — execute a panel action.
 
     Usage: :admin-action <panel> <action> [args]
+
+    An argument of @payload stands for the chunks sent beforehand with
+    :admin-payload, which is how a payload too long for one line arrives.
     """
     global _driver
     if len(args) < 2:
+        _payload_chunks.clear()
         envelope.error(":admin-action requires panel and action name")
         return
     panel_name = args[0]
     action_name = args[1]
-    action_args = args[2:]
+    action_args = list(args[2:])
+    for index, arg in enumerate(action_args):
+        if arg == _PAYLOAD_MARKER:
+            action_args[index] = "".join(_payload_chunks)
+    # Cleared either way: a leftover payload must not attach itself to
+    # whatever action comes next.
+    _payload_chunks.clear()
     admin.run_action(panel_name, action_name, _driver, action_args)
 
 
@@ -1299,6 +1326,7 @@ _builtins = {
     ":running":    running,
     ":admin":      admin_panel,
     ":admin-action": admin_action,
+    ":admin-payload": admin_payload,
     ":user":       current_user,
     ":version":    version,
     ":use":        use_database,
