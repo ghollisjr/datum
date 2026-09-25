@@ -54,7 +54,7 @@ directly.
 | =C-c s R= | List routines (=C-u= to filter with LIKE)  |
 | =C-c s v= | Server version                           |
 | =C-c s u= | Current user                             |
-| =C-c s a= | Admin panel (activity, jobs, ssis)         |
+| =C-c s a= | Admin panel (activity, databases, jobs, security, ssis) |
 | =C-c s w= | Copy last result to kill ring (org table)  |
 | =C-c s f= | Refresh introspection (+ cross-db caches) |
 | =C-c s F= | Toggle periodic auto-refresh (=C-u N= for interval) |
@@ -133,31 +133,107 @@ Respects =:chars= for column width. Timestamp shows last refresh.
 
 * Admin Panels (=C-c s a=)
 
-Interactive, auto-refreshing panels for server administration.
+Panels for server administration.  The available keys are shown in each
+panel's header line, which stays visible as the contents scroll.
+
+Panels: =activity=, =databases=, =jobs=, =security=, =ssis=
+
+** Common to every panel
+
+| Key         | Action                     |
+|-------------+----------------------------|
+| =g= / =a=   | Refresh / toggle auto      |
+| =o= / =RET= | Sort by column             |
+| =i=         | Inspect row                |
+| =n= / =p=   | Next / previous row        |
+| =B=         | Back to parent panel       |
+| =q=         | Quit                       |
 
 ** Activity panel
 
-| Key   | Action                                     |
-|-------+--------------------------------------------|
-| =M-.= | Full query text with session metadata      |
-| =M-,= | Return to activity panel                  |
-| =k=   | Kill session                               |
-| =i=   | Inspect row                                |
-| =o=   | Sort by column                             |
-| =g=   | Refresh                                    |
-| =a=   | Toggle auto-refresh                        |
-| =q=   | Quit                                       |
+| Key   | Action                                |
+|-------+---------------------------------------|
+| =M-.= | Full query text with session metadata |
+| =M-,= | Return to activity panel              |
+| =k=   | Kill session                          |
+
+** Databases panel
+
+| Key | Action                       |
+|-----+------------------------------|
+| =N= | New database (wizard)        |
+| =E= | Edit settings                |
+| =F= | Manage files (MSSQL)         |
+| =D= | Drop database                |
+
+Files view (=F=):
+
+| Key | Action                            |
+|-----+-----------------------------------|
+| =N= | Add a data or log file            |
+| =E= | Change size / growth / max size   |
+| =D= | Remove file (emptied first)       |
+| =S= | Shrink file                       |
 
 ** Jobs panel (MSSQL)
 
-| Key   | Action                         |
-|-------+--------------------------------|
-| =d=   | Job detail (steps + schedules) |
-| =H=   | Job history                    |
-| =s= / =S= | Start / Stop job          |
-| =e=   | Enable/disable toggle          |
-| =E= / =N= / =D= | Edit / New / Delete schedule |
-| =B=   | Back to parent panel           |
+| Key       | Action                         |
+|-----------+--------------------------------|
+| =d=       | Job detail (steps + schedules) |
+| =H=       | Job history                    |
+| =s= / =S= | Start / stop job               |
+| =e=       | Enable/disable toggle          |
+
+In the detail view =E= / =N= / =D= act on the section point is in —
+steps or schedules.
+
+** Security panel
+
+| Key | Action                                |
+|-----+---------------------------------------|
+| =N= | New login/role                        |
+| =E= | Edit login/role                       |
+| =D= | Drop login/role                       |
+| =U= | Database users for this login (MSSQL) |
+
+The *Owns (dbo)* column matters: owning a database makes a login =dbo=
+inside it with full control, whatever its server roles say.
+
+Database users view (=U=):
+
+| Key | Action                       |
+|-----+------------------------------|
+| =N= | Map the login to a database  |
+| =E= | Edit its roles there         |
+| =D= | Remove the mapping           |
+
+** SSIS panel (MSSQL)
+
+| Key | Action            |
+|-----+-------------------|
+| =r= | Run package       |
+| =d= | Execution history |
+
+** Wizard forms
+
+| Key             | Action                             |
+|-----------------+------------------------------------|
+| =TAB= / =S-TAB= | Next / previous field              |
+| up / down       | Next / previous field              |
+| =RET=           | Open a menu, press a button        |
+| =M-TAB=         | Complete the field (where offered) |
+| =C-c C-f=       | Browse the server for a path       |
+| =C-c C-c=       | Submit                             |
+| =C-c C-k=       | Cancel                             |
+
+Path browser:
+
+| Key   | Action                           |
+|-------+----------------------------------|
+| =RET= | Open the directory at point      |
+| =^=   | Parent directory                 |
+| =s=   | Select this directory and return |
+| =q=   | Return without changing the path |
 
 * Query Input
 
