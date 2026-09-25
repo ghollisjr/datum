@@ -48,6 +48,7 @@
 (declare-function widget-backward "wid-edit" (arg))
 (declare-function widget-field-at "wid-edit" (pos))
 (declare-function widget-at        "wid-edit" (&optional pos))
+(declare-function widget-complete  "wid-edit" ())
 
 ;;; ---------------------------------------------------------------------------
 ;;; Customization
@@ -2636,6 +2637,35 @@ form has just one, and otherwise asks which."
   (interactive)
   (quit-window t))
 
+(defun sql-datum--form-completions-at-point ()
+  "Return the candidates the field at point still matches, or nil.
+
+Nil means there is nothing useful to complete: the field offers no
+candidates, is empty, holds a value none of them match — a size the
+suggestions do not name — or already holds the only one it does."
+  (let ((field (widget-field-at (point))))
+    (when field
+      (let ((candidates (widget-get field :completions))
+            (text (widget-apply field :value-get)))
+        (when (and candidates (stringp text) (not (string-empty-p text)))
+          (let ((matches (all-completions text candidates)))
+            (unless (or (null matches)
+                        (equal matches (list text)))
+              matches)))))))
+
+(defun sql-datum-form-tab ()
+  "Complete the field at point, or move to the next one.
+
+`M-TAB' is the widget library's completion key, but a window manager
+commonly takes it before Emacs sees it.  TAB therefore does both: it
+completes while the field has something left to complete, and moves on
+once it does not — so a field holding a value the suggestions do not
+name, such as VARCHAR(120), is stepped over rather than fought with."
+  (interactive)
+  (if (sql-datum--form-completions-at-point)
+      (widget-complete)
+    (widget-forward 1)))
+
 (defun sql-datum--form-widget-at-point ()
   "Return the widget at point, whether it is a field or a button."
   (or (widget-field-at (point)) (widget-at (point))))
@@ -2683,7 +2713,10 @@ widget order."
     ;; binding when <tab> is unbound everywhere.  Configs that bind <tab>
     ;; globally (to a completion command, say) would otherwise shadow the
     ;; widget bindings throughout the form.
-    (define-key map (kbd "<tab>")     #'widget-forward)
+    ;; TAB completes where there is something to complete and moves on
+    ;; otherwise; on a button there never is, so it just moves.
+    (define-key map (kbd "TAB")       #'sql-datum-form-tab)
+    (define-key map (kbd "<tab>")     #'sql-datum-form-tab)
     (define-key map (kbd "<backtab>") #'widget-backward)
     (define-key map (kbd "S-<tab>")   #'widget-backward)
     (define-key map (kbd "C-c C-f") #'sql-datum-form-browse)
@@ -2928,8 +2961,8 @@ a form rebuilt after browsing for a path comes back as the user left it."
               (t (append
                   (list 'editable-field :size width :format "%v "
                         :keymap sql-datum--form-field-keymap)
-                  ;; A completing sub-field offers its candidates through
-                  ;; M-TAB, the same as a top-level one.
+                  ;; A completing sub-field offers its candidates
+                  ;; through TAB, the same as a top-level one.
                   (when (alist-get 'completions col)
                     (list :completions (alist-get 'completions col))))))))
          (alist-get 'item spec)
@@ -3017,7 +3050,7 @@ with `fields', `values', `submit_action', and optional `notes',
             (when completions
               (setq help (concat (if (and help (not (string-empty-p help)))
                                      (concat help "; ") "")
-                                 (format "M-TAB completes (%d)"
+                                 (format "TAB completes (%d)"
                                          (length completions)))))
             ;; A multi-line body does not belong in the label column.
             (cond
@@ -3117,7 +3150,7 @@ with `fields', `values', `submit_action', and optional `notes',
         (setq-local header-line-format
                     (sql-datum--admin-header-line
                      nil
-                     (append '(("TAB" . "next field"))
+                     (append '(("TAB" . "complete / next field"))
                              (when (cl-find-if
                                     (lambda (f)
                                       (equal (alist-get 'type f) "path"))

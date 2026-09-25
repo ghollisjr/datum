@@ -212,8 +212,9 @@ Tables view (=T=):
 | =D= | Drop table          |
 
 The builder takes columns as a list — name, type, nullable, primary key,
-default — with =[INS]= / =[DEL]= to add and remove rows.  =M-TAB=
-completes a type; an unlisted size such as =VARCHAR(120)= is fine too.  =E= edits an existing table's columns the same way and applies
+default — with =[INS]= / =[DEL]= to add and remove rows.  =TAB=
+completes a type while there is more to complete, then moves on; an
+unlisted size such as =VARCHAR(120)= is fine too.  =E= edits an existing table's columns the same way and applies
 only what changed; editing a name in place renames the column and keeps its data, while
 removing a row and inserting another drops and adds.  Anything that
 drops a column shows the plan and asks for the table name first.
@@ -252,6 +253,7 @@ Database users view (=U=):
 | =TAB= / =S-TAB= | Next / previous field              |
 | up / down       | Next / previous field              |
 | =RET=           | Open a menu, press a button        |
+| =TAB=           | Complete the field, else next one  |
 | =M-TAB=         | Complete the field (where offered) |
 | =C-c C-f=       | Browse the server for a path       |
 | =C-c C-c=       | Submit                             |

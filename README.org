@@ -878,7 +878,7 @@ primary key and default — with =[INS]= and =[DEL]= to add and remove
 rows.  Ticking primary key on more than one column produces a composite
 key.
 
-The type is a completing field rather than a menu: =M-TAB= narrows the
+The type is a completing field rather than a menu: =TAB= narrows the
 suggestions as you type, and those suggestions are per dialect, so
 =INT IDENTITY(1,1)= appears on MSSQL and =BIGSERIAL= on PostgreSQL.
 They are suggestions only — a size none of them names, =VARCHAR(120)=
@@ -952,6 +952,7 @@ library =M-x customize= uses.
 | =TAB= / =S-TAB= | Next / previous field               |
 | up / down       | Next / previous field               |
 | =RET=           | Open a menu or press a button       |
+| =TAB=           | Complete the field, else next one   |
 | =M-TAB=         | Complete the field (where offered)  |
 | =C-c C-f=       | Browse the server for a path        |
 | =C-c C-c=       | Submit                              |
@@ -959,7 +960,7 @@ library =M-x customize= uses.
 
 Choice fields render as =Value Menu=, the same control Customize uses.
 Long lookups — MSSQL has over five thousand collations — are completing
-fields driven by =M-TAB= instead.  A password field is masked, and is
+fields driven by =TAB= instead.  A password field is masked, and is
 never sent back out once set.  Labels and help text are read-only, so
 typing outside a field cannot corrupt the layout.
 
