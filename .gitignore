@@ -2,6 +2,9 @@
 tests/
 dev/
 
+# Byte-compiled Emacs Lisp
+*.elc
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
