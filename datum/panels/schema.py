@@ -321,8 +321,9 @@ def _table_form(cursor, driver, args):
             "preview_action": "preview-table",
             "notes": ["Use [INS] and [DEL] to add and remove columns.",
                       "TAB completes a type while there is more to "
-                      "complete, then moves on; a size that is not "
-                      "offered — VARCHAR(120) — is accepted too."],
+                      "complete, then moves on; case does not matter, "
+                      "and a size that is not offered — VARCHAR(120) "
+                      "— is accepted too."],
         },
         "headers": [],
         "rows": [],
@@ -406,8 +407,9 @@ def _edit_table_form(cursor, driver, args):
                 "Editing a name renames the column and keeps its data; "
                 "deleting a row and inserting another does not.",
                 "TAB completes a type while there is more to "
-                "complete, then moves on; a size that is not offered "
-                "— VARCHAR(120) — is accepted too.",
+                "complete, then moves on; case does not matter, and a "
+                "size that is not offered — VARCHAR(120) — is "
+                "accepted too.",
             ],
         },
         "headers": [],

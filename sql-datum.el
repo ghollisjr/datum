@@ -48,7 +48,8 @@
 (declare-function widget-backward "wid-edit" (arg))
 (declare-function widget-field-at "wid-edit" (pos))
 (declare-function widget-at        "wid-edit" (&optional pos))
-(declare-function widget-complete  "wid-edit" ())
+(declare-function widget-field-start "wid-edit" (widget))
+(declare-function widget-field-end   "wid-edit" (widget))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Customization
@@ -2637,21 +2638,36 @@ form has just one, and otherwise asks which."
   (interactive)
   (quit-window t))
 
-(defun sql-datum--form-completions-at-point ()
-  "Return the candidates the field at point still matches, or nil.
+(defun sql-datum--form-completion-at-point ()
+  "Return what TAB should do with the field at point.
 
-Nil means there is nothing useful to complete: the field offers no
-candidates, is empty, holds a value none of them match — a size the
-suggestions do not name — or already holds the only one it does."
+The car says which, and the cdr carries what it needs:
+
+  (expand . TEXT)   extend the field to TEXT
+  (show . MATCHES)  the value is not a whole candidate yet — offer
+                    MATCHES, the way NVARCHAR( still needs a size
+  nil               nothing to complete; move to the next field
+
+Matching folds case, so typing In finds INT, and int is rewritten to
+INT rather than left as typed.  A value that is already a candidate
+returns nil even when longer candidates begin with it, so INT does not
+trap point in the cell it shares with INT IDENTITY(1,1)."
   (let ((field (widget-field-at (point))))
     (when field
-      (let ((candidates (widget-get field :completions))
-            (text (widget-apply field :value-get)))
-        (when (and candidates (stringp text) (not (string-empty-p text)))
-          (let ((matches (all-completions text candidates)))
-            (unless (or (null matches)
-                        (equal matches (list text)))
-              matches)))))))
+      (let* ((candidates (widget-get field :completions))
+             (text (and (stringp (widget-apply field :value-get))
+                        (widget-apply field :value-get)))
+             (completion-ignore-case t))
+        (when (and candidates text (not (string-empty-p text)))
+          (let ((expansion (try-completion text candidates)))
+            (cond
+             ;; A size the suggestions do not name, VARCHAR(120): the
+             ;; field is the user's to keep.
+             ((null expansion) nil)
+             ((and (stringp expansion) (not (equal expansion text)))
+              (cons 'expand expansion))
+             ((test-completion text candidates) nil)
+             (t (cons 'show (all-completions text candidates))))))))))
 
 (defun sql-datum-form-tab ()
   "Complete the field at point, or move to the next one.
@@ -2659,12 +2675,23 @@ suggestions do not name — or already holds the only one it does."
 `M-TAB' is the widget library's completion key, but a window manager
 commonly takes it before Emacs sees it.  TAB therefore does both: it
 completes while the field has something left to complete, and moves on
-once it does not — so a field holding a value the suggestions do not
-name, such as VARCHAR(120), is stepped over rather than fought with."
+once it does not — so a field already holding a type, or holding a
+size the suggestions do not name such as VARCHAR(120), is stepped over
+rather than fought with."
   (interactive)
-  (if (sql-datum--form-completions-at-point)
-      (widget-complete)
-    (widget-forward 1)))
+  (let ((todo (sql-datum--form-completion-at-point)))
+    (pcase todo
+      (`(expand . ,text)
+       (let ((field (widget-field-at (point))))
+         (delete-region (widget-field-start field) (widget-field-end field))
+         (goto-char (widget-field-start field))
+         (insert text)
+         ;; Point sits after what was completed, ready to keep typing.
+         (goto-char (+ (widget-field-start field) (length text)))))
+      (`(show . ,matches)
+       (with-output-to-temp-buffer "*Completions*"
+         (display-completion-list matches)))
+      (_ (widget-forward 1)))))
 
 (defun sql-datum--form-widget-at-point ()
   "Return the widget at point, whether it is a field or a button."

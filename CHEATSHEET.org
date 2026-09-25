@@ -213,8 +213,9 @@ Tables view (=T=):
 
 The builder takes columns as a list — name, type, nullable, primary key,
 default — with =[INS]= / =[DEL]= to add and remove rows.  =TAB=
-completes a type while there is more to complete, then moves on; an
-unlisted size such as =VARCHAR(120)= is fine too.  =E= edits an existing table's columns the same way and applies
+completes a type while there is more to complete, then moves on;
+matching folds case, so =in= finds =INT=, and an unlisted size such as
+=VARCHAR(120)= is fine too.  =E= edits an existing table's columns the same way and applies
 only what changed; editing a name in place renames the column and keeps its data, while
 removing a row and inserting another drops and adds.  Anything that
 drops a column shows the plan and asks for the table name first.
