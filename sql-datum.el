@@ -2810,7 +2810,12 @@ a form rebuilt after browsing for a path comes back as the user left it."
         (mapcar (lambda (col)
                   (let ((ctype (or (alist-get 'type col) "string")))
                     (cond
-                     ((equal ctype "bool") '(checkbox :format "%[%v%] "))
+                     ;; A checkbox shows nothing to say what it is for,
+                     ;; so it carries its own label.
+                     ((equal ctype "bool")
+                      (list 'checkbox
+                            :format (concat (or (alist-get 'label col) "")
+                                            " %[%v%]  ")))
                      ((equal ctype "choice")
                       (append
                        (list 'menu-choice :format "%[%v%] ")
@@ -2914,7 +2919,8 @@ with `fields', `values', `submit_action', and optional `notes',
           (let* ((label (or (alist-get 'label spec) ""))
                  (help (alist-get 'help spec))
                  (completions (alist-get 'completions spec))
-                 (multiline (equal (alist-get 'type spec) "text")))
+                 (multiline (equal (alist-get 'type spec) "text"))
+                 (repeating (equal (alist-get 'type spec) "list")))
             ;; Completion is invisible unless advertised.
             (when completions
               (setq help (concat (if (and help (not (string-empty-p help)))
@@ -2922,14 +2928,32 @@ with `fields', `values', `submit_action', and optional `notes',
                                  (format "M-TAB completes (%d)"
                                          (length completions)))))
             ;; A multi-line body does not belong in the label column.
-            (if multiline
-                (progn
-                  (widget-insert (concat label ":"))
-                  (when (and help (not (string-empty-p help)))
-                    (widget-insert (propertize (format "  %s" help)
-                                               'face 'font-lock-comment-face)))
-                  (widget-insert "\n"))
-              (widget-insert (format (format "%%-%ds  " label-width) label)))
+            (cond
+             (multiline
+              (widget-insert (concat label ":"))
+              (when (and help (not (string-empty-p help)))
+                (widget-insert (propertize (format "  %s" help)
+                                           'face 'font-lock-comment-face)))
+              (widget-insert "\n"))
+             ;; A repeating list needs its legend above the rows: printed
+             ;; after them it lands below everything the reader is trying
+             ;; to interpret, which is where it is no use.
+             (repeating
+              (widget-insert (concat label ":"))
+              (when (and help (not (string-empty-p help)))
+                (widget-insert (propertize (format "  %s" help)
+                                           'face 'font-lock-comment-face)))
+              (widget-insert "\n")
+              (widget-insert
+               (propertize
+                (concat "  each row: "
+                        (mapconcat (lambda (col)
+                                     (or (alist-get 'label col) ""))
+                                   (alist-get 'item spec) ", ")
+                        "\n")
+                'face 'font-lock-comment-face)))
+             (t
+              (widget-insert (format (format "%%-%ds  " label-width) label))))
             (push (cons (alist-get 'key spec)
                         (cons spec (sql-datum--form-create-widget spec values)))
                   widgets)
@@ -2947,7 +2971,7 @@ with `fields', `values', `submit_action', and optional `notes',
                             panel form sql-datum--form-widgets values
                             sqli-buf field-key))
                  "Browse")))
-            (when (and help (not multiline)
+            (when (and help (not multiline) (not repeating)
                        (not (string-empty-p (or help ""))))
               (widget-insert (propertize (format "  %s" help)
                                          'face 'font-lock-comment-face)))

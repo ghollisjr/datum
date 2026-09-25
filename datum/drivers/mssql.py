@@ -1112,8 +1112,7 @@ class MSSQLDriver(BaseDriver):
                  {"key": "primary_key", "label": "PK", "type": "bool"},
                  {"key": "default", "label": "Default", "type": "string",
                   "size": 12},
-             ],
-             "help": "name, type, nullable, primary key, default"},
+             ]},
         ]
 
     def sql_create_table(self, schema, opts):
