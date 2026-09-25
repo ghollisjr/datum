@@ -47,6 +47,7 @@
 (declare-function widget-forward  "wid-edit" (arg))
 (declare-function widget-backward "wid-edit" (arg))
 (declare-function widget-field-at "wid-edit" (pos))
+(declare-function widget-at        "wid-edit" (&optional pos))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Customization
@@ -2658,17 +2659,29 @@ form has just one, and otherwise asks which."
   (interactive)
   (quit-window t))
 
+(defun sql-datum--form-widget-at-point ()
+  "Return the widget at point, whether it is a field or a button."
+  (or (widget-field-at (point)) (widget-at (point))))
+
 (defun sql-datum--form-line-move (dir)
-  "Move DIR fields, or DIR lines when inside a multi-line field.
-Multi-line `text' widgets need plain line motion to edit their body, so
-the arrow keys only jump between fields once there is no more of the
-current field to move through."
-  (let ((field (widget-field-at (point))))
-    (if (and field
-             (save-excursion
-               (forward-line dir)
-               (eq (widget-field-at (point)) field)))
-        (forward-line dir)
+  "Move DIR rows, staying in the same column where one is there to stay in.
+
+`widget-forward' walks the widgets in the order they were created, so
+from the middle of a row it steps along that row rather than down the
+column — in a list of columns it slides to the last field of the row
+above and stops there.  Moving by line and column instead keeps the
+grid's columns, which holds because the rows are laid out to a fixed
+width.  Where the adjacent line has no widget at that column — the ends
+of the list, or an ordinary single-column form — it falls back to the
+widget order."
+  (let ((column (current-column))
+        (origin (point)))
+    (if (and (zerop (forward-line dir))
+             (progn (move-to-column column) t)
+             (/= (point) origin)
+             (sql-datum--form-widget-at-point))
+        (point)
+      (goto-char origin)
       (widget-forward dir))))
 
 (defun sql-datum-form-next-field ()
@@ -3125,6 +3138,9 @@ with `fields', `values', `submit_action', and optional `notes',
                              '(("C-c C-c" . "submit")
                                ("C-c C-k" . "cancel"))))))
       (use-local-map sql-datum--form-keymap)
+      ;; A wrapped row makes the layout unreadable in a narrow window,
+      ;; and a column list is wider than most.
+      (setq-local truncate-lines t)
       (widget-setup)
       (sql-datum--form-protect-static-text)
       ;; Start on the first field rather than on protected text.
