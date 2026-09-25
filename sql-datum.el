@@ -2906,11 +2906,13 @@ a form rebuilt after browsing for a path comes back as the user left it."
                                      (make-string (max 1 (- width 2)) ?\s))))
               ((equal ctype "choice")
                (append
-                ;; Without the form's own keymap these carry only
-                ;; wid-edit's, so a global <tab> binding shadows field
-                ;; movement inside them.
+                ;; The form's own keymap, so a global <tab> binding
+                ;; cannot shadow field movement here — but the button
+                ;; one, not the field one: `widget-field-keymap' binds
+                ;; RET to `widget-field-activate', which on a menu does
+                ;; nothing, leaving the type impossible to change.
                 (list 'menu-choice :format "%[%v%] "
-                      :keymap sql-datum--form-field-keymap)
+                      :keymap sql-datum--form-keymap)
                 (mapcar (lambda (c)
                           ;; Padding the tag fixes the rendered width, so
                           ;; the fields after it stay in their columns
