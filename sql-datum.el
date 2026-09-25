@@ -2925,8 +2925,13 @@ a form rebuilt after browsing for a path comes back as the user left it."
                                                 ?\s))
                                   :value (nth 0 c))))
                         (alist-get 'choices col))))
-              (t (list 'editable-field :size width :format "%v "
-                       :keymap sql-datum--form-field-keymap)))))
+              (t (append
+                  (list 'editable-field :size width :format "%v "
+                        :keymap sql-datum--form-field-keymap)
+                  ;; A completing sub-field offers its candidates through
+                  ;; M-TAB, the same as a top-level one.
+                  (when (alist-get 'completions col)
+                    (list :completions (alist-get 'completions col))))))))
          (alist-get 'item spec)
          (sql-datum--form-list-widths
           (alist-get 'item spec)

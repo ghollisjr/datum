@@ -212,8 +212,8 @@ Tables view (=T=):
 | =D= | Drop table          |
 
 The builder takes columns as a list — name, type, nullable, primary key,
-default — with =[INS]= / =[DEL]= to add and remove rows.  Types are per
-dialect.  =E= edits an existing table's columns the same way and applies
+default — with =[INS]= / =[DEL]= to add and remove rows.  =M-TAB=
+completes a type; an unlisted size such as =VARCHAR(120)= is fine too.  =E= edits an existing table's columns the same way and applies
 only what changed; editing a name in place renames the column and keeps its data, while
 removing a row and inserting another drops and adds.  Anything that
 drops a column shows the plan and asks for the table name first.

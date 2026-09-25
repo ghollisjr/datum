@@ -545,6 +545,40 @@ class BaseDriver(ABC):
             )$""",
         re.VERBOSE)
 
+    # A column type is interpolated into DDL, so it cannot be an
+    # arbitrary string — but restricting it to a fixed list would rule
+    # out every length the list does not happen to name.  This accepts
+    # the shape of a type instead: a name, optionally sized, optionally
+    # followed by IDENTITY.
+    _SAFE_TYPE = re.compile(
+        r"""^
+            [A-Za-z][A-Za-z0-9_]*                  # INT, NVARCHAR, JSONB
+            (?:\s+[A-Za-z][A-Za-z0-9_]*)*          # DOUBLE PRECISION
+            (?:\s*\(\s*
+                (?: MAX                            # NVARCHAR(MAX)
+                  | \d{1,4}                        # VARCHAR(120)
+                    (?:\s*,\s*\d{1,4})?            # DECIMAL(18,4)
+                )
+            \s*\))?
+            (?:\s+IDENTITY\s*\(\s*\d{1,9}\s*,\s*\d{1,9}\s*\))?
+            $""",
+        re.VERBOSE | re.IGNORECASE)
+
+    def validate_column_type(self, column, sql_type):
+        """Return SQL_TYPE if it is safe to embed as a column type.
+
+        The offered types are suggestions rather than the only options,
+        so a size the list does not name — VARCHAR(120) — is accepted
+        while anything that could carry a statement is not.
+        """
+        text = str(sql_type or "").strip()
+        if not text:
+            raise ValueError(f"column {column} has no type")
+        if len(text) > 100 or not self._SAFE_TYPE.match(text):
+            raise ValueError(
+                f"column {column} has an unusable type: {text!r}")
+        return text
+
     def validate_default(self, expression):
         """Return EXPRESSION if it is safe to embed as a column DEFAULT."""
         text = (expression or "").strip()
@@ -564,12 +598,7 @@ class BaseDriver(ABC):
             if not row or not str(row[0] or "").strip():
                 continue
             name = self.validate_identifier(str(row[0]).strip())
-            sql_type = str(row[1] or "").strip()
-            if not sql_type:
-                raise ValueError(f"column {name} has no type")
-            if sql_type not in {t[0] for t in self.column_types()}:
-                raise ValueError(f"column {name} has an unknown type: "
-                                 f"{sql_type}")
+            sql_type = self.validate_column_type(name, row[1])
             nullable = bool(row[2]) if len(row) > 2 else True
             is_key = bool(row[3]) if len(row) > 3 else False
             default = str(row[4] or "").strip() if len(row) > 4 else ""

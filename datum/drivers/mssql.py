@@ -1106,8 +1106,13 @@ class MSSQLDriver(BaseDriver):
              "item": [
                  {"key": "name", "label": "Name", "type": "string",
                   "size": 18},
-                 {"key": "type", "label": "Type", "type": "choice",
-                  "choices": self.column_types()},
+                 # Completing rather than a menu: a menu of two dozen
+                 # types has to be scrolled, and it can only offer the
+                 # sizes it happens to list.  Typing narrows, and a size
+                 # it does not name is still accepted.
+                 {"key": "type", "label": "Type", "type": "completing",
+                  "size": 22,
+                  "completions": [t[0] for t in self.column_types()]},
                  {"key": "nullable", "label": "Null", "type": "bool"},
                  {"key": "primary_key", "label": "PK", "type": "bool"},
                  {"key": "default", "label": "Default", "type": "string",
@@ -1215,7 +1220,7 @@ class MSSQLDriver(BaseDriver):
 
         for row in added:
             name = self.validate_identifier(str(row[0]).strip())
-            sql_type = self._checked_type(name, row[1])
+            sql_type = self.validate_column_type(name, row[1])
             clause = (f"{self.quote_ddl_identifier(name)} {sql_type}"
                       f"{'' if bool(row[2]) else ' NOT NULL'}")
             default = str(row[4] or "").strip() if len(row) > 4 else ""
@@ -1226,7 +1231,7 @@ class MSSQLDriver(BaseDriver):
         for before, row in changed:
             name = self.validate_identifier(str(row[0]).strip())
             column = self.quote_ddl_identifier(name)
-            sql_type = self._checked_type(name, row[1])
+            sql_type = self.validate_column_type(name, row[1])
             # Type and nullability change together in one statement here,
             # unlike PostgreSQL where they are separate.
             if (str(before[1]) != str(row[1])
@@ -1262,13 +1267,6 @@ class MSSQLDriver(BaseDriver):
         return [f"EXEC sp_rename {self.quote_ddl_literal(target)}, "
                 f"{self.quote_ddl_literal(self.validate_identifier(new))}, "
                 f"'COLUMN'"]
-
-    def _checked_type(self, column, sql_type):
-        sql_type = str(sql_type or "").strip()
-        if sql_type not in {t[0] for t in self.column_types()}:
-            raise ValueError(f"column {column} has an unknown type: "
-                             f"{sql_type}")
-        return sql_type
 
     def _drop_default_sql(self, schema, table, column):
         """Drop a column's default by looking its constraint name up.

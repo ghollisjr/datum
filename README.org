@@ -875,9 +875,14 @@ dropped or moved first, and the confirmation says so.
 
 The table builder takes a list of columns — name, type, nullable,
 primary key and default — with =[INS]= and =[DEL]= to add and remove
-rows.  Types are offered per dialect, so =INT IDENTITY(1,1)= appears on
-MSSQL and =BIGSERIAL= on PostgreSQL.  Ticking primary key on more than
-one column produces a composite key.
+rows.  Ticking primary key on more than one column produces a composite
+key.
+
+The type is a completing field rather than a menu: =M-TAB= narrows the
+suggestions as you type, and those suggestions are per dialect, so
+=INT IDENTITY(1,1)= appears on MSSQL and =BIGSERIAL= on PostgreSQL.
+They are suggestions only — a size none of them names, =VARCHAR(120)=
+or =DECIMAL(9,3)=, is accepted just as well.
 
 =E= on a table opens the same list, prefilled with the columns it
 already has, and applies only what you change.  Adding a column, widening

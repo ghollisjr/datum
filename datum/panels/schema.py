@@ -319,7 +319,9 @@ def _table_form(cursor, driver, args):
             "submit_action": "create-table",
             "submit_label": "Create Table",
             "preview_action": "preview-table",
-            "notes": ["Use [INS] and [DEL] to add and remove columns."],
+            "notes": ["Use [INS] and [DEL] to add and remove columns.",
+                      "M-TAB completes a type; a size that is not offered "
+                      "— VARCHAR(120) — is accepted too."],
         },
         "headers": [],
         "rows": [],
@@ -402,6 +404,8 @@ def _edit_table_form(cursor, driver, args):
                 "Only the columns you change are altered.",
                 "Editing a name renames the column and keeps its data; "
                 "deleting a row and inserting another does not.",
+                "M-TAB completes a type; a size that is not offered "
+                "— VARCHAR(120) — is accepted too.",
             ],
         },
         "headers": [],

@@ -321,8 +321,13 @@ class PostgreSQLDriver(BaseDriver):
              "item": [
                  {"key": "name", "label": "Name", "type": "string",
                   "size": 18},
-                 {"key": "type", "label": "Type", "type": "choice",
-                  "choices": self.column_types()},
+                 # Completing rather than a menu: a menu of two dozen
+                 # types has to be scrolled, and it can only offer the
+                 # sizes it happens to list.  Typing narrows, and a size
+                 # it does not name is still accepted.
+                 {"key": "type", "label": "Type", "type": "completing",
+                  "size": 22,
+                  "completions": [t[0] for t in self.column_types()]},
                  {"key": "nullable", "label": "Null", "type": "bool"},
                  {"key": "primary_key", "label": "PK", "type": "bool"},
                  {"key": "default", "label": "Default", "type": "string",
@@ -434,7 +439,7 @@ class PostgreSQLDriver(BaseDriver):
 
         for row in added:
             name = self.validate_identifier(str(row[0]).strip())
-            sql_type = self._checked_type(name, row[1])
+            sql_type = self.validate_column_type(name, row[1])
             clause = (f"ADD COLUMN {self.quote_ddl_identifier(name)} "
                       f"{sql_type}{'' if bool(row[2]) else ' NOT NULL'}")
             default = str(row[4] or "").strip() if len(row) > 4 else ""
@@ -448,7 +453,7 @@ class PostgreSQLDriver(BaseDriver):
             # Type, nullability and default are three separate statements
             # here, unlike MSSQL where ALTER COLUMN carries all of them.
             if str(before[1]) != str(row[1]):
-                sql_type = self._checked_type(name, row[1])
+                sql_type = self.validate_column_type(name, row[1])
                 stmts.append(f"ALTER TABLE {qualified} ALTER COLUMN "
                              f"{column} TYPE {sql_type}")
             if bool(before[2]) != bool(row[2]):
@@ -474,13 +479,6 @@ class PostgreSQLDriver(BaseDriver):
                 f"{self.quote_ddl_identifier(table)} RENAME COLUMN "
                 f"{self.quote_ddl_identifier(old)} TO "
                 f"{self.quote_ddl_identifier(new)}"]
-
-    def _checked_type(self, column, sql_type):
-        sql_type = str(sql_type or "").strip()
-        if sql_type not in {t[0] for t in self.column_types()}:
-            raise ValueError(f"column {column} has an unknown type: "
-                             f"{sql_type}")
-        return sql_type
 
     # --- Roles ---
     #
