@@ -2913,7 +2913,11 @@ a form rebuilt after browsing for a path comes back as the user left it."
                                      (make-string (max 1 (- width 2)) ?\s))))
               ((equal ctype "choice")
                (append
-                (list 'menu-choice :format "%[%v%] ")
+                ;; Without the form's own keymap these carry only
+                ;; wid-edit's, so a global <tab> binding shadows field
+                ;; movement inside them.
+                (list 'menu-choice :format "%[%v%] "
+                      :keymap sql-datum--form-field-keymap)
                 (mapcar (lambda (c)
                           ;; Padding the tag fixes the rendered width, so
                           ;; the fields after it stay in their columns
@@ -2926,7 +2930,8 @@ a form rebuilt after browsing for a path comes back as the user left it."
                                                 ?\s))
                                   :value (nth 0 c))))
                         (alist-get 'choices col))))
-              (t (list 'editable-field :size width :format "%v ")))))
+              (t (list 'editable-field :size width :format "%v "
+                       :keymap sql-datum--form-field-keymap)))))
          (alist-get 'item spec)
          (sql-datum--form-list-widths
           (alist-get 'item spec)
