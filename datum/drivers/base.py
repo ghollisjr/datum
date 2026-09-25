@@ -280,6 +280,67 @@ class BaseDriver(ABC):
         """Return a database that is safe to connect to while dropping another."""
         return None
 
+    # --- Server-side filesystem browsing ---
+    #
+    # Data and log files live on the server's filesystem, not the client's,
+    # so the paths cannot be completed locally.  Drivers that can enumerate
+    # directories over SQL opt in here.  Path arithmetic stays on this side
+    # because the separator depends on the server's OS, which the Emacs
+    # client has no way to know.
+
+    supports_path_browse = False
+
+    def path_separator(self, cursor=None):
+        """Return the server's filesystem path separator."""
+        return "/"
+
+    def join_path(self, directory, name, cursor=None):
+        """Join NAME onto DIRECTORY using the server's separator.
+
+        The separator is taken from DIRECTORY itself where possible, since
+        that string came from the server and so already reflects its OS.
+        """
+        if not directory:
+            return name
+        trimmed = directory.rstrip("/\\")
+        if "\\" in trimmed:
+            sep = "\\"
+        elif "/" in trimmed:
+            sep = "/"
+        else:
+            sep = self.path_separator(cursor)
+        return trimmed + sep + name
+
+    def parent_path(self, path, cursor=None):
+        """Return the parent of PATH, or None at the filesystem root."""
+        trimmed = (path or "").rstrip("/\\")
+        if not trimmed:
+            return None
+        index = max(trimmed.rfind("/"), trimmed.rfind("\\"))
+        if index < 0:
+            return None
+        parent = trimmed[:index]
+        # Keep the leading separator on a POSIX root, and the trailing one
+        # on a Windows drive root ("C:" is not a usable path, "C:\" is).
+        if not parent:
+            return "/"
+        if parent.endswith(":"):
+            return parent + "\\"
+        return parent
+
+    def browse_path(self, cursor, path):
+        """List PATH on the server, newest strategy first.
+
+        Returns a list of dicts with `name`, `path` and `is_dir` keys.
+        Raises NotImplementedError when the dialect cannot enumerate.
+        """
+        raise NotImplementedError(
+            f"Browsing server paths is not supported on {self.dialect_name}")
+
+    def default_paths(self, cursor):
+        """Return {"data": path, "log": path} defaults, empty when unknown."""
+        return {}
+
     # --- Type mapping for :in imports ---
 
     def python_type_to_sql(self, python_type):

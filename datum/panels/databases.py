@@ -59,7 +59,9 @@ def run_action(cursor, driver, action_name, args):
 
     try:
         if action_name == "new-database":
-            _new_database_form(cursor, driver)
+            _new_database_form(cursor, driver, args)
+        elif action_name == "browse-path":
+            _browse_path(cursor, driver, args)
         elif action_name == "create-database":
             _create_database(cursor, driver, args)
         elif action_name == "preview-create":
@@ -166,13 +168,19 @@ def _clean_fields(fields):
             for spec in fields]
 
 
-def _new_database_form(cursor, driver):
+def _new_database_form(cursor, driver, args=None):
     """Send the CREATE DATABASE wizard form.
 
     The cursor is passed through so lookup fields (owner, template,
-    collation) are populated from the server being administered.
+    collation) are populated from the server being administered.  ARGS may
+    carry values from a form the user left to browse for a path, so the
+    rebuilt form comes back filled in rather than blank.
     """
     from .. import envelope
+
+    values = {}
+    if args:
+        values = _decode_payload(args).get("values") or {}
 
     envelope.admin_panel({
         "panel": "databases",
@@ -180,7 +188,7 @@ def _new_database_form(cursor, driver):
         "title": f"Create Database ({driver.dialect_name})",
         "form": {
             "fields": _clean_fields(driver.database_options(cursor)),
-            "values": {},
+            "values": values,
             "submit_action": "create-database",
             "submit_label": "Create Database",
             "preview_action": "preview-create",
@@ -192,6 +200,65 @@ def _new_database_form(cursor, driver):
         "actions": [],
         "info": None,
         "context": {},
+    })
+
+
+def _browse_path(cursor, driver, args):
+    """List a directory on the server for the path browser.
+
+    The payload carries the directory to list, the form field being filled
+    and the values already entered, so the form can be restored intact
+    when the user picks a path or backs out.
+    """
+    from .. import envelope
+
+    if not driver.supports_path_browse:
+        envelope.error(f"Browsing server paths is not supported on "
+                       f"{driver.dialect_name}")
+        return
+
+    payload = _decode_payload(args) if args else {}
+    path = (payload.get("path") or "").strip()
+    if not path:
+        path = driver.default_paths(cursor).get("data") or "/"
+
+    try:
+        entries = driver.browse_path(cursor, path)
+    except Exception as err:
+        # A directory the server cannot read is a normal outcome of
+        # browsing, not a wizard failure.
+        envelope.error(f"Cannot list {path} — {_db_error(err)}")
+        return
+
+    rows = [["/" if e["is_dir"] else "", e["name"], e["path"]]
+            for e in entries]
+    parent = driver.parent_path(path, cursor)
+    if parent:
+        rows.insert(0, ["/", "..", parent])
+
+    # Some servers report a missing or unreadable directory as an empty
+    # listing rather than an error, which would otherwise look like an
+    # empty directory.
+    note = ""
+    if not entries:
+        note = "  (empty, missing, or not readable by the server)"
+
+    envelope.admin_panel({
+        "panel": "databases",
+        "sub_panel": "path-browser",
+        "title": f"Browse: {path}",
+        "headers": ["Dir", "Name", "Path"],
+        "rows": rows,
+        "row_id": 2,  # full path column
+        "actions": [],
+        "info": (f"RET opens a directory, s selects {path!r}, "
+                 f"q returns to the form{note}"),
+        "context": {
+            "path": path,
+            "field": payload.get("field"),
+            "values": payload.get("values") or {},
+            "return_action": payload.get("return_action") or "new-database",
+        },
     })
 
 

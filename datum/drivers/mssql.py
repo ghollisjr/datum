@@ -451,6 +451,65 @@ class MSSQLDriver(BaseDriver):
     def safe_fallback_database(self):
         return "master"
 
+    # --- Server-side filesystem browsing ---
+
+    supports_path_browse = True
+
+    def path_separator(self, cursor=None):
+        # SQL Server runs on Linux as well as Windows; infer the separator
+        # from a path the server itself reports rather than assuming.
+        default = (self.default_paths(cursor) or {}).get("data", "")
+        return "\\" if "\\" in default else "/"
+
+    def default_paths(self, cursor):
+        if cursor is None:
+            return {}
+        try:
+            cursor.execute(
+                "SELECT CAST(SERVERPROPERTY('InstanceDefaultDataPath') AS NVARCHAR(4000)), "
+                "       CAST(SERVERPROPERTY('InstanceDefaultLogPath') AS NVARCHAR(4000))")
+            row = cursor.fetchone()
+        except Exception:
+            return {}
+        if not row:
+            return {}
+        return {"data": (row[0] or "").rstrip("/\\"),
+                "log": (row[1] or "").rstrip("/\\")}
+
+    def browse_path(self, cursor, path):
+        path = path or self.default_paths(cursor).get("data") or "/"
+        # Documented and permission-light, but SQL Server 2017+ only.
+        try:
+            cursor.execute(
+                "SELECT full_filesystem_path, is_directory "
+                "FROM sys.dm_os_enumerate_filesystem(?, N'*') "
+                "ORDER BY is_directory DESC, full_filesystem_path", [path])
+            rows = cursor.fetchall()
+            entries = []
+            for full, is_dir in rows:
+                if not full:
+                    continue
+                name = full.rstrip("/\\")
+                index = max(name.rfind("/"), name.rfind("\\"))
+                entries.append({"name": name[index + 1:] if index >= 0 else name,
+                                "path": full,
+                                "is_dir": bool(is_dir)})
+            return entries
+        except Exception:
+            pass
+        # Older servers: xp_dirtree reports names and a file/dir flag only.
+        cursor.execute("EXEC master.dbo.xp_dirtree ?, 1, 1", [path])
+        entries = []
+        for row in cursor.fetchall():
+            name, _depth, is_file = row[0], row[1], row[2]
+            if not name:
+                continue
+            entries.append({"name": name,
+                            "path": self.join_path(path, name, cursor),
+                            "is_dir": not bool(is_file)})
+        entries.sort(key=lambda e: (not e["is_dir"], e["name"].lower()))
+        return entries
+
     def database_options(self, cursor=None):
         logins = self._lookup(cursor, """
             SELECT name FROM sys.server_principals
@@ -461,6 +520,7 @@ class MSSQLDriver(BaseDriver):
         # so this is a completing field rather than a choice.
         collations = self._lookup(
             cursor, "SELECT name FROM sys.fn_helpcollations() ORDER BY name")
+        defaults = self.default_paths(cursor)
         return [
             {"key": "name", "label": "Database Name", "type": "string",
              "default": "", "required": True},
@@ -480,14 +540,16 @@ class MSSQLDriver(BaseDriver):
                                         ["FULL", "Full"],
                                         ["SIMPLE", "Simple"],
                                         ["BULK_LOGGED", "Bulk-logged"]]},
-            {"key": "data_path", "label": "Data File Path", "type": "path",
-             "default": "", "help": "blank uses the server's default data directory"},
+            {"key": "data_dir", "label": "Data File Directory", "type": "path",
+             "default": defaults.get("data", ""),
+             "help": "blank uses the server's default data directory"},
             {"key": "data_size_mb", "label": "Data Initial Size", "type": "int",
              "default": 0, "help": "MB; 0 uses the server default"},
             {"key": "data_growth_mb", "label": "Data Autogrowth", "type": "int",
              "default": 0, "help": "MB; 0 uses the server default"},
-            {"key": "log_path", "label": "Log File Path", "type": "path",
-             "default": "", "help": "blank uses the server's default log directory"},
+            {"key": "log_dir", "label": "Log File Directory", "type": "path",
+             "default": defaults.get("log", ""),
+             "help": "blank uses the server's default log directory"},
             {"key": "log_size_mb", "label": "Log Initial Size", "type": "int",
              "default": 0, "help": "MB; 0 uses the server default"},
             {"key": "log_growth_mb", "label": "Log Autogrowth", "type": "int",
@@ -511,15 +573,19 @@ class MSSQLDriver(BaseDriver):
             return "(" + ", ".join(parts) + ")"
 
         create = f"CREATE DATABASE {db}"
-        data_path = (opts.get("data_path") or "").strip()
-        log_path = (opts.get("log_path") or "").strip()
-        if data_path:
+        # The form collects directories, which is what a user browses to;
+        # the file names follow SQL Server's own convention.
+        data_dir = (opts.get("data_dir") or "").strip()
+        log_dir = (opts.get("log_dir") or "").strip()
+        if data_dir:
             create += "\n  ON PRIMARY " + file_clause(
-                name, data_path,
+                name, self.join_path(data_dir, f"{name}.mdf"),
                 opts.get("data_size_mb"), opts.get("data_growth_mb"))
-        if log_path:
+        # LOG ON is only legal after an ON clause, so a log directory on
+        # its own is ignored rather than emitted as invalid SQL.
+        if log_dir and data_dir:
             create += "\n  LOG ON " + file_clause(
-                f"{name}_log", log_path,
+                f"{name}_log", self.join_path(log_dir, f"{name}_log.ldf"),
                 opts.get("log_size_mb"), opts.get("log_growth_mb"))
         collation = (opts.get("collation") or "").strip()
         if collation:

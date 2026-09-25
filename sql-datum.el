@@ -953,6 +953,10 @@ still letting an explicit request raise one.")
          ((equal sub-panel "form")
           (run-at-time 0 nil #'sql-datum--admin-show-form
                        data sqli-buf))
+         ;; Server-side directory listing for a path field
+         ((equal sub-panel "path-browser")
+          (run-at-time 0 nil #'sql-datum--admin-show-path-browser
+                       data sqli-buf))
          ;; Multi-section detail view (job detail)
          ((alist-get 'sections data)
           (run-at-time 0 nil #'sql-datum--admin-show-detail
@@ -2359,10 +2363,16 @@ typing outside a field silently corrupts the form layout."
      ((stringp raw) (string-trim raw))
      (t raw))))
 
-(defun sql-datum--form-create-widget (spec)
-  "Create and return the widget for field SPEC."
+(defun sql-datum--form-create-widget (spec &optional values)
+  "Create and return the widget for field SPEC.
+A value for this field in VALUES wins over the descriptor's default, so
+a form rebuilt after browsing for a path comes back as the user left it."
   (let* ((type (or (alist-get 'type spec) "string"))
-         (default (alist-get 'default spec))
+         (key (alist-get 'key spec))
+         ;; Field keys are strings; parsed JSON values are keyed by
+         ;; symbol, and `assoc-string' matches across both.
+         (supplied (and values key (assoc-string key values)))
+         (default (if supplied (cdr supplied) (alist-get 'default spec)))
          (choices (alist-get 'choices spec)))
     (cond
      ((equal type "bool")
@@ -2457,8 +2467,22 @@ with `fields', `values', `submit_action', and optional `notes',
                   (widget-insert "\n"))
               (widget-insert (format (format "%%-%ds  " label-width) label)))
             (push (cons (alist-get 'key spec)
-                        (cons spec (sql-datum--form-create-widget spec)))
+                        (cons spec (sql-datum--form-create-widget spec values)))
                   widgets)
+            ;; Paths name locations on the server, not on this machine, so
+            ;; browsing has to go through the connection.
+            (when (equal (alist-get 'type spec) "path")
+              (widget-insert " ")
+              ;; `widgets' is still being built, so the handler reads the
+              ;; finished buffer-local list rather than closing over it.
+              (let ((field-key (alist-get 'key spec)))
+                (widget-create
+                 'push-button
+                 :notify (lambda (&rest _)
+                           (sql-datum--admin-form-browse-path
+                            panel form sql-datum--form-widgets values
+                            sqli-buf field-key))
+                 "Browse")))
             (when (and help (not multiline)
                        (not (string-empty-p (or help ""))))
               (widget-insert (propertize (format "  %s" help)
@@ -2554,6 +2578,180 @@ CONFIRM-WIDGET must match it.  OVERRIDE-ACTION replaces the submit action
       (unless override-action
         (quit-window t)
         (message "datum admin: %s sent" action)))))
+
+;; --- Server-side path browser ---
+;;
+;; Data and log files live on the database server, which is usually not
+;; the machine Emacs is running on, so `read-file-name' would browse the
+;; wrong filesystem.  These commands ask the server to enumerate its own
+;; directories instead.
+
+(defvar-local sql-datum--browser-context nil
+  "Alist describing the path browser: the directory being listed, the
+form field being filled, the form values to restore, and the action that
+rebuilds the form.")
+
+(defun sql-datum--form-collect-values (widgets extra)
+  "Return an alist of the current WIDGETS values, merged over EXTRA."
+  (let ((payload (copy-alist (or extra '()))))
+    (dolist (entry widgets)
+      (let ((key (car entry)))
+        (push (cons (if (stringp key) (intern key) key)
+                    (sql-datum--form-field-value (cadr entry) (cddr entry)))
+              payload)))
+    payload))
+
+(defun sql-datum--admin-form-browse-path (panel form widgets values
+                                          sqli-buf field-key)
+  "Leave the form to browse the server for a path for FIELD-KEY."
+  (let* ((collected (sql-datum--form-collect-values widgets values))
+         (current (cdr (assoc-string field-key collected))))
+    (sql-datum--admin-send-command-to
+     sqli-buf
+     (format ":admin-action %s browse-path %s" panel
+             (base64-encode-string
+              (encode-coding-string
+               (json-serialize
+                `((path . ,(if (stringp current) current ""))
+                  (field . ,field-key)
+                  (values . ,collected)
+                  (return_action . ,(or (alist-get 'submit_action form)
+                                        "new-database"))))
+               'utf-8)
+              t)))))
+
+(defvar sql-datum--path-browser-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "RET") #'sql-datum-path-browser-open)
+    (define-key map "f"         #'sql-datum-path-browser-open)
+    (define-key map "^"         #'sql-datum-path-browser-up)
+    (define-key map "u"         #'sql-datum-path-browser-up)
+    (define-key map "s"         #'sql-datum-path-browser-select)
+    (define-key map "n"         #'next-line)
+    (define-key map "p"         #'previous-line)
+    (define-key map "q"         #'sql-datum-path-browser-cancel)
+    map)
+  "Keymap for the datum server path browser.")
+
+(define-derived-mode sql-datum--path-browser-mode special-mode "datum-paths"
+  "Major mode for browsing directories on the database server."
+  (setq truncate-lines t))
+
+(defun sql-datum--path-browser-send (path &optional field)
+  "Re-list PATH on the server, keeping the pending form values."
+  (let ((ctx sql-datum--browser-context))
+    (sql-datum--admin-send-command-to
+     sql-datum--admin-sqli-buf
+     (format ":admin-action databases browse-path %s"
+             (base64-encode-string
+              (encode-coding-string
+               (json-serialize
+                `((path . ,(or path ""))
+                  (field . ,(or field (alist-get 'field ctx) ""))
+                  (values . ,(or (alist-get 'values ctx) '()))
+                  (return_action . ,(or (alist-get 'return_action ctx)
+                                        "new-database"))))
+               'utf-8)
+              t)))))
+
+(defun sql-datum--path-browser-entry ()
+  "Return (PATH . IS-DIR) for the line at point, or nil."
+  (let ((path (get-text-property (line-beginning-position) 'sql-datum-row-id))
+        (dir (get-text-property (line-beginning-position) 'sql-datum-is-dir)))
+    (when path (cons path dir))))
+
+(defun sql-datum-path-browser-open ()
+  "Descend into the directory at point."
+  (interactive)
+  (let ((entry (sql-datum--path-browser-entry)))
+    (unless entry (user-error "No entry at point"))
+    (unless (cdr entry) (user-error "Not a directory: %s" (car entry)))
+    (sql-datum--path-browser-send (car entry))))
+
+(defun sql-datum-path-browser-up ()
+  "Go to the parent directory."
+  (interactive)
+  (goto-char (point-min))
+  (if (search-forward-regexp "^.*\\.\\.$" nil t)
+      (sql-datum-path-browser-open)
+    (user-error "Already at the top")))
+
+(defun sql-datum--path-browser-return (chosen)
+  "Rebuild the form, setting the browsed field to CHOSEN when non-nil."
+  (let* ((ctx sql-datum--browser-context)
+         (field (alist-get 'field ctx))
+         (values (copy-alist (or (alist-get 'values ctx) '())))
+         (action (or (alist-get 'return_action ctx) "new-database")))
+    (when (and chosen field)
+      ;; Pushed to the head so it wins over the stale value behind it.
+      (push (cons (intern field) chosen) values))
+    (sql-datum--admin-send-command-to
+     sql-datum--admin-sqli-buf
+     (format ":admin-action databases %s %s" action
+             (base64-encode-string
+              (encode-coding-string
+               (json-serialize `((values . ,values))) 'utf-8)
+              t)))
+    (quit-window t)))
+
+(defun sql-datum-path-browser-select ()
+  "Use the directory being listed, and return to the form."
+  (interactive)
+  (let* ((entry (sql-datum--path-browser-entry))
+         (parent-row (get-text-property (line-beginning-position)
+                                        'sql-datum-is-parent))
+         ;; A subdirectory row selects that directory without having to
+         ;; open it first; ".." and file rows take the listed directory.
+         (chosen (if (and entry (cdr entry) (not parent-row))
+                     (car entry)
+                   (alist-get 'path sql-datum--browser-context))))
+    (sql-datum--path-browser-return chosen)))
+
+(defun sql-datum-path-browser-cancel ()
+  "Return to the form without changing the path."
+  (interactive)
+  (sql-datum--path-browser-return nil))
+
+(defun sql-datum--admin-show-path-browser (data sqli-buf)
+  "Display a server directory listing from DATA."
+  (let* ((rows (alist-get 'rows data))
+         (title (or (alist-get 'title data) "Browse"))
+         (info (alist-get 'info data))
+         (context (alist-get 'context data))
+         (buf (get-buffer-create "*datum-admin:path-browser*")))
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (sql-datum--path-browser-mode)
+        (insert (propertize title 'face 'bold) "\n")
+        (when info
+          (insert (propertize info 'face 'font-lock-comment-face) "\n"))
+        (insert "\n")
+        (dolist (row rows)
+          (let* ((is-dir (not (string-empty-p (or (nth 0 row) ""))))
+                 (name (nth 1 row))
+                 (path (nth 2 row))
+                 (start (point)))
+            (insert (if is-dir "  [dir]  " "         ")
+                    (propertize name 'face
+                                (if is-dir 'font-lock-function-name-face
+                                  'default)))
+            (put-text-property start (point) 'sql-datum-row-id path)
+            (put-text-property start (point) 'sql-datum-is-dir is-dir)
+            ;; Flagged by name: the parent's path gives no hint that it is
+            ;; the ".." row rather than an ordinary directory.
+            (when (equal name "..")
+              (put-text-property start (point) 'sql-datum-is-parent t))
+            (insert "\n")))
+        (insert "\n"
+                (propertize
+                 "RET open   ^ up   s select this directory   q cancel\n"
+                 'face 'font-lock-comment-face)))
+      (setq sql-datum--browser-context context
+            sql-datum--admin-sqli-buf sqli-buf)
+      (goto-char (point-min))
+      (forward-line (if info 3 2)))
+    (pop-to-buffer buf)))
 
 ;; --- Auto-refresh ---
 

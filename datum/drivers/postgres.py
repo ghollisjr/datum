@@ -239,6 +239,39 @@ class PostgreSQLDriver(BaseDriver):
     def safe_fallback_database(self):
         return "postgres"
 
+    # --- Server-side filesystem browsing ---
+    #
+    # CREATE DATABASE takes no file paths on PostgreSQL, so this is here
+    # for TABLESPACE locations rather than the database wizard.  Requires
+    # superuser or membership in pg_read_server_files.
+
+    supports_path_browse = True
+
+    def default_paths(self, cursor):
+        if cursor is None:
+            return {}
+        try:
+            cursor.execute("SHOW data_directory")
+            row = cursor.fetchone()
+        except Exception:
+            return {}
+        return {"data": row[0]} if row and row[0] else {}
+
+    def browse_path(self, cursor, path):
+        path = path or self.default_paths(cursor).get("data") or "/"
+        # pg_ls_dir returns bare names, so pg_stat_file supplies the type.
+        # missing_ok = true keeps a broken symlink from failing the listing.
+        cursor.execute("""
+            SELECT entry,
+                   rtrim(?, '/') || '/' || entry AS full_path,
+                   COALESCE((pg_stat_file(rtrim(?, '/') || '/' || entry,
+                                          true)).isdir, false) AS is_dir
+            FROM pg_ls_dir(?) AS entry
+            ORDER BY is_dir DESC, entry
+        """, [path, path, path])
+        return [{"name": name, "path": full, "is_dir": bool(is_dir)}
+                for name, full, is_dir in cursor.fetchall()]
+
     def database_options(self, cursor=None):
         roles = self._lookup(cursor, r"""
             SELECT rolname FROM pg_roles
