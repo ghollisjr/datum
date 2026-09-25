@@ -1059,6 +1059,29 @@ Server runs on Linux as readily as on Windows.  Navigation therefore
 uses the full path the server reported for each entry rather than one
 assembled here.
 
+**** Windows drives
+
+Windows has no single filesystem root: each drive is its own tree, and
+=C:\= has nothing above it.  Dired has no answer to this either — on
+Windows it simply stops at the top of a drive, and changing drive means
+typing another path.
+
+So the panel supplies the missing top.  Going up from =C:\= — or from a
+UNC share such as =\\fileserver\backups= — lands on a list of the
+server's drives, which the =..= row labels as such rather than showing a
+bare marker.  Each drive is a directory row, so =RET= descends into it
+the same as any other.  The list shows the free space in bytes and the
+kind of drive (=DRIVE_FIXED=, =DRIVE_REMOTE=), and sorts with =o= like
+any other panel.
+
+On a server whose filesystem does have a single root, =/= is simply the
+top and no drive list is offered.
+
+This is MSSQL only.  It reads =sys.dm_os_enumerate_fixed_drives= on SQL
+Server 2019 and later, falling back to =xp_fixeddrives= on older ones.
+PostgreSQL has no portable way to enumerate drives, so nothing is
+invented for it: on Windows a PostgreSQL server stops at the drive root.
+
 Sizes are shown as plain byte counts rather than prettified, so that
 sorting the column with =o= sorts numerically.
 

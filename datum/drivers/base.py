@@ -812,6 +812,44 @@ class BaseDriver(ABC):
 
     supports_path_browse = False
 
+    # Windows has no single filesystem root: each drive is its own.
+    # This synthetic path stands for the list of them, so that going up
+    # from C:\\ has somewhere to go.  A real path never starts with a
+    # colon on either Windows or POSIX.
+    DRIVES_PATH = ":drives"
+
+    # Only a dialect that can enumerate the server's drives opts in; on
+    # PostgreSQL there is no portable way to ask.
+    supports_drive_list = False
+
+    def list_drives(self, cursor):
+        """Return the server's drives as entries, like `browse_path'.
+
+        Each carries `name`, `path` and `is_dir`, and may carry `free`
+        and `kind`.
+        """
+        return []
+
+    @staticmethod
+    def is_drive_root(path):
+        """Return True if PATH is the top of a Windows drive or share.
+
+        "C:", "C:\\" and "\\\\server\\share" have no parent directory —
+        above them is the list of drives, not another directory.
+        """
+        text = (path or "").strip()
+        if not text:
+            return False
+        bare = text.rstrip("/\\")
+        # A drive letter, with or without its separator.
+        if len(bare) == 2 and bare[1] == ":" and bare[0].isalpha():
+            return True
+        # A UNC share: \\server\share and no deeper.
+        if text.startswith("\\\\") or text.startswith("//"):
+            parts = [p for p in bare.replace("/", "\\").split("\\") if p]
+            return len(parts) <= 2
+        return False
+
     @staticmethod
     def coerce_bool(value):
         """Return VALUE as a bool, however the ODBC driver spelled it.
@@ -846,9 +884,17 @@ class BaseDriver(ABC):
         return trimmed + sep + name
 
     def parent_path(self, path, cursor=None):
-        """Return the parent of PATH, or None at the filesystem root."""
+        """Return the parent of PATH, or None when there is none above it.
+
+        None means the top of a tree: a POSIX root, a Windows drive root,
+        or a UNC share.  Above a drive root is the drive list rather than
+        a directory, which is the caller's business, not this function's.
+        """
         trimmed = (path or "").rstrip("/\\")
         if not trimmed:
+            return None
+        # A drive or share root has no parent directory of its own.
+        if self.is_drive_root(path):
             return None
         index = max(trimmed.rfind("/"), trimmed.rfind("\\"))
         if index < 0:
@@ -860,6 +906,10 @@ class BaseDriver(ABC):
             return "/"
         if parent.endswith(":"):
             return parent + "\\"
+        # Walking up out of \\server\share would land on the host, which
+        # is not a directory anything can list.
+        if self.is_drive_root(parent) and not parent.endswith("\\"):
+            return parent + "\\" if parent.endswith(":") else parent
         return parent
 
     def browse_path(self, cursor, path):

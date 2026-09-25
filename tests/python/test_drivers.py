@@ -1881,6 +1881,45 @@ class TestServerFilesystem:
         assert mssql.parent_path("C:\\Data\\SQL") == "C:\\Data"
         assert mssql.parent_path("C:\\Data") == "C:\\"
 
+    # --- Windows has no single root, so a drive root is a top ---
+
+    def test_a_drive_root_is_recognised(self, mssql):
+        for path in ("C:", "C:\\", "c:/", "Z:\\"):
+            assert mssql.is_drive_root(path), path
+
+    def test_a_unc_share_is_a_top_too(self, mssql):
+        # \\server\share is as far up as a share goes; above it is the
+        # host, which is not a directory anything can list.
+        assert mssql.is_drive_root("\\\\fileserver\\backups")
+        assert not mssql.is_drive_root("\\\\fileserver\\backups\\sql")
+
+    def test_ordinary_paths_are_not_drive_roots(self, mssql):
+        for path in ("/", "/var", "C:\\Data", "", None):
+            assert not mssql.is_drive_root(path), path
+
+    def test_a_drive_root_has_no_parent_directory(self, mssql):
+        # The caller offers the drive list instead; that is not this
+        # function's business.
+        assert mssql.parent_path("C:\\") is None
+        assert mssql.parent_path("C:") is None
+
+    def test_walking_up_a_share_stops_at_the_share(self, mssql):
+        # It used to walk on to "\\fileserver" and then to "\", neither
+        # of which can be listed.
+        assert mssql.parent_path("\\\\fs\\backups\\sql") == "\\\\fs\\backups"
+        assert mssql.parent_path("\\\\fs\\backups") is None
+
+    def test_only_mssql_claims_to_enumerate_drives(self, mssql, postgres):
+        # There is no portable way to ask PostgreSQL.
+        assert mssql.supports_drive_list
+        assert not postgres.supports_drive_list
+
+    def test_the_drives_path_cannot_collide_with_a_real_one(self, mssql):
+        # A real path starts with a separator, a drive letter or a name
+        # on both Windows and POSIX -- never a colon.
+        assert mssql.DRIVES_PATH.startswith(":")
+        assert not mssql.is_drive_root(mssql.DRIVES_PATH)
+
     def test_joining_follows_the_separator_already_in_the_path(self, mssql):
         assert mssql.join_path("C:\\Data", "x.mdf") == "C:\\Data\\x.mdf"
         assert mssql.join_path("/var/opt", "x.mdf") == "/var/opt/x.mdf"

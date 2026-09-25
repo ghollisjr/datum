@@ -210,3 +210,74 @@ class TestReading:
         panel = [a[0] for k, a in captured if k == "admin_panel"][0]
         assert panel["context"]["path"] == "/var/opt/mssql/log"
         assert any(r[1] == "errorlog" for r in panel["rows"]), panel["rows"]
+
+
+class TestWindowsDrives:
+    """Windows has no single filesystem root, so a drive root is a top.
+
+    The drive list itself can only be exercised for real on a Windows
+    server; what is checked here is the navigation around it, which is
+    the part that left a Windows user stuck at the top of a drive.
+    """
+
+    def test_the_server_reports_its_drives(self, mssql_env):
+        cursor, driver = mssql_env
+        drives = driver.list_drives(cursor)
+        # On Linux the DMV reports the single root, which is honest.
+        assert drives, "expected at least one drive"
+        assert all(d["path"] for d in drives)
+        assert all(d["is_dir"] for d in drives)
+
+    def test_the_drives_view_has_the_shape_the_keys_expect(self, mssql_env):
+        from datum.panels import filesystem
+
+        cursor, driver = mssql_env
+        panel = filesystem.get_data(cursor, driver, [driver.DRIVES_PATH])
+        # Type first and Path last, as in a directory listing, so the
+        # same keys work without knowing which view they are in.
+        assert panel["headers"][0] == "Type"
+        assert panel["headers"][-1] == "Path"
+        assert panel["row_id"] == 4
+        assert all(r[0] == "dir" for r in panel["rows"]), panel["rows"]
+
+    def test_a_drive_root_offers_a_way_up_to_the_drive_list(self, mssql_env):
+        from datum.panels import filesystem
+
+        _cursor, driver = mssql_env
+        entry = {"name": "Data", "path": "C:\\Data", "is_dir": True,
+                 "size": None, "modified": ""}
+        rows = filesystem._rows_for(driver, None, "C:\\", [entry])
+        assert rows[0][:2] == ["dir", ".."]
+        assert rows[0][4] == driver.DRIVES_PATH
+        # And says where it goes, rather than showing a bare sentinel.
+        assert rows[0][3] == "drive list"
+
+    def test_a_directory_below_a_drive_goes_up_normally(self, mssql_env):
+        from datum.panels import filesystem
+
+        _cursor, driver = mssql_env
+        rows = filesystem._rows_for(driver, None, "C:\\Data", [])
+        assert rows[0][4] == "C:\\"
+
+    def test_a_posix_root_offers_no_drive_list(self, mssql_env):
+        from datum.panels import filesystem
+
+        _cursor, driver = mssql_env
+        rows = filesystem._rows_for(driver, None, "/", [])
+        assert not rows or rows[0][1] != ".."
+
+    def test_postgres_on_windows_has_no_drive_list(self, pg_env):
+        from datum.panels import filesystem
+
+        _cursor, driver = pg_env
+        rows = filesystem._rows_for(driver, None, "C:\\", [])
+        # Nothing is invented: PostgreSQL cannot enumerate drives.
+        assert not rows or rows[0][1] != ".."
+
+    def test_the_drive_list_is_reachable_by_its_path(self, mssql_env):
+        from datum.panels import filesystem
+
+        cursor, driver = mssql_env
+        panel = filesystem.get_data(cursor, driver, [driver.DRIVES_PATH])
+        assert panel["title"] == "Server drives"
+        assert panel["context"]["path"] == driver.DRIVES_PATH

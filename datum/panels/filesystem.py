@@ -44,16 +44,74 @@ def _unsupported(driver, what):
 def _start_path(cursor, driver):
     """Return the directory to open when none was named."""
     defaults = driver.default_paths(cursor) or {}
-    return defaults.get("data") or defaults.get("log") or "/"
+    start = defaults.get("data") or defaults.get("log")
+    if start:
+        return start
+    # With nowhere better to start, the drive list beats guessing "/"
+    # on a server whose filesystem has no single root.
+    if driver.supports_drive_list:
+        return driver.DRIVES_PATH
+    return "/"
+
+
+def _drives_panel(cursor, driver):
+    """Return the list of the server's drives.
+
+    Windows has no single filesystem root — each drive is its own tree —
+    so this stands in for one, and is where going up from C:\\ arrives.
+    """
+    try:
+        drives = driver.list_drives(cursor)
+    except Exception as err:
+        return {
+            "panel": "filesystem",
+            "headers": ["note"],
+            "rows": [[f"Cannot list the server's drives: {_db_error(err)}"]],
+            "row_id": None,
+            "actions": [],
+            "info": None,
+            "context": {"path": driver.DRIVES_PATH},
+        }
+    rows = [["dir", d.get("name") or d.get("path") or "",
+             "" if d.get("free") is None else str(d["free"]),
+             d.get("kind") or "",
+             d.get("path") or ""]
+            for d in drives]
+    return {
+        "panel": "filesystem",
+        "title": "Server drives",
+        # Same shape as a directory listing — type first, path last — so
+        # the same keys work here without knowing which view they are in.
+        "headers": ["Type", "Name", "Free", "Kind", "Path"],
+        "rows": rows,
+        "row_id": 4,
+        "actions": [
+            {"key": "RET", "label": "Open drive", "command": "open"},
+            {"key": "w", "label": "Copy path", "command": None},
+        ],
+        "info": f"{len(rows)} drive{'' if len(rows) == 1 else 's'} "
+                f"— Free is in bytes",
+        "context": {"path": driver.DRIVES_PATH},
+    }
 
 
 def _rows_for(driver, cursor, path, entries):
     """Return the panel rows for ENTRIES, parent directory first."""
     rows = []
     parent = driver.parent_path(path, cursor)
+    to_drives = False
+    if not parent and driver.supports_drive_list and driver.is_drive_root(path):
+        # Above a drive root is the list of drives, not a directory.
+        # A UNC share has no drive above it either, but the drive list is
+        # the only navigable top there is, so it is still the way out.
+        parent = driver.DRIVES_PATH
+        to_drives = True
     if parent and parent != path:
-        # A visible way up, the way dired lists "..".
-        rows.append(["dir", "..", "", "", parent])
+        # A visible way up, the way dired lists "..".  Where that leads
+        # somewhere other than a directory, say so rather than leaving a
+        # bare sentinel showing in the path column.
+        rows.append(["dir", "..", "",
+                     "drive list" if to_drives else "", parent])
     for entry in entries:
         is_dir = bool(entry.get("is_dir"))
         size = entry.get("size")
@@ -75,6 +133,8 @@ def get_data(cursor, driver, args):
         return _unsupported(driver, "Browsing the server filesystem")
 
     path = " ".join(args).strip() or _start_path(cursor, driver)
+    if path == driver.DRIVES_PATH:
+        return _drives_panel(cursor, driver)
     try:
         entries = driver.browse_path(cursor, path)
     except Exception as err:

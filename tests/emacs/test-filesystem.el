@@ -190,4 +190,88 @@
                       ;; the completion list is what actually matters
                       t)))
 
+
+(message "\n=== Windows drives ===")
+
+;; A drive root's ".." leads to the drive list, which is the only top
+;; a server with no single filesystem root has.
+(defconst test-fs--drive-root
+  (concat
+   "{\"panel\":\"filesystem\",\"title\":\"Server files: C:\\\\\","
+   "\"headers\":[\"Type\",\"Name\",\"Size\",\"Modified\",\"Path\"],"
+   "\"rows\":[[\"dir\",\"..\",\"\",\"drive list\",\":drives\"],"
+   "[\"dir\",\"Data\",\"\",\"2026-09-25 12:00:00\",\"C:\\\\Data\"]],"
+   "\"row_id\":4,\"actions\":[],"
+   "\"info\":\"C: — 1 directory, 0 files\","
+   "\"context\":{\"path\":\"C:\\\\\"}}"))
+
+(defconst test-fs--drives
+  (concat
+   "{\"panel\":\"filesystem\",\"title\":\"Server drives\","
+   "\"headers\":[\"Type\",\"Name\",\"Free\",\"Kind\",\"Path\"],"
+   "\"rows\":[[\"dir\",\"C:\",\"115730000000\",\"DRIVE_FIXED\","
+   "\"C:\\\\\"],"
+   "[\"dir\",\"D:\",\"900000000\",\"DRIVE_FIXED\",\"D:\\\\\"]],"
+   "\"row_id\":4,\"actions\":[],"
+   "\"info\":\"2 drives — Free is in bytes\","
+   "\"context\":{\"path\":\":drives\"}}"))
+
+(defun test-fs--render (json)
+  (sql-datum--admin-show-panel
+   (sql-datum--admin-denull-alist
+    (json-parse-string json :object-type 'alist :array-type 'list))
+   (current-buffer))
+  (get-buffer "*datum-admin:filesystem*"))
+
+(with-current-buffer (test-fs--render test-fs--drive-root)
+  (test-fs-assert "a drive root lists a way up"
+                  (progn (test-fs--goto "..")
+                         (equal (sql-datum--admin-fs-row)
+                                '("dir" ":drives"))))
+  (let (sent)
+    (cl-letf (((symbol-function 'sql-datum--admin-send-command)
+               (lambda (c) (setq sent c))))
+      (test-fs--goto "..")
+      (sql-datum-admin-open-path)
+      (test-fs-assert "RET on it asks for the drive list"
+                      (equal sent ":admin filesystem :drives"))
+      (setq sent nil)
+      (test-fs--goto "Data")
+      (sql-datum-admin-parent-directory)
+      (test-fs-assert "^ from a drive root reaches the drive list too"
+                      (equal sent ":admin filesystem :drives"))))
+  (test-fs-assert "and the row says where it goes"
+                  (save-excursion
+                    (test-fs--goto "..")
+                    (equal (nth 3 (sql-datum--admin-row-cells-at-point))
+                           "drive list"))))
+
+(with-current-buffer (test-fs--render test-fs--drives)
+  (test-fs-assert "each drive is a directory to descend into"
+                  (progn (test-fs--goto "C:")
+                         (equal (sql-datum--admin-fs-row) '("dir" "C:\\"))))
+  (let (sent)
+    (cl-letf (((symbol-function 'sql-datum--admin-send-command)
+               (lambda (c) (setq sent c))))
+      (test-fs--goto "D:")
+      (sql-datum-admin-open-path)
+      (test-fs-assert "RET descends into the drive"
+                      (equal sent ":admin filesystem D:\\"))))
+  ;; The drive list is the top: there is nothing above it.
+  (test-fs-error "^ at the drive list says it is the top"
+                 (sql-datum-admin-parent-directory))
+  (test-fs-assert "a drive is not something to view"
+                  (progn (test-fs--goto "C:")
+                         (condition-case e
+                             (progn (sql-datum-admin-view-file) nil)
+                           (user-error (string-match-p "is a directory"
+                                                       (cadr e))))))
+  (test-fs-assert "refreshing stays on the drive list"
+                  (let (sent)
+                    (cl-letf (((symbol-function
+                                'sql-datum--admin-send-command)
+                               (lambda (c) (setq sent c))))
+                      (sql-datum--admin-send-refresh)
+                      (equal sent ":admin filesystem :drives")))))
+
 (message "\n%d passed, %d failed" test-fs--pass test-fs--fail)

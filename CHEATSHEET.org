@@ -320,6 +320,10 @@ The server reads as *its own* account, not yours: it reaches the files
 it owns — its error log, its config — and is refused elsewhere.  On
 PostgreSQL, listing needs superuser or =pg_read_server_files=.
 
+On Windows there is no single root, so going up from =C:\= (or a UNC
+share) lands on a list of the server's drives; =RET= descends into one.
+MSSQL only — PostgreSQL cannot enumerate drives.
+
 ** SSIS panel (MSSQL)
 
 | Key | Action            |

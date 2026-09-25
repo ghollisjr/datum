@@ -489,6 +489,50 @@ class MSSQLDriver(BaseDriver):
         return {"data": (row[0] or "").rstrip("/\\"),
                 "log": (row[1] or "").rstrip("/\\")}
 
+    supports_drive_list = True
+
+    def list_drives(self, cursor):
+        """Return the server's drives, newest strategy first.
+
+        On Windows these are C:\\, D:\\ and so on; on Linux the DMV
+        reports the single root, which is the honest answer there.
+        """
+        try:
+            # SQL Server 2019+.  Reports the path to descend into, which
+            # is what navigation needs, rather than a bare letter.
+            cursor.execute(
+                "SELECT fixed_drive_path, drive_type_desc, "
+                "       free_space_in_bytes "
+                "FROM sys.dm_os_enumerate_fixed_drives "
+                "ORDER BY fixed_drive_path")
+            rows = cursor.fetchall()
+            if rows:
+                return [{"name": (path or "").rstrip("/\\") or (path or ""),
+                         "path": path,
+                         "is_dir": True,
+                         "kind": kind or "",
+                         "free": None if free is None else int(free)}
+                        for path, kind, free in rows if path]
+        except Exception:
+            pass
+        # Older servers: a bare drive letter and the megabytes free.
+        cursor.execute("EXEC master.dbo.xp_fixeddrives")
+        drives = []
+        for row in cursor.fetchall():
+            letter = (str(row[0]) if row[0] is not None else "").strip()
+            if not letter:
+                continue
+            letter = letter.rstrip(":\\/")
+            free_mb = row[1] if len(row) > 1 else None
+            drives.append({
+                "name": f"{letter}:",
+                "path": f"{letter}:\\",
+                "is_dir": True,
+                "kind": "",
+                "free": None if free_mb is None else int(free_mb) * 1024 * 1024,
+            })
+        return drives
+
     supports_file_read = True
 
     def read_file(self, cursor, path, max_bytes=262144):
