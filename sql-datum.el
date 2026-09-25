@@ -1072,6 +1072,14 @@ SQLI-BUF is the originating SQLi buffer."
         ;; the timer on every refresh cycle.
         (when initial
           (sql-datum--admin-mode))
+        ;; Decided before the header is drawn, so the line describing
+        ;; auto-refresh can report what is actually running rather than
+        ;; what the setting would allow.  A panel may opt out: a
+        ;; directory listing is not a thing to poll, any more than dired
+        ;; reverts itself.
+        (when (and initial (not sub-panel)
+                   (not (eq (alist-get 'auto_refresh data) :false)))
+          (sql-datum--admin-start-timer buf))
         ;; Apply sort if active
         (when sql-datum--admin-sort-column
           (setq rows (sql-datum--admin-sort-rows
@@ -1084,7 +1092,7 @@ SQLI-BUF is the originating SQLi buffer."
           (insert (propertize title 'face 'bold) "\n")
           (cl-incf header-lines)
           (insert (format "Last refresh: %s" (format-time-string "%H:%M:%S")))
-          (if sql-datum-admin-refresh-interval
+          (if sql-datum--admin-timer
               (insert (format "  [auto-refresh %ds]"
                               sql-datum-admin-refresh-interval))
             (insert "  [auto-refresh off]"))
@@ -1136,10 +1144,7 @@ SQLI-BUF is the originating SQLi buffer."
       (when requested
         (setq sql-datum--admin-display-request nil))
       (when (or initial requested)
-        (pop-to-buffer buf)))
-    ;; Start auto-refresh for top-level panels (not sub-panels)
-    (when (and initial (not sub-panel))
-      (sql-datum--admin-start-timer buf))))
+        (pop-to-buffer buf)))))
 
 (defun sql-datum--admin-restore-cursor (saved-row-id saved-line saved-col
                                         row-id _rows initial)

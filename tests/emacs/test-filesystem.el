@@ -32,7 +32,7 @@
    "\"/var/opt/mssql/log/archive\"],"
    "[\"file\",\"errorlog\",\"1327517\",\"2026-09-25 12:39:48\","
    "\"/var/opt/mssql/log/errorlog\"]],"
-   "\"row_id\":4,\"display_columns\":4,"
+   "\"row_id\":4,\"display_columns\":4,\"auto_refresh\":false,"
    "\"actions\":[{\"key\":\"RET\",\"label\":\"Open directory\"},"
    "{\"key\":\"^\",\"label\":\"Parent directory\"},"
    "{\"key\":\"v\",\"label\":\"View file\"},"
@@ -243,7 +243,7 @@
    "\"headers\":[\"Type\",\"Name\",\"Size\",\"Modified\",\"Path\"],"
    "\"rows\":[[\"dir\",\"..\",\"\",\"drive list\",\":drives\"],"
    "[\"dir\",\"Data\",\"\",\"2026-09-25 12:00:00\",\"C:\\\\Data\"]],"
-   "\"row_id\":4,\"display_columns\":4,\"actions\":[],"
+   "\"row_id\":4,\"display_columns\":4,\"auto_refresh\":false,\"actions\":[],"
    "\"info\":\"C: — 1 directory, 0 files\","
    "\"context\":{\"path\":\"C:\\\\\"}}"))
 
@@ -254,7 +254,7 @@
    "\"rows\":[[\"dir\",\"C:\",\"115730000000\",\"DRIVE_FIXED\","
    "\"C:\\\\\"],"
    "[\"dir\",\"D:\",\"900000000\",\"DRIVE_FIXED\",\"D:\\\\\"]],"
-   "\"row_id\":4,\"display_columns\":4,\"actions\":[],"
+   "\"row_id\":4,\"display_columns\":4,\"auto_refresh\":false,\"actions\":[],"
    "\"info\":\"2 drives — Free is in bytes\","
    "\"context\":{\"path\":\":drives\"}}"))
 
@@ -315,5 +315,48 @@
                                (lambda (c) (setq sent c))))
                       (sql-datum--admin-send-refresh)
                       (equal sent ":admin filesystem :drives")))))
+
+
+(message "\n=== a directory is not polled ===")
+
+(with-current-buffer (test-fs--panel)
+  ;; dired does not revert itself, and a directory listing is not a
+  ;; thing to poll every few seconds.
+  (test-fs-assert "no timer is started for the listing"
+                  (null sql-datum--admin-timer))
+  (test-fs-assert "and the header line says so rather than claiming one"
+                  (save-excursion
+                    (goto-char (point-min))
+                    (forward-line 1)
+                    (string-match-p
+                     "auto-refresh off"
+                     (buffer-substring-no-properties
+                      (line-beginning-position) (line-end-position)))))
+  ;; But it is still available for anyone watching a file being written.
+  (sql-datum-admin-toggle-auto-refresh)
+  (test-fs-assert "a still turns polling on"
+                  sql-datum--admin-timer)
+  (sql-datum-admin-toggle-auto-refresh)
+  (test-fs-assert "and off again"
+                  (null sql-datum--admin-timer)))
+
+(with-current-buffer (test-fs--render test-fs--drives)
+  (test-fs-assert "the drive list is not polled either"
+                  (null sql-datum--admin-timer)))
+
+;; A panel that says nothing about it keeps the old behaviour.
+(let ((sql-datum-admin-refresh-interval 5))
+  (sql-datum--admin-show-panel
+   (sql-datum--admin-denull-alist
+    (json-parse-string
+     (concat "{\"panel\":\"activity\",\"headers\":[\"a\"],"
+             "\"rows\":[[\"x\"]],\"row_id\":0,\"actions\":[],"
+             "\"info\":null}")
+     :object-type 'alist :array-type 'list))
+   (current-buffer))
+  (with-current-buffer "*datum-admin:activity*"
+    (test-fs-assert "a panel that does not opt out is still polled"
+                    sql-datum--admin-timer)
+    (sql-datum--admin-stop-timer (current-buffer))))
 
 (message "\n%d passed, %d failed" test-fs--pass test-fs--fail)

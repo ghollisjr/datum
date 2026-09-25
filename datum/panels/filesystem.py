@@ -86,6 +86,7 @@ def _drives_panel(cursor, driver):
         "rows": rows,
         "row_id": 4,
         "display_columns": 4,
+        "auto_refresh": False,
         "actions": [
             {"key": "RET", "label": "Open drive", "command": "open"},
             {"key": "w", "label": "Copy path", "command": None},
@@ -172,6 +173,10 @@ def get_data(cursor, driver, args):
         # is named once in the title, and the rows show bare names, the
         # way dired does it.
         "display_columns": 4,
+        # A directory is not something to poll: dired does not revert
+        # itself either.  g refreshes, and a turns polling on for
+        # anyone watching a file being written.
+        "auto_refresh": False,
         "actions": actions,
         "info": f"{path} — {dirs} director{'y' if dirs == 1 else 'ies'}, "
                 f"{files} file{'' if files == 1 else 's'}",

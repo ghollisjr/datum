@@ -1082,6 +1082,11 @@ Server 2019 and later, falling back to =xp_fixeddrives= on older ones.
 PostgreSQL has no portable way to enumerate drives, so nothing is
 invented for it: on Windows a PostgreSQL server stops at the drive root.
 
+Unlike the other panels, this one does not poll: a directory listing is
+not something to watch tick over, and dired does not revert itself
+either.  =g= refreshes it, and =a= turns polling on where you do want
+it — watching a backup file being written, say.
+
 The listing is of that directory only, not of what is under it, and
 each row shows a bare name — the directory itself is named once in the
 title, as dired does it.  Each row still carries its full path, so
