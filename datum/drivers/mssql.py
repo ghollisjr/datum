@@ -440,6 +440,120 @@ class MSSQLDriver(BaseDriver):
     def quote_identifier(self, name):
         return f"[{name}]"
 
+    def quote_ddl_identifier(self, name):
+        name = self.validate_identifier(name)
+        return "[" + name.replace("]", "]]") + "]"
+
+    # --- Database DDL ---
+
+    supports_database_ddl = True
+
+    def safe_fallback_database(self):
+        return "master"
+
+    def database_options(self, cursor=None):
+        logins = self._lookup(cursor, """
+            SELECT name FROM sys.server_principals
+            WHERE type IN ('S', 'U', 'G') AND name NOT LIKE '##%'
+            ORDER BY name
+        """)
+        # ~5500 collations on a stock instance — far too many for a menu,
+        # so this is a completing field rather than a choice.
+        collations = self._lookup(
+            cursor, "SELECT name FROM sys.fn_helpcollations() ORDER BY name")
+        return [
+            {"key": "name", "label": "Database Name", "type": "string",
+             "default": "", "required": True},
+            {"key": "owner", "label": "Owner",
+             "type": "choice" if logins else "string",
+             "default": "",
+             "choices": ([["", "(creator)"]] + [[n, n] for n in logins]
+                         if logins else None),
+             "help": None if logins else "login name; blank leaves the creator as owner"},
+            {"key": "collation", "label": "Collation",
+             "type": "completing" if collations else "string",
+             "default": "",
+             "completions": collations or None,
+             "help": "blank uses the server default"},
+            {"key": "recovery_model", "label": "Recovery Model", "type": "choice",
+             "default": "", "choices": [["", "Server default"],
+                                        ["FULL", "Full"],
+                                        ["SIMPLE", "Simple"],
+                                        ["BULK_LOGGED", "Bulk-logged"]]},
+            {"key": "data_path", "label": "Data File Path", "type": "path",
+             "default": "", "help": "blank uses the server's default data directory"},
+            {"key": "data_size_mb", "label": "Data Initial Size", "type": "int",
+             "default": 0, "help": "MB; 0 uses the server default"},
+            {"key": "data_growth_mb", "label": "Data Autogrowth", "type": "int",
+             "default": 0, "help": "MB; 0 uses the server default"},
+            {"key": "log_path", "label": "Log File Path", "type": "path",
+             "default": "", "help": "blank uses the server's default log directory"},
+            {"key": "log_size_mb", "label": "Log Initial Size", "type": "int",
+             "default": 0, "help": "MB; 0 uses the server default"},
+            {"key": "log_growth_mb", "label": "Log Autogrowth", "type": "int",
+             "default": 0, "help": "MB; 0 uses the server default"},
+        ]
+
+    def sql_create_database(self, opts):
+        name = opts.get("name", "")
+        db = self.quote_ddl_identifier(name)
+        stmts = []
+
+        # File clauses are only emitted when a path is supplied, since
+        # SIZE/FILEGROWTH cannot appear without NAME/FILENAME.
+        def file_clause(logical, path, size_mb, growth_mb):
+            parts = [f"NAME = {self.quote_ddl_identifier(logical)}",
+                     f"FILENAME = {self.quote_ddl_literal(path)}"]
+            if size_mb:
+                parts.append(f"SIZE = {int(size_mb)}MB")
+            if growth_mb:
+                parts.append(f"FILEGROWTH = {int(growth_mb)}MB")
+            return "(" + ", ".join(parts) + ")"
+
+        create = f"CREATE DATABASE {db}"
+        data_path = (opts.get("data_path") or "").strip()
+        log_path = (opts.get("log_path") or "").strip()
+        if data_path:
+            create += "\n  ON PRIMARY " + file_clause(
+                name, data_path,
+                opts.get("data_size_mb"), opts.get("data_growth_mb"))
+        if log_path:
+            create += "\n  LOG ON " + file_clause(
+                f"{name}_log", log_path,
+                opts.get("log_size_mb"), opts.get("log_growth_mb"))
+        collation = (opts.get("collation") or "").strip()
+        if collation:
+            # COLLATE takes a bare identifier, not a string literal.
+            create += f"\n  COLLATE {self.validate_identifier(collation)}"
+        stmts.append(create)
+
+        recovery = (opts.get("recovery_model") or "").strip()
+        if recovery:
+            if recovery not in ("FULL", "SIMPLE", "BULK_LOGGED"):
+                raise ValueError(f"Unknown recovery model: {recovery}")
+            stmts.append(f"ALTER DATABASE {db} SET RECOVERY {recovery}")
+
+        owner = (opts.get("owner") or "").strip()
+        if owner:
+            stmts.append(f"ALTER AUTHORIZATION ON DATABASE::{db} "
+                         f"TO {self.quote_ddl_identifier(owner)}")
+        return stmts
+
+    def sql_drop_database(self, name, force=False):
+        db = self.quote_ddl_identifier(name)
+        stmts = []
+        if force:
+            # Evicts every other session so the DROP cannot be blocked.
+            stmts.append(f"ALTER DATABASE {db} SET SINGLE_USER "
+                         f"WITH ROLLBACK IMMEDIATE")
+        stmts.append(f"DROP DATABASE {db}")
+        return stmts
+
+    def sql_database_sessions(self, name):
+        return ("SELECT COUNT(*) FROM sys.dm_exec_sessions s "
+                "JOIN sys.databases d ON s.database_id = d.database_id "
+                "WHERE d.name = ? AND s.session_id <> @@SPID", [name])
+
     def python_type_to_sql(self, python_type):
         return _MSSQL_TYPE_MAP.get(python_type, "NVARCHAR(MAX)")
 

@@ -38,21 +38,24 @@ def initialize_module(docopt_args, config):
         # but attempt to extract server/dsn and db name for the prompt
         components = _conn_string.split(";")
         for piece in components:
-            lower = piece.lower()
             if '=' not in piece:
                 continue
             key, value = piece.split("=", 1)
-            if 'dsn' in lower:
+            # Match the keyword exactly rather than searching the whole
+            # piece: "TrustServerCertificate=yes" contains "server", and a
+            # host or database name could contain "uid" or "pwd".
+            key = key.strip().lower()
+            if key == 'dsn':
                 _dsn = value
-            if 'server' in lower:
+            elif key == 'server':
                 _server = value
-            if 'database' in lower:
+            elif key == 'database':
                 _database = value
-            if 'trusted_connection' in lower and value.lower() in ('yes', '1', 'true'):
+            elif key == 'trusted_connection' and value.lower() in ('yes', '1', 'true'):
                 _integrated = True
-            if 'uid' in lower:
+            elif key == 'uid':
                 _user = value
-            if 'pwd' in lower:
+            elif key == 'pwd':
                 _pass = value
         _timeout = config["command_timeout"]
         return

@@ -39,6 +39,14 @@
 (require 'cl-lib)
 (require 'xref)
 
+;; The admin wizard forms use the widget library, which is loaded lazily
+;; at form-display time.  Pull it in for the byte-compiler only; the
+;; functions below are always reached from a live form buffer, where
+;; wid-edit is loaded.
+(eval-when-compile (require 'wid-edit))
+(declare-function widget-forward  "wid-edit" (arg))
+(declare-function widget-field-at "wid-edit" (pos))
+
 ;;; ---------------------------------------------------------------------------
 ;;; Customization
 ;;; ---------------------------------------------------------------------------
@@ -932,6 +940,10 @@ Set to nil to disable auto-refresh."
          ((equal sub-panel "step-edit")
           (run-at-time 0 nil #'sql-datum--admin-show-step-editor
                        data sqli-buf))
+         ;; Generic wizard form (databases, security, backup, schema)
+         ((equal sub-panel "form")
+          (run-at-time 0 nil #'sql-datum--admin-show-form
+                       data sqli-buf))
          ;; Multi-section detail view (job detail)
          ((alist-get 'sections data)
           (run-at-time 0 nil #'sql-datum--admin-show-detail
@@ -1706,20 +1718,39 @@ Returns a list of strings by parsing the current line against column widths."
     (_           (user-error "No editable item at point"))))
 
 (defun sql-datum-admin-new-at-point ()
-  "Create a new step or schedule, depending on cursor section."
+  "Create a new item, depending on cursor section or current panel."
   (interactive)
   (pcase (get-text-property (line-beginning-position) 'sql-datum-section)
     ("Steps"     (sql-datum-admin-new-step))
     ("Schedules" (sql-datum-admin-new-schedule))
-    (_           (user-error "No section at point for creating items"))))
+    (_ (pcase sql-datum--admin-panel-name
+         ("databases" (sql-datum-admin-new-database))
+         (_ (user-error "No section at point for creating items"))))))
 
 (defun sql-datum-admin-delete-at-point ()
-  "Delete the step or schedule at point."
+  "Delete the item at point, depending on cursor section or current panel."
   (interactive)
   (pcase (get-text-property (line-beginning-position) 'sql-datum-section)
     ("Steps"     (sql-datum-admin-delete-step))
     ("Schedules" (sql-datum-admin-delete-schedule))
-    (_           (user-error "No deletable item at point"))))
+    (_ (pcase sql-datum--admin-panel-name
+         ("databases" (sql-datum-admin-drop-database))
+         (_ (user-error "No deletable item at point"))))))
+
+;; --- Database wizard commands ---
+
+(defun sql-datum-admin-new-database ()
+  "Open the create-database wizard."
+  (interactive)
+  (sql-datum--admin-send-command ":admin-action databases new-database"))
+
+(defun sql-datum-admin-drop-database ()
+  "Open the drop-database confirmation for the database at point."
+  (interactive)
+  (let ((name (sql-datum--admin-row-id-at-point)))
+    (unless name (user-error "No database at point"))
+    (sql-datum--admin-send-command
+     (format ":admin-action databases drop-check %s" name))))
 
 ;; --- Step action commands ---
 
@@ -2189,6 +2220,325 @@ JOB-NAME the parent job, IS-NEW non-nil for creating a new step."
          (format ":admin-action jobs update-step %s %s" job-name json-str)))))
   (quit-window t)
   (message "datum admin: step %s" (if is-new "created" "updated")))
+
+;; --- Generic wizard form (widget-based, driven by field descriptors) ---
+;;
+;; The Python side sends a `form' alist describing the fields; this
+;; renders them and submits the collected values back as JSON.  All the
+;; admin wizards (databases, security, backup, schema) share this, so a
+;; new wizard needs no new Emacs code — only new field descriptors.
+
+(defvar-local sql-datum--form-widgets nil
+  "Alist of (KEY . WIDGET) for the wizard form in this buffer.")
+
+(defvar-local sql-datum--form-submit-fn nil
+  "Zero-argument function submitting the wizard form in this buffer.")
+
+(defun sql-datum-form-submit ()
+  "Submit the wizard form in the current buffer."
+  (interactive)
+  (unless sql-datum--form-submit-fn
+    (user-error "Not in a datum wizard form"))
+  (funcall sql-datum--form-submit-fn))
+
+(defun sql-datum-form-cancel ()
+  "Close the wizard form without submitting."
+  (interactive)
+  (quit-window t))
+
+(defun sql-datum--form-line-move (dir)
+  "Move DIR fields, or DIR lines when inside a multi-line field.
+Multi-line `text' widgets need plain line motion to edit their body, so
+the arrow keys only jump between fields once there is no more of the
+current field to move through."
+  (let ((field (widget-field-at (point))))
+    (if (and field
+             (save-excursion
+               (forward-line dir)
+               (eq (widget-field-at (point)) field)))
+        (forward-line dir)
+      (widget-forward dir))))
+
+(defun sql-datum-form-next-field ()
+  "Move to the next form field."
+  (interactive)
+  (sql-datum--form-line-move 1))
+
+(defun sql-datum-form-prev-field ()
+  "Move to the previous form field."
+  (interactive)
+  (sql-datum--form-line-move -1))
+
+(defun sql-datum--form-make-keymap (parent)
+  "Return a keymap with the wizard form bindings layered over PARENT."
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map parent)
+    ;; `widget-keymap' only binds TAB/S-TAB for field motion, which leaves
+    ;; the arrow keys walking character by character across protected text.
+    (define-key map (kbd "<up>")    #'sql-datum-form-prev-field)
+    (define-key map (kbd "<down>")  #'sql-datum-form-next-field)
+    (define-key map (kbd "C-c C-c") #'sql-datum-form-submit)
+    (define-key map (kbd "C-c C-k") #'sql-datum-form-cancel)
+    map))
+
+;; Widget fields carry their own `keymap' text property, which takes
+;; precedence over the buffer's local map — so the bindings have to be
+;; layered onto the field keymaps as well, not just the local one.
+;;
+;; These are built on first use because the maps they inherit from live
+;; in wid-edit, which sql-datum loads lazily.
+
+(defvar sql-datum--form-keymap nil
+  "Keymap for datum wizard form buffers.")
+
+(defvar sql-datum--form-field-keymap nil
+  "Keymap active inside single-line wizard form fields.")
+
+(defvar sql-datum--form-text-keymap nil
+  "Keymap active inside multi-line wizard form fields.")
+
+(defun sql-datum--form-ensure-keymaps ()
+  "Build the wizard form keymaps if they do not exist yet."
+  (require 'wid-edit)
+  (unless sql-datum--form-keymap
+    (setq sql-datum--form-keymap
+          (sql-datum--form-make-keymap widget-keymap)))
+  (unless sql-datum--form-field-keymap
+    (setq sql-datum--form-field-keymap
+          (sql-datum--form-make-keymap widget-field-keymap)))
+  (unless sql-datum--form-text-keymap
+    (setq sql-datum--form-text-keymap
+          (sql-datum--form-make-keymap widget-text-keymap))))
+
+(defun sql-datum--form-protect-static-text ()
+  "Make every part of the form except the editable fields read-only.
+Without this the labels and help text are ordinary buffer text, so
+typing outside a field silently corrupts the form layout."
+  (let ((inhibit-read-only t)
+        ;; Widget's after-change hook rejects edits that span fields, and
+        ;; would fire on the property writes below.
+        (inhibit-modification-hooks t)
+        (pos (point-min)))
+    (while (< pos (point-max))
+      (let ((next (or (next-single-char-property-change pos 'field)
+                      (point-max))))
+        (unless (get-char-property pos 'field)
+          (put-text-property pos next 'read-only t)
+          ;; Keep the boundary characters non-sticky so that typing at the
+          ;; very start or end of an adjacent field is still allowed.
+          (put-text-property pos next 'front-sticky nil)
+          (put-text-property pos next 'rear-nonsticky t))
+        (setq pos next)))))
+
+(defvar-local sql-datum--form-spec nil
+  "The `form' alist backing the wizard form in this buffer.")
+
+(defun sql-datum--form-field-value (spec widget)
+  "Return the submitted value for field SPEC read from WIDGET."
+  (let ((type (or (alist-get 'type spec) "string"))
+        (raw (widget-value widget)))
+    (cond
+     ((equal type "bool") (if raw t :false))
+     ((equal type "int")
+      (if (stringp raw) (string-to-number raw) (or raw 0)))
+     ((stringp raw) (string-trim raw))
+     (t raw))))
+
+(defun sql-datum--form-create-widget (spec)
+  "Create and return the widget for field SPEC."
+  (let* ((type (or (alist-get 'type spec) "string"))
+         (default (alist-get 'default spec))
+         (choices (alist-get 'choices spec)))
+    (cond
+     ((equal type "bool")
+      (widget-create 'checkbox :value (and default (not (eq default :false)))))
+     ((equal type "choice")
+      ;; Rendered the way Customize renders a `(choice ...)' type: the
+      ;; "Value Menu" button makes it visible that this is a menu, rather
+      ;; than a bare value that looks like static text.
+      (apply #'widget-create 'menu-choice
+             :format "%[Value Menu%]: %v"
+             :value (or default "")
+             ;; `item' defaults to "%t\n", which leaves a blank line after
+             ;; the chosen value.
+             (or (mapcar (lambda (c)
+                           (list 'item :format "%t"
+                                 :tag (nth 1 c) :value (nth 0 c)))
+                         choices)
+                 '((item :format "%t" :tag "(none)" :value "")))))
+     ((equal type "completing")
+      ;; An editable field with a completion table: the right shape for
+      ;; lookups too long to page through as a menu.  `editable-field'
+      ;; wires :completions to M-TAB through :completions-function.
+      (widget-create 'editable-field
+                     :size 44
+                     :keymap sql-datum--form-field-keymap
+                     :completions (alist-get 'completions spec)
+                     :value (format "%s" (or default ""))))
+     ((equal type "text")
+      ;; The default format renders the tag too, and `text' defaults its
+      ;; tag to the value — which prints the whole body twice.
+      (widget-create 'text
+                     :format "%v"
+                     :size 80
+                     :keymap sql-datum--form-text-keymap
+                     :value (format "%s" (or default ""))))
+     (t
+      (widget-create 'editable-field
+                     :size (if (equal type "int") 12 44)
+                     :keymap sql-datum--form-field-keymap
+                     :value (format "%s" (or default "")))))))
+
+(defun sql-datum--admin-show-form (data sqli-buf)
+  "Show a widget form described by DATA.
+SQLI-BUF is the originating SQLi buffer.  DATA carries a `form' alist
+with `fields', `values', `submit_action', and optional `notes',
+`preview_action', `confirm_text' and `danger' keys."
+  (require 'widget)
+  (require 'wid-edit)
+  (sql-datum--form-ensure-keymaps)
+  (let* ((panel (alist-get 'panel data))
+         (form (alist-get 'form data))
+         (fields (alist-get 'fields form))
+         (values (alist-get 'values form))
+         (notes (alist-get 'notes form))
+         (confirm-text (alist-get 'confirm_text form))
+         (title (or (alist-get 'title data) "datum wizard"))
+         (buf (get-buffer-create (format "*datum-admin:%s-form*" panel))))
+    (with-current-buffer buf
+      (kill-all-local-variables)
+      (let ((inhibit-read-only t)) (erase-buffer))
+      (remove-overlays)
+      (widget-insert (propertize title 'face
+                                 (if (alist-get 'danger form)
+                                     'compilation-error 'bold)))
+      (widget-insert "\n\n")
+      (dolist (note notes)
+        (widget-insert (propertize note 'face 'font-lock-comment-face) "\n"))
+      (when notes (widget-insert "\n"))
+      (let ((widgets nil)
+            (label-width (apply #'max 8
+                                (mapcar (lambda (f)
+                                          (length (or (alist-get 'label f) "")))
+                                        fields))))
+        (dolist (spec fields)
+          (let* ((label (or (alist-get 'label spec) ""))
+                 (help (alist-get 'help spec))
+                 (completions (alist-get 'completions spec))
+                 (multiline (equal (alist-get 'type spec) "text")))
+            ;; Completion is invisible unless advertised.
+            (when completions
+              (setq help (concat (if (and help (not (string-empty-p help)))
+                                     (concat help "; ") "")
+                                 (format "M-TAB completes (%d)"
+                                         (length completions)))))
+            ;; A multi-line body does not belong in the label column.
+            (if multiline
+                (progn
+                  (widget-insert (concat label ":"))
+                  (when (and help (not (string-empty-p help)))
+                    (widget-insert (propertize (format "  %s" help)
+                                               'face 'font-lock-comment-face)))
+                  (widget-insert "\n"))
+              (widget-insert (format (format "%%-%ds  " label-width) label)))
+            (push (cons (alist-get 'key spec)
+                        (cons spec (sql-datum--form-create-widget spec)))
+                  widgets)
+            (when (and help (not multiline)
+                       (not (string-empty-p (or help ""))))
+              (widget-insert (propertize (format "  %s" help)
+                                         'face 'font-lock-comment-face)))
+            (widget-insert "\n")))
+        (widget-insert "\n")
+        ;; Destructive actions require retyping the object name.
+        (let ((confirm-widget
+               (when confirm-text
+                 (widget-insert
+                  (propertize (format "Type %s to confirm: " confirm-text)
+                              'face 'warning))
+                 (prog1 (widget-create 'editable-field
+                                       :size 30
+                                       :keymap sql-datum--form-field-keymap
+                                       :value "")
+                   (widget-insert "\n\n")))))
+          (widget-create
+           'push-button
+           :notify (lambda (&rest _)
+                     (sql-datum--admin-form-submit
+                      panel form widgets values sqli-buf
+                      confirm-widget confirm-text))
+           (or (alist-get 'submit_label form) "Submit"))
+          (when (alist-get 'preview_action form)
+            (widget-insert "  ")
+            (widget-create
+             'push-button
+             :notify (lambda (&rest _)
+                       (sql-datum--admin-form-submit
+                        panel form widgets values sqli-buf nil nil
+                        (alist-get 'preview_action form)))
+             "Preview SQL"))
+          (widget-insert "  ")
+          (widget-create 'push-button
+                         :notify (lambda (&rest _) (quit-window t))
+                         "Cancel")
+          (widget-insert "\n\n")
+          (widget-insert
+           (propertize
+            (concat "up/down or TAB move between fields   "
+                    "C-c C-c submit   C-c C-k cancel\n")
+            'face 'font-lock-comment-face))
+          ;; Expose the submit closure so C-c C-c can reach it.
+          (setq-local sql-datum--form-submit-fn
+                      (lambda ()
+                        (sql-datum--admin-form-submit
+                         panel form widgets values sqli-buf
+                         confirm-widget confirm-text))))
+        (setq-local sql-datum--form-widgets widgets)
+        (setq-local sql-datum--form-spec form)
+        (setq-local sql-datum--admin-sqli-buf sqli-buf))
+      (use-local-map sql-datum--form-keymap)
+      (widget-setup)
+      (sql-datum--form-protect-static-text)
+      ;; Start on the first field rather than on protected text.
+      (goto-char (point-min))
+      (widget-forward 1))
+    (switch-to-buffer buf)))
+
+(defun sql-datum--admin-form-submit (panel form widgets values sqli-buf
+                                     confirm-widget confirm-text
+                                     &optional override-action)
+  "Collect WIDGETS and send them to PANEL's submit action.
+FORM is the form spec, VALUES the server-supplied hidden values, and
+SQLI-BUF the connection buffer.  When CONFIRM-TEXT is non-nil the text in
+CONFIRM-WIDGET must match it.  OVERRIDE-ACTION replaces the submit action
+\(used by the Preview button, which must not mutate anything)."
+  (when (and confirm-text confirm-widget
+             (not (equal (string-trim (widget-value confirm-widget))
+                         confirm-text)))
+    (user-error "Confirmation text does not match %s" confirm-text))
+  (let ((payload (copy-alist (or values '()))))
+    (dolist (entry widgets)
+      (let ((key (car entry))
+            (spec (cadr entry))
+            (widget (cddr entry)))
+        ;; `json-serialize' requires symbol keys; field keys arrive as
+        ;; strings from `json-parse-string'.
+        (push (cons (if (stringp key) (intern key) key)
+                    (sql-datum--form-field-value spec widget))
+              payload)))
+    (let ((action (or override-action (alist-get 'submit_action form))))
+      ;; The payload is base64-encoded rather than sent as raw JSON:
+      ;; `_split_command_line' on the Python side does not understand
+      ;; backslash escapes, so a value containing a double quote (a
+      ;; Windows path, say) would otherwise be split incorrectly.
+      (sql-datum--admin-send-command-to
+       sqli-buf
+       (format ":admin-action %s %s %s" panel action
+               (base64-encode-string
+                (encode-coding-string (json-serialize payload) 'utf-8) t)))
+      (unless override-action
+        (quit-window t)
+        (message "datum admin: %s sent" action)))))
 
 ;; --- Auto-refresh ---
 
@@ -4144,10 +4494,11 @@ With a prefix argument, prompt for a filter pattern."
   (sql-datum--send-command ":running"))
 
 (defun sql-datum-admin (panel)
-  "Open an admin panel.  PANEL is one of: activity, jobs, ssis.
+  "Open an admin panel.  PANEL is one of: activity, databases, jobs, ssis.
 With a prefix argument, prompts for the panel name."
   (interactive
-   (list (completing-read "Admin panel: " '("activity" "jobs" "ssis") nil t)))
+   (list (completing-read "Admin panel: "
+                          '("activity" "databases" "jobs" "ssis") nil t)))
   (sql-datum--send-command (format ":admin %s" panel) t))
 
 (defun sql-datum-version ()

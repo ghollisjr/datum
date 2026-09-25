@@ -164,6 +164,122 @@ class BaseDriver(ABC):
         """
         return f'"{name}"'
 
+    # --- DDL identifier / literal quoting ---
+    #
+    # DDL cannot use bound parameters for identifiers, so admin wizards
+    # interpolate names directly into SQL.  These helpers validate and
+    # escape, and must be used for every user-supplied value that lands
+    # in generated DDL.
+
+    def validate_identifier(self, name):
+        """Validate NAME as a SQL identifier, returning it unchanged.
+
+        Raises ValueError if the name could not be safely embedded in
+        generated DDL.  Escaping is handled by `quote_ddl_identifier`;
+        this rejects the cases escaping cannot make safe.
+        """
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("Identifier must be a non-empty string")
+        name = name.strip()
+        if len(name) > 128:
+            raise ValueError(
+                f"Identifier too long ({len(name)} chars, max 128): {name[:40]}...")
+        for ch in name:
+            if ord(ch) < 32 or ord(ch) == 127:
+                raise ValueError(
+                    f"Identifier contains a control character: {name!r}")
+        return name
+
+    def quote_ddl_identifier(self, name):
+        """Validate and quote NAME for interpolation into generated DDL.
+
+        Unlike `quote_identifier`, this escapes the closing quote
+        character so that names containing it cannot break out of the
+        quoted identifier.
+        """
+        name = self.validate_identifier(name)
+        return '"' + name.replace('"', '""') + '"'
+
+    def quote_ddl_literal(self, value):
+        """Quote VALUE as a SQL string literal for generated DDL."""
+        if value is None:
+            return "NULL"
+        text = str(value)
+        for ch in text:
+            if ord(ch) == 0:
+                raise ValueError("String literal contains a NUL byte")
+        return "'" + text.replace("'", "''") + "'"
+
+    # --- Admin wizard capabilities ---
+    #
+    # Drivers opt in to each wizard family.  Panels check these flags and
+    # report a clear "not supported on <dialect>" instead of emitting SQL
+    # that cannot work on the target engine.
+
+    supports_database_ddl = False
+
+    def database_options(self, cursor=None):
+        """Return the field descriptors for the CREATE DATABASE form.
+
+        Each descriptor is a dict with keys:
+          key         — identifier used in the submitted value map
+          label       — form label
+          type        — one of: string, int, bool, choice, completing,
+                        text, path
+          default     — initial value
+          choices     — [[value, label], ...] when type is "choice"
+          completions — [value, ...] when type is "completing"
+          help        — trailing hint shown after the field
+          required    — whether the field must be non-empty
+
+        When CURSOR is given, lookup fields are populated from the live
+        server so the form offers the owners, templates and collations
+        that actually exist there.  Without a cursor the static
+        descriptors are returned, which is what validation needs.
+        """
+        return []
+
+    def _lookup(self, cursor, sql, limit=6000):
+        """Run a lookup query, returning a list of names.
+
+        Lookup failures are not fatal: a form with a plain text field is
+        better than no form, so the field silently loses its completion
+        rather than the whole wizard erroring out.
+        """
+        if cursor is None:
+            return []
+        try:
+            cursor.execute(sql)
+            return [row[0] for row in cursor.fetchmany(limit)
+                    if row[0] is not None]
+        except Exception:
+            return []
+
+    def sql_create_database(self, opts):
+        """Return a list of SQL statements creating a database.
+
+        opts is the submitted value map keyed by descriptor `key`.
+        """
+        raise NotImplementedError(
+            f"CREATE DATABASE is not supported on {self.dialect_name}")
+
+    def sql_drop_database(self, name, force=False):
+        """Return a list of SQL statements dropping a database.
+
+        When force is true, the statements also evict active sessions.
+        """
+        raise NotImplementedError(
+            f"DROP DATABASE is not supported on {self.dialect_name}")
+
+    def sql_database_sessions(self, name):
+        """Return (sql, params) counting active sessions on a database."""
+        raise NotImplementedError(
+            f"Session inspection is not supported on {self.dialect_name}")
+
+    def safe_fallback_database(self):
+        """Return a database that is safe to connect to while dropping another."""
+        return None
+
     # --- Type mapping for :in imports ---
 
     def python_type_to_sql(self, python_type):

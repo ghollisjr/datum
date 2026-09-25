@@ -232,8 +232,125 @@ class PostgreSQLDriver(BaseDriver):
             WHERE n.nspname = ?
         """, [name])
 
+    # --- Database DDL ---
+
+    supports_database_ddl = True
+
+    def safe_fallback_database(self):
+        return "postgres"
+
+    def database_options(self, cursor=None):
+        roles = self._lookup(cursor, r"""
+            SELECT rolname FROM pg_roles
+            WHERE rolname NOT LIKE 'pg\_%' ORDER BY rolname
+        """)
+        templates = self._lookup(
+            cursor, "SELECT datname FROM pg_database "
+                    "WHERE datistemplate ORDER BY datname")
+        tablespaces = self._lookup(
+            cursor, "SELECT spcname FROM pg_tablespace ORDER BY spcname")
+        locales = self._lookup(
+            cursor, "SELECT DISTINCT collcollate FROM pg_collation "
+                    "WHERE collcollate <> '' ORDER BY collcollate")
+
+        def choice(values, blank_label):
+            return [["", blank_label]] + [[v, v] for v in values]
+
+        return [
+            {"key": "name", "label": "Database Name", "type": "string",
+             "default": "", "required": True},
+            {"key": "owner", "label": "Owner",
+             "type": "choice" if roles else "string",
+             "default": "",
+             "choices": choice(roles, "(current role)") if roles else None,
+             "help": None if roles else "role name; blank uses the current role"},
+            {"key": "template", "label": "Template",
+             "type": "choice" if templates else "string",
+             "default": "template1",
+             "choices": [[t, t] for t in templates] if templates else None},
+            {"key": "encoding", "label": "Encoding", "type": "choice",
+             "default": "UTF8",
+             "choices": [[e, e] for e in _PG_ENCODINGS]},
+            {"key": "lc_collate", "label": "LC_COLLATE",
+             "type": "completing" if locales else "string",
+             "default": "", "completions": locales or None,
+             "help": "blank inherits; changing it needs template0"},
+            {"key": "lc_ctype", "label": "LC_CTYPE",
+             "type": "completing" if locales else "string",
+             "default": "", "completions": locales or None,
+             "help": "blank inherits; changing it needs template0"},
+            {"key": "tablespace", "label": "Tablespace",
+             "type": "choice" if tablespaces else "string",
+             "default": "",
+             "choices": (choice(tablespaces, "(default)")
+                         if tablespaces else None),
+             "help": None if tablespaces else "blank uses the default tablespace"},
+            {"key": "connection_limit", "label": "Connection Limit", "type": "int",
+             "default": -1, "help": "-1 for unlimited"},
+        ]
+
+    def sql_create_database(self, opts):
+        db = self.quote_ddl_identifier(opts.get("name", ""))
+        clauses = []
+
+        # OWNER, TEMPLATE and TABLESPACE take identifiers; ENCODING and the
+        # locale settings take string literals.
+        for key, keyword in (("owner", "OWNER"),
+                             ("template", "TEMPLATE"),
+                             ("tablespace", "TABLESPACE")):
+            value = (opts.get(key) or "").strip()
+            if value:
+                clauses.append(f"{keyword} = {self.quote_ddl_identifier(value)}")
+
+        for key, keyword in (("encoding", "ENCODING"),
+                             ("lc_collate", "LC_COLLATE"),
+                             ("lc_ctype", "LC_CTYPE")):
+            value = (opts.get(key) or "").strip()
+            if value:
+                clauses.append(f"{keyword} = {self.quote_ddl_literal(value)}")
+
+        limit = opts.get("connection_limit")
+        if limit not in (None, "", -1, "-1"):
+            clauses.append(f"CONNECTION LIMIT = {int(limit)}")
+
+        sql = f"CREATE DATABASE {db}"
+        if clauses:
+            sql += "\n  " + "\n  ".join(clauses)
+        return [sql]
+
+    def sql_drop_database(self, name, force=False):
+        db = self.quote_ddl_identifier(name)
+        stmts = []
+        if force:
+            # DROP DATABASE ... WITH (FORCE) needs PostgreSQL 13+, so
+            # terminate backends explicitly to stay compatible with older
+            # servers.  The caller runs these in order.
+            stmts.append(
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                f"WHERE datname = {self.quote_ddl_literal(name)} "
+                "AND pid <> pg_backend_pid()")
+        stmts.append(f"DROP DATABASE {db}")
+        return stmts
+
+    def sql_database_sessions(self, name):
+        return ("SELECT COUNT(*) FROM pg_stat_activity "
+                "WHERE datname = ? AND pid <> pg_backend_pid()", [name])
+
     def python_type_to_sql(self, python_type):
         return _POSTGRES_TYPE_MAP.get(python_type, "TEXT")
+
+
+# Server encodings accepted by CREATE DATABASE.  Kept as a literal rather
+# than queried: pg_encoding_to_char over a numeric range also returns the
+# client-only encodings, which CREATE DATABASE rejects.
+_PG_ENCODINGS = [
+    "UTF8", "SQL_ASCII", "LATIN1", "LATIN2", "LATIN3", "LATIN4", "LATIN5",
+    "LATIN6", "LATIN7", "LATIN8", "LATIN9", "LATIN10",
+    "WIN1250", "WIN1251", "WIN1252", "WIN1253", "WIN1254", "WIN1255",
+    "WIN1256", "WIN1257", "WIN1258", "WIN866", "WIN874",
+    "KOI8R", "KOI8U", "ISO_8859_5", "ISO_8859_6", "ISO_8859_7", "ISO_8859_8",
+    "EUC_CN", "EUC_JP", "EUC_KR", "EUC_TW", "EUC_JIS_2004",
+]
 
 
 _POSTGRES_TYPE_MAP = {
