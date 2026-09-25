@@ -184,6 +184,31 @@ def _database_list(cursor, driver):
 
 # --- Create ---
 
+def _refresh_list(cursor, driver):
+    """Re-send the database list so the panel reflects the change."""
+    from .. import envelope
+
+    try:
+        envelope.admin_panel(_database_list(cursor, driver))
+    except Exception:
+        # A refresh failing must not mask the action that succeeded.
+        pass
+
+
+def _refresh_files(cursor, driver, database):
+    """Re-send the file list for DATABASE.
+
+    Sub-panels carry no auto-refresh timer, so without this the buffer
+    keeps showing what was true before the action.
+    """
+    from .. import envelope
+
+    try:
+        _files_panel(cursor, driver, [database])
+    except Exception:
+        pass
+
+
 def _clean_fields(fields):
     """Drop descriptor keys with no value, so the form payload stays small."""
     return [{k: v for k, v in spec.items() if v is not None}
@@ -411,6 +436,7 @@ def _apply_file(cursor, driver, args, action_name):
         cursor.execute(sql)
         _commit(cursor)
     envelope.info(done)
+    _refresh_files(cursor, driver, database)
 
 
 def _remove_file(cursor, driver, args):
@@ -432,6 +458,7 @@ def _remove_file(cursor, driver, args):
         cursor.execute(sql)
         _commit(cursor)
     envelope.info(f"Removed file {logical} from {database}")
+    _refresh_files(cursor, driver, database)
 
 
 def _shrink_form(cursor, driver, args):
@@ -504,6 +531,7 @@ def _do_shrink(cursor, driver, args):
     after = _find_file(driver, cursor, database, logical)
     size = f"{after['size_mb']} MB" if after else "unknown"
     envelope.info(f"Shrank {logical} in {database} — now {size}")
+    _refresh_files(cursor, driver, database)
 
 
 def _settings_context(cursor, driver, args):
@@ -634,6 +662,7 @@ def _alter_database(cursor, driver, args):
                 f"{' '.join(sql.split())[:160]}")
             return
     envelope.info(f"Applied {len(stmts)} change(s) to {name}")
+    _refresh_list(cursor, driver)
 
 
 def _browse_path(cursor, driver, args):
@@ -745,6 +774,7 @@ def _create_database(cursor, driver, args):
                 f"{' '.join(sql.split())[:160]}")
             return
     envelope.info(f"Created database: {name}")
+    _refresh_list(cursor, driver)
 
 
 # --- Drop ---
@@ -848,6 +878,7 @@ def _drop_database(cursor, driver, args):
         cursor.execute(sql)
         _commit(cursor)
     envelope.info(f"Dropped database: {name}")
+    _refresh_list(cursor, driver)
 
 
 def _commit(cursor):

@@ -67,6 +67,31 @@ def _mask_secrets(text, opts):
     return text
 
 
+def _refresh_list(cursor, driver):
+    """Re-send the principal list so the panel reflects the change.
+
+    Sub-panels carry no auto-refresh timer, so without this the buffer
+    keeps showing what was true before the action.
+    """
+    from .. import envelope
+
+    try:
+        envelope.admin_panel(get_data(cursor, driver, []))
+    except Exception:
+        # A refresh failing must not mask the action that succeeded.
+        pass
+
+
+def _refresh_mappings(cursor, driver, login):
+    """Re-send the user-mapping panel for LOGIN."""
+    from .. import envelope
+
+    try:
+        envelope.admin_panel(_mapping_panel(cursor, driver, login))
+    except Exception:
+        pass
+
+
 def _commit(cursor):
     try:
         cursor.connection.commit()
@@ -295,6 +320,7 @@ def _apply_principal(cursor, driver, args, action_name):
             return
     verb = "Created" if creating else "Updated"
     envelope.info(f"{verb} {driver.principal_noun}: {name}")
+    _refresh_list(cursor, driver)
 
 
 def _drop_check(cursor, driver, args):
@@ -374,6 +400,7 @@ def _drop_principal(cursor, driver, args):
         cursor.execute(sql)
         _commit(cursor)
     envelope.info(f"Dropped {driver.principal_noun}: {name}")
+    _refresh_list(cursor, driver)
 
 
 # --- Database user mapping ---
@@ -462,6 +489,7 @@ def _add_mapping(cursor, driver, args):
         cursor.execute(sql)
         _commit(cursor)
     envelope.info(f"Mapped {login} into {database}")
+    _refresh_mappings(cursor, driver, login)
 
 
 def _mapping_roles_form(cursor, driver, args):
@@ -536,6 +564,7 @@ def _set_mapping_roles(cursor, driver, args):
         cursor.execute(sql)
         _commit(cursor)
     envelope.info(f"Updated roles for {username} in {database}")
+    _refresh_mappings(cursor, driver, (opts.get("login") or username))
 
 
 def _remove_mapping(cursor, driver, args):
@@ -555,3 +584,4 @@ def _remove_mapping(cursor, driver, args):
         cursor.execute(sql)
         _commit(cursor)
     envelope.info(f"Removed {login} from {database}")
+    _refresh_mappings(cursor, driver, login)

@@ -3061,6 +3061,14 @@ rebuilds the form.")
                               (alist-get 'package_name context))
                          (format ":admin ssis executions %s"
                                  (alist-get 'package_name context)))
+                        ((and (equal sub "files")
+                              (alist-get 'database context))
+                         (format ":admin-action databases files %s"
+                                 (alist-get 'database context)))
+                        ((and (equal sub "user-mappings")
+                              (alist-get 'login context))
+                         (format ":admin-action security mappings %s"
+                                 (alist-get 'login context)))
                         (t (format ":admin %s" panel))))
                    (format ":admin %s" panel))))
         (sql-datum--admin-send-command cmd)))))
