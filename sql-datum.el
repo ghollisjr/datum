@@ -1491,7 +1491,7 @@ SQLI-BUF is the originating SQLi buffer."
     (define-key map "K" #'sql-datum-admin-database-backups)
     ;; Schema panel
     (define-key map "T" #'sql-datum-admin-schema-tables)
-    (define-key map "R" #'sql-datum-admin-restore-or-rename)
+    (define-key map "R" #'sql-datum-admin-restore)
     ;; Security panel: database user mappings
     (define-key map "U" #'sql-datum-admin-user-mappings)
     ;; Query text (activity panel)
@@ -1931,29 +1931,6 @@ Returns a list of strings by parsing the current line against column widths."
                (json-serialize `((schema . ,schema) (table . ,table)))
                'utf-8)
               t)))))
-
-(defun sql-datum-admin-rename-column ()
-  "Rename a column of the table at point."
-  (interactive)
-  (let ((schema (alist-get 'schema sql-datum--admin-context))
-        (table (sql-datum--admin-row-id-at-point)))
-    (unless (and schema table) (user-error "No table at point"))
-    (sql-datum--admin-send-command
-     (format ":admin-action schema rename-column %s"
-             (base64-encode-string
-              (encode-coding-string
-               (json-serialize `((schema . ,schema) (table . ,table)))
-               'utf-8)
-              t)))))
-
-(defun sql-datum-admin-restore-or-rename ()
-  "Rename a column in the tables view, or restore in the backups view.
-`R' means restore where backups are listed and rename where tables are."
-  (interactive)
-  (if (and (equal sql-datum--admin-panel-name "schema")
-           (equal (sql-datum--admin-sub-panel) "tables"))
-      (sql-datum-admin-rename-column)
-    (sql-datum-admin-restore)))
 
 (defun sql-datum-admin-drop-table ()
   "Drop the table at point."
@@ -2801,11 +2778,27 @@ The legend above a column list is indented by this much so that its
 headings sit over the fields they name.")
 
 (defun sql-datum--form-list-rows (spec values)
-  "Return the rows a list field will be rendered with."
+  "Return the rows a list field will be rendered with.
+
+Where the field tracks identity, each row gains its current name as a
+trailing element, so that after editing it still says what the row was
+called when the form opened."
   (let* ((key (alist-get 'key spec))
          (supplied (and values key (assoc-string key values)))
-         (rows (if supplied (cdr supplied) (alist-get 'default spec))))
-    (append (and (listp rows) rows) nil)))
+         (rows (append (and (listp (if supplied (cdr supplied)
+                                     (alist-get 'default spec)))
+                            (if supplied (cdr supplied)
+                              (alist-get 'default spec)))
+                       nil)))
+    (if (alist-get 'track_identity spec)
+        (mapcar (lambda (row)
+                  (let ((row (append row nil)))
+                    ;; Already carrying one — a form being rebuilt.
+                    (if (> (length row) (length (alist-get 'item spec)))
+                        row
+                      (append row (list (or (car row) ""))))))
+                rows)
+      rows)))
 
 (defun sql-datum--form-list-widths (item &optional rows)
   "Return the rendered width of each sub-field in ITEM.
@@ -2900,7 +2893,7 @@ a form rebuilt after browsing for a path comes back as the user left it."
        ;; so would tick every checkbox it reaches.
        :value (mapcar (lambda (row)
                         (mapcar (lambda (v) (if (eq v :false) nil v)) row))
-                      (append (and (listp default) default) nil))
+                      (sql-datum--form-list-rows spec values))
        (append
         '(group :format "%v\n")
         (cl-mapcar
@@ -2935,31 +2928,14 @@ a form rebuilt after browsing for a path comes back as the user left it."
          (alist-get 'item spec)
          (sql-datum--form-list-widths
           (alist-get 'item spec)
-          (sql-datum--form-list-rows spec values))))))
-     ((equal type "list")
-      ;; A repeating group: [INS] and [DEL] add and remove rows, and
-      ;; `widget-value' yields a list of rows.
-      (widget-create
-       'editable-list
-       :format "%v%i\n"
-       :value (append (and (listp default) default) nil)
-       (append
-        '(group :format "%v\n")
-        (mapcar (lambda (col)
-                  (let ((ctype (or (alist-get 'type col) "string")))
-                    (cond
-                     ((equal ctype "bool") '(checkbox :format "%[%v%] "))
-                     ((equal ctype "choice")
-                      (append
-                       (list 'menu-choice :format "%[%v%] ")
-                       (mapcar (lambda (c)
-                                 (list 'item :format "%t"
-                                       :tag (nth 1 c) :value (nth 0 c)))
-                               (alist-get 'choices col))))
-                     (t (list 'editable-field
-                              :size (or (alist-get 'size col) 14)
-                              :format "%v ")))))
-                (alist-get 'item spec)))))
+          (sql-datum--form-list-rows spec values)))
+        ;; When the rows stand for things that already exist, each
+        ;; carries what it was called when the form opened.  It renders
+        ;; as nothing and navigation steps over it, but it is what lets
+        ;; an edited name be told from a row deleted and another
+        ;; inserted: a new row's is empty.
+        (when (alist-get 'track_identity spec)
+          '((string :format ""))))))
      ((equal type "multi")
       ;; A checklist: `widget-value' yields the list of ticked values.
       (apply #'widget-create 'checklist

@@ -449,12 +449,24 @@ class BaseDriver(ABC):
         raise NotImplementedError(
             f"Renaming a column is not supported on {self.dialect_name}")
 
-    def _diff_columns(self, opts, current):
-        """Return (added, dropped, changed) comparing rows by name.
+    # Where the submitted rows carry it, this element says what the row
+    # was called when the form opened.
+    _IDENTITY_INDEX = 5
 
-        A rename cannot be told from a drop plus an add by looking at
-        names alone, so it is reported as both; the caller is expected to
-        show the plan before running it.
+    def _original_name(self, row):
+        """Return what ROW was called when the form opened, if it says."""
+        if row is not None and len(row) > self._IDENTITY_INDEX:
+            return str(row[self._IDENTITY_INDEX] or "").strip()
+        return ""
+
+    def _diff_columns(self, opts, current):
+        """Return (added, dropped, changed, renamed) for the column rows.
+
+        Rows submitted from the editor carry what they were called when
+        it opened, so editing a name is a rename — the column and its
+        data stay — while deleting a row and inserting another is a drop
+        and an add.  Rows without that marker are matched by name alone,
+        which is what the create form and a scripted call send.
         """
         def keyed(rows):
             out = {}
@@ -463,14 +475,37 @@ class BaseDriver(ABC):
                     out[str(row[0]).strip()] = row
             return out
 
-        want, have = keyed(opts.get("columns")), keyed(current)
-        added = [want[n] for n in want if n not in have]
-        dropped = [have[n] for n in have if n not in want]
-        changed = []
-        for name, row in want.items():
-            if name not in have:
+        submitted = [row for row in (opts.get("columns") or [])
+                     if row and str(row[0] or "").strip()]
+        have = keyed(current)
+        tracked = any(self._original_name(row) for row in submitted)
+
+        renamed, added, changed = [], [], []
+        claimed = set()
+        if tracked:
+            for row in submitted:
+                name = str(row[0]).strip()
+                origin = self._original_name(row)
+                if not origin or origin not in have:
+                    # Inserted, or its original is gone: a new column.
+                    added.append(row)
+                    continue
+                claimed.add(origin)
+                if origin != name:
+                    renamed.append((origin, row))
+            dropped = [have[n] for n in have if n not in claimed]
+        else:
+            want = keyed(submitted)
+            added = [want[n] for n in want if n not in have]
+            dropped = [have[n] for n in have if n not in want]
+            claimed = {n for n in want if n in have}
+
+        for row in submitted:
+            name = str(row[0]).strip()
+            origin = self._original_name(row) if tracked else name
+            if not origin or origin not in have:
                 continue
-            before = have[name]
+            before = have[origin]
             if (str(row[1]) != str(before[1])
                     or bool(row[2]) != bool(before[2])
                     or bool(row[3]) != bool(before[3])
@@ -478,7 +513,7 @@ class BaseDriver(ABC):
                         row[4] if len(row) > 4 else "",
                         before[4] if len(before) > 4 else "")):
                 changed.append((before, row))
-        return added, dropped, changed
+        return added, dropped, changed, renamed
 
     @staticmethod
     def _same_default(left, right):

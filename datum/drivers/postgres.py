@@ -422,8 +422,15 @@ class PostgreSQLDriver(BaseDriver):
     def sql_alter_table(self, schema, table, opts, current):
         qualified = (f"{self.quote_ddl_identifier(schema)}."
                      f"{self.quote_ddl_identifier(table)}")
-        added, dropped, changed = self._diff_columns(opts, current)
+        added, dropped, changed, renamed = self._diff_columns(
+            opts, current)
         stmts = []
+
+        # Renames go first so everything after them addresses the
+        # column by the name it now has.
+        for origin, row in renamed:
+            stmts.extend(self.sql_rename_column(schema, table, origin,
+                                                str(row[0]).strip()))
 
         for row in added:
             name = self.validate_identifier(str(row[0]).strip())
