@@ -1488,6 +1488,8 @@ SQLI-BUF is the originating SQLi buffer."
     ;; Databases panel: file management and backups
     (define-key map "F" #'sql-datum-admin-database-files)
     (define-key map "K" #'sql-datum-admin-database-backups)
+    ;; Schema panel
+    (define-key map "T" #'sql-datum-admin-schema-tables)
     (define-key map "R" #'sql-datum-admin-restore)
     ;; Security panel: database user mappings
     (define-key map "U" #'sql-datum-admin-user-mappings)
@@ -1819,6 +1821,8 @@ Returns a list of strings by parsing the current line against column widths."
     (_ (pcase (cons sql-datum--admin-panel-name (sql-datum--admin-sub-panel))
          ('("databases" . "files")       (sql-datum-admin-new-file))
          ('("databases" . "backups")     (sql-datum-admin-new-backup))
+         ('("schema" . "tables")         (sql-datum-admin-new-table))
+         (`("schema" . ,_)               (sql-datum-admin-new-schema))
          (`("databases" . ,_)            (sql-datum-admin-new-database))
          ('("security" . "user-mappings") (sql-datum-admin-new-mapping))
          (`("security" . ,_)             (sql-datum-admin-new-principal))
@@ -1833,6 +1837,8 @@ Returns a list of strings by parsing the current line against column widths."
     (_ (pcase (cons sql-datum--admin-panel-name (sql-datum--admin-sub-panel))
          ('("databases" . "files")        (sql-datum-admin-remove-file))
          (`("databases" . ,_)             (sql-datum-admin-drop-database))
+         ('("schema" . "tables")          (sql-datum-admin-drop-table))
+         (`("schema" . ,_)                (sql-datum-admin-drop-schema))
          ('("security" . "user-mappings") (sql-datum-admin-remove-mapping))
          (`("security" . ,_)              (sql-datum-admin-drop-principal))
          (_ (user-error "No deletable item at point"))))))
@@ -1879,6 +1885,51 @@ Returns a list of strings by parsing the current line against column widths."
     (setq sql-datum--admin-display-request "databases")
     (sql-datum--admin-send-command
      (format ":admin-action databases files %s" name))))
+
+(defun sql-datum-admin-schema-tables ()
+  "Show the tables in the schema at point."
+  (interactive)
+  (let ((name (sql-datum--admin-row-id-at-point)))
+    (unless name (user-error "No schema at point"))
+    (setq sql-datum--admin-display-request "schema")
+    (sql-datum--admin-send-command
+     (format ":admin-action schema tables %s" name))))
+
+(defun sql-datum-admin-new-schema ()
+  "Create a schema in the current database."
+  (interactive)
+  (sql-datum--admin-send-command ":admin-action schema new-schema"))
+
+(defun sql-datum-admin-drop-schema ()
+  "Drop the schema at point."
+  (interactive)
+  (let ((name (sql-datum--admin-row-id-at-point)))
+    (unless name (user-error "No schema at point"))
+    (sql-datum--admin-send-command
+     (format ":admin-action schema drop-schema %s" name))))
+
+(defun sql-datum-admin-new-table ()
+  "Create a table in the schema whose tables are listed."
+  (interactive)
+  (let ((schema (alist-get 'schema sql-datum--admin-context)))
+    (unless schema (user-error "No schema context available"))
+    (sql-datum--admin-send-command
+     (format ":admin-action schema new-table %s" schema))))
+
+(defun sql-datum-admin-drop-table ()
+  "Drop the table at point."
+  (interactive)
+  (let ((schema (alist-get 'schema sql-datum--admin-context))
+        (table (sql-datum--admin-row-id-at-point)))
+    (unless (and schema table) (user-error "No table at point"))
+    (when (yes-or-no-p (format "Drop table %s.%s? " schema table))
+      (sql-datum--admin-send-command
+       (format ":admin-action schema drop-table %s"
+               (base64-encode-string
+                (encode-coding-string
+                 (json-serialize `((schema . ,schema) (table . ,table)))
+                 'utf-8)
+                t))))))
 
 (defun sql-datum-admin-database-backups ()
   "Show the backup history of the database at point."
@@ -2675,6 +2726,17 @@ typing outside a field silently corrupts the form layout."
      ;; `json-serialize' reads a plain list as an alist, so a multi-select
      ;; has to become a vector to come out as a JSON array.
      ((equal type "multi") (vconcat (and (listp raw) raw)))
+     ;; A repeating group is a list of rows, and both levels have to be
+     ;; vectors to serialise as nested JSON arrays.  An unticked checkbox
+     ;; reads as nil, which would serialise as null rather than false.
+     ((equal type "list")
+      (vconcat (mapcar (lambda (row)
+                         (vconcat (mapcar (lambda (v)
+                                            (cond ((eq v t) t)
+                                                  ((null v) :false)
+                                                  (t v)))
+                                          row)))
+                       (and (listp raw) raw))))
      ;; A password is taken exactly as typed: trimming would silently
      ;; change a credential that legitimately has leading or trailing
      ;; whitespace.
@@ -2717,6 +2779,58 @@ a form rebuilt after browsing for a path comes back as the user left it."
                      :secret ?*
                      :keymap sql-datum--form-field-keymap
                      :value (format "%s" (or default ""))))
+     ((equal type "list")
+      ;; A repeating group: [INS] and [DEL] add and remove rows, and
+      ;; `widget-value' yields a list of rows.
+      (widget-create
+       'editable-list
+       :format "%v%i\n"
+       ;; JSON false parses to `:false', which is a non-nil keyword and
+       ;; so would tick every checkbox it reaches.
+       :value (mapcar (lambda (row)
+                        (mapcar (lambda (v) (if (eq v :false) nil v)) row))
+                      (append (and (listp default) default) nil))
+       (append
+        '(group :format "%v\n")
+        (mapcar (lambda (col)
+                  (let ((ctype (or (alist-get 'type col) "string")))
+                    (cond
+                     ((equal ctype "bool") '(checkbox :format "%[%v%] "))
+                     ((equal ctype "choice")
+                      (append
+                       (list 'menu-choice :format "%[%v%] ")
+                       (mapcar (lambda (c)
+                                 (list 'item :format "%t"
+                                       :tag (nth 1 c) :value (nth 0 c)))
+                               (alist-get 'choices col))))
+                     (t (list 'editable-field
+                              :size (or (alist-get 'size col) 14)
+                              :format "%v ")))))
+                (alist-get 'item spec)))))
+     ((equal type "list")
+      ;; A repeating group: [INS] and [DEL] add and remove rows, and
+      ;; `widget-value' yields a list of rows.
+      (widget-create
+       'editable-list
+       :format "%v%i\n"
+       :value (append (and (listp default) default) nil)
+       (append
+        '(group :format "%v\n")
+        (mapcar (lambda (col)
+                  (let ((ctype (or (alist-get 'type col) "string")))
+                    (cond
+                     ((equal ctype "bool") '(checkbox :format "%[%v%] "))
+                     ((equal ctype "choice")
+                      (append
+                       (list 'menu-choice :format "%[%v%] ")
+                       (mapcar (lambda (c)
+                                 (list 'item :format "%t"
+                                       :tag (nth 1 c) :value (nth 0 c)))
+                               (alist-get 'choices col))))
+                     (t (list 'editable-field
+                              :size (or (alist-get 'size col) 14)
+                              :format "%v ")))))
+                (alist-get 'item spec)))))
      ((equal type "multi")
       ;; A checklist: `widget-value' yields the list of ticked values.
       (apply #'widget-create 'checklist
@@ -5079,7 +5193,8 @@ With a prefix argument, prompt for a filter pattern."
 With a prefix argument, prompts for the panel name."
   (interactive
    (list (completing-read "Admin panel: "
-                          '("activity" "databases" "jobs" "security" "ssis")
+                          '("activity" "databases" "jobs" "schema"
+                            "security" "ssis")
                           nil t)))
   (setq sql-datum--admin-display-request panel)
   (sql-datum--send-command (format ":admin %s" panel) t))

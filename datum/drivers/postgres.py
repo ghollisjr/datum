@@ -239,6 +239,115 @@ class PostgreSQLDriver(BaseDriver):
     def safe_fallback_database(self):
         return "postgres"
 
+    # --- Schemas and tables ---
+
+    supports_schema_ddl = True
+
+    def column_types(self):
+        return [[t, t] for t in (
+            "INTEGER", "SERIAL", "BIGINT", "BIGSERIAL", "SMALLINT",
+            "BOOLEAN", "NUMERIC(18,2)", "REAL", "DOUBLE PRECISION",
+            "DATE", "TIMESTAMP", "TIMESTAMPTZ", "TIME", "INTERVAL",
+            "TEXT", "VARCHAR(50)", "VARCHAR(255)", "CHAR(1)",
+            "UUID", "JSONB", "BYTEA", "INET")]
+
+    def list_schemas_detail(self, cursor):
+        cursor.execute(r"""
+            SELECT n.nspname,
+                   pg_get_userbyid(n.nspowner),
+                   (SELECT count(*)::text FROM pg_class c
+                     WHERE c.relnamespace = n.oid
+                       AND c.relkind IN ('r', 'p'))
+            FROM pg_namespace n
+            WHERE n.nspname NOT LIKE 'pg\_%'
+              AND n.nspname <> 'information_schema'
+            ORDER BY n.nspname
+        """)
+        return (["Schema", "Owner", "Tables"],
+                [[str(v) if v is not None else "" for v in row]
+                 for row in cursor.fetchall()])
+
+    def schema_options(self, cursor, current=None):
+        roles = self._lookup(cursor, r"""
+            SELECT rolname FROM pg_roles
+            WHERE rolname NOT LIKE 'pg\_%' ORDER BY rolname
+        """)
+        return [
+            {"key": "name", "label": "Schema Name", "type": "string",
+             "default": "", "required": True},
+            {"key": "owner", "label": "Owner",
+             "type": "choice" if roles else "string",
+             "default": "",
+             "choices": ([["", "(current role)"]] + [[r, r] for r in roles]
+                         if roles else None)},
+        ]
+
+    def sql_create_schema(self, opts):
+        name = self.quote_ddl_identifier(opts.get("name", ""))
+        owner = (opts.get("owner") or "").strip()
+        sql = f"CREATE SCHEMA {name}"
+        if owner:
+            sql += f" AUTHORIZATION {self.quote_ddl_identifier(owner)}"
+        return [sql]
+
+    def sql_drop_schema(self, name, cascade=False):
+        sql = f"DROP SCHEMA {self.quote_ddl_identifier(name)}"
+        # CASCADE also drops everything the schema contains, so it is
+        # only ever used when asked for explicitly.
+        return [sql + " CASCADE" if cascade else sql]
+
+    def list_tables_detail(self, cursor, schema):
+        cursor.execute("""
+            SELECT c.relname,
+                   CASE WHEN c.reltuples < 0 THEN 'unknown'
+                        ELSE c.reltuples::bigint::text END,
+                   pg_size_pretty(pg_total_relation_size(c.oid)),
+                   pg_get_userbyid(c.relowner)
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = ? AND c.relkind IN ('r', 'p')
+            ORDER BY c.relname
+        """, [schema])
+        return (["Table", "Rows (est)", "Size", "Owner"],
+                [[str(v) if v is not None else "" for v in row]
+                 for row in cursor.fetchall()])
+
+    def table_options(self, cursor, schema):
+        return [
+            {"key": "name", "label": "Table Name", "type": "string",
+             "default": "", "required": True},
+            {"key": "columns", "label": "Columns", "type": "list",
+             "default": [["id", "BIGSERIAL", False, True, ""]],
+             "item": [
+                 {"key": "name", "label": "Name", "type": "string",
+                  "size": 18},
+                 {"key": "type", "label": "Type", "type": "choice",
+                  "choices": self.column_types()},
+                 {"key": "nullable", "label": "Null", "type": "bool"},
+                 {"key": "primary_key", "label": "PK", "type": "bool"},
+                 {"key": "default", "label": "Default", "type": "string",
+                  "size": 12},
+             ],
+             "help": "name, type, nullable, primary key, default"},
+        ]
+
+    def sql_create_table(self, schema, opts):
+        name = opts.get("name", "")
+        qualified = (f"{self.quote_ddl_identifier(schema)}."
+                     f"{self.quote_ddl_identifier(name)}")
+        clauses, primary = self._column_clauses(opts)
+        if primary:
+            keys = ", ".join(self.quote_ddl_identifier(k) for k in primary)
+            clauses.append(
+                f"CONSTRAINT {self.quote_ddl_identifier('pk_' + name)} "
+                f"PRIMARY KEY ({keys})")
+        return [f"CREATE TABLE {qualified} (\n  "
+                + ",\n  ".join(clauses) + "\n)"]
+
+    def sql_drop_table(self, schema, name):
+        return [f"DROP TABLE {self.quote_ddl_identifier(schema)}."
+                f"{self.quote_ddl_identifier(name)}"]
+
     # --- Roles ---
     #
     # PostgreSQL has no separate login and user: a role that may log in

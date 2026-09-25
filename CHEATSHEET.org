@@ -54,7 +54,7 @@ directly.
 | =C-c s R= | List routines (=C-u= to filter with LIKE)  |
 | =C-c s v= | Server version                           |
 | =C-c s u= | Current user                             |
-| =C-c s a= | Admin panel (activity, databases, jobs, security, ssis) |
+| =C-c s a= | Admin panel (activity, databases, jobs, schema, security, ssis) |
 | =C-c s w= | Copy last result to kill ring (org table)  |
 | =C-c s f= | Refresh introspection (+ cross-db caches) |
 | =C-c s F= | Toggle periodic auto-refresh (=C-u N= for interval) |
@@ -136,7 +136,7 @@ Respects =:chars= for column width. Timestamp shows last refresh.
 Panels for server administration.  The available keys are shown in each
 panel's header line, which stays visible as the contents scroll.
 
-Panels: =activity=, =databases=, =jobs=, =security=, =ssis=
+Panels: =activity=, =databases=, =jobs=, =schema=, =security=, =ssis=
 
 ** Common to every panel
 
@@ -194,6 +194,25 @@ Backups view (=K=, MSSQL):
 
 In the detail view =E= / =N= / =D= act on the section point is in —
 steps or schedules.
+
+** Schema panel
+
+| Key | Action                |
+|-----+-----------------------|
+| =N= | New schema            |
+| =T= | Tables in this schema |
+| =D= | Drop schema           |
+
+Tables view (=T=):
+
+| Key | Action              |
+|-----+---------------------|
+| =N= | New table (builder) |
+| =D= | Drop table          |
+
+The builder takes columns as a list — name, type, nullable, primary key,
+default — with =[INS]= / =[DEL]= to add and remove rows.  Types are per
+dialect.
 
 ** Security panel
 

@@ -486,7 +486,7 @@ dialect-aware: they use =TOP= / =NEWID()= / =OBJECT_ID()= on MSSQL and
 | =C-c s R= | =sql-datum-routines=     | List routines (=C-u= to filter with LIKE)                  |
 | =C-c s v= | =sql-datum-version=      | Show server version                                        |
 | =C-c s u= | =sql-datum-user=         | Show current user                                          |
-| =C-c s a= | =sql-datum-admin=        | Open admin panel (activity, databases, jobs, security, ssis) |
+| =C-c s a= | =sql-datum-admin=        | Open admin panel (activity, databases, jobs, schema, security, ssis) |
 | =C-c s f= | =sql-datum-refresh=      | Refresh introspection data (including cross-db caches)     |
 | =C-c s w= | =sql-datum-copy-last-result= | Copy last result to kill ring (already org table format)    |
 | =C-c s F= | =sql-datum-toggle-auto-refresh= | Toggle periodic introspection refresh (=C-u N= for interval) |
@@ -718,6 +718,7 @@ Admin panels provide interactive views for server administration.  Press
 - =activity=  — Active sessions and queries (MSSQL, PostgreSQL)
 - =databases= — Create, alter, drop databases; manage files, backup/restore (MSSQL, PostgreSQL)
 - =jobs=      — SQL Agent jobs, steps, schedules, history (MSSQL)
+- =schema=    — Schemas and tables of the current database (MSSQL, PostgreSQL)
 - =security=  — Logins, roles, database users (MSSQL, PostgreSQL)
 - =ssis=      — SSIS packages (MSSQL)
 
@@ -841,6 +842,41 @@ executing, last run result and next run time.  Executing jobs sort first.
 In the detail view, =E=, =N= and =D= act on whichever section point is
 in — editing a step opens the step editor, editing a schedule opens the
 schedule editor.
+
+*** Schema panel
+
+Works inside whichever database the session is connected to, so =:use=
+changes what it shows.  Lists the schemas of that database with their
+owner and table count.
+
+| Key | Action                        |
+|-----+-------------------------------|
+| =N= | New schema                    |
+| =T= | Tables in this schema         |
+| =D= | Drop schema (confirmation)    |
+
+Dropping reports how many tables the schema holds.  PostgreSQL offers a
+cascade that drops them too; SQL Server has none, so its objects must be
+dropped or moved first, and the confirmation says so.
+
+**** Tables (=T=)
+
+| Key | Action                    |
+|-----+---------------------------|
+| =N= | New table (builder)       |
+| =D= | Drop table                |
+
+The table builder takes a list of columns — name, type, nullable,
+primary key and default — with =[INS]= and =[DEL]= to add and remove
+rows.  Types are offered per dialect, so =INT IDENTITY(1,1)= appears on
+MSSQL and =BIGSERIAL= on PostgreSQL.  Ticking primary key on more than
+one column produces a composite key.
+
+A default is an expression rather than a literal, so it can be neither
+quoted nor parameterised.  Only a number, a quoted string, or a bare
+word optionally called as a zero-argument function — =0=, ='n/a'=,
+=NULL=, =GETDATE()= — are accepted; anything else is refused rather than
+interpolated.
 
 *** Security panel
 

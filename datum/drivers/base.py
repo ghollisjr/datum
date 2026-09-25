@@ -11,6 +11,8 @@ supported by most modern databases, but some queries may not work on all
 platforms.
 """
 
+import re
+
 from abc import ABC, abstractmethod
 
 
@@ -377,6 +379,105 @@ class BaseDriver(ABC):
         """Return statements removing LOGIN as a user of DATABASE."""
         raise NotImplementedError(
             f"User mapping is not supported on {self.dialect_name}")
+
+    # --- Schemas and tables ---
+
+    supports_schema_ddl = False
+
+    # Column types offered by the table builder, as [value, label] pairs.
+    def column_types(self):
+        return []
+
+    def list_schemas_detail(self, cursor):
+        """Return (headers, rows) describing the schemas of this database."""
+        return [], []
+
+    def schema_options(self, cursor, current=None):
+        """Field descriptors for creating a schema."""
+        return []
+
+    def sql_create_schema(self, opts):
+        """Return statements creating a schema."""
+        raise NotImplementedError(
+            f"Schema DDL is not supported on {self.dialect_name}")
+
+    def sql_drop_schema(self, name, cascade=False):
+        """Return statements dropping a schema."""
+        raise NotImplementedError(
+            f"Schema DDL is not supported on {self.dialect_name}")
+
+    def list_tables_detail(self, cursor, schema):
+        """Return (headers, rows) describing the tables in SCHEMA."""
+        return [], []
+
+    def table_options(self, cursor, schema):
+        """Field descriptors for the table builder."""
+        return []
+
+    def sql_create_table(self, schema, opts):
+        """Return statements creating a table."""
+        raise NotImplementedError(
+            f"Table DDL is not supported on {self.dialect_name}")
+
+    def sql_drop_table(self, schema, name):
+        """Return statements dropping a table."""
+        raise NotImplementedError(
+            f"Table DDL is not supported on {self.dialect_name}")
+
+    # A DEFAULT is an expression rather than a literal, so it cannot be
+    # quoted like one — a bare 0 and GETDATE() both have to pass through
+    # unquoted.  It also cannot be parameterised, so only these shapes
+    # are accepted: a number, a quoted string, or a bare word optionally
+    # called as a zero-argument function.  Anything else is refused
+    # rather than interpolated.
+    _SAFE_DEFAULT = re.compile(
+        r"""^(?:
+              -?\d+(?:\.\d+)?          # 42, -1, 3.14
+            | '(?:[^']|'')*'           # 'text', with '' escapes
+            | [A-Za-z_][A-Za-z0-9_]*   # NULL, TRUE, CURRENT_TIMESTAMP
+              (?:\s*\(\s*\))?          #   optionally GETDATE(), now()
+            )$""",
+        re.VERBOSE)
+
+    def validate_default(self, expression):
+        """Return EXPRESSION if it is safe to embed as a column DEFAULT."""
+        text = (expression or "").strip()
+        if not self._SAFE_DEFAULT.match(text):
+            raise ValueError(
+                f"unsupported DEFAULT expression: {text!r}. Use a number, a "
+                f"quoted string, or a bare word such as NULL or GETDATE()")
+        return text
+
+    def _column_clauses(self, opts):
+        """Turn the builder's column rows into (clauses, primary_keys).
+
+        Each row is [name, type, nullable, primary_key, default].
+        """
+        clauses, primary = [], []
+        for row in opts.get("columns") or []:
+            if not row or not str(row[0] or "").strip():
+                continue
+            name = self.validate_identifier(str(row[0]).strip())
+            sql_type = str(row[1] or "").strip()
+            if not sql_type:
+                raise ValueError(f"column {name} has no type")
+            if sql_type not in {t[0] for t in self.column_types()}:
+                raise ValueError(f"column {name} has an unknown type: "
+                                 f"{sql_type}")
+            nullable = bool(row[2]) if len(row) > 2 else True
+            is_key = bool(row[3]) if len(row) > 3 else False
+            default = str(row[4] or "").strip() if len(row) > 4 else ""
+
+            clause = (f"{self.quote_ddl_identifier(name)} {sql_type}"
+                      f"{'' if nullable else ' NOT NULL'}")
+            if default:
+                clause += f" DEFAULT {self.validate_default(default)}"
+            clauses.append(clause)
+            if is_key:
+                primary.append(name)
+        if not clauses:
+            raise ValueError("a table needs at least one column")
+        return clauses, primary
 
     # --- Backup and restore ---
     #

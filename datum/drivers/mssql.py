@@ -1017,6 +1017,122 @@ class MSSQLDriver(BaseDriver):
         return [self._in_database(
             database, f"DROP USER {self.quote_ddl_identifier(login)}")]
 
+    # --- Schemas and tables ---
+
+    supports_schema_ddl = True
+
+    def column_types(self):
+        return [[t, t] for t in (
+            "INT", "INT IDENTITY(1,1)", "BIGINT", "BIGINT IDENTITY(1,1)",
+            "SMALLINT", "TINYINT", "BIT",
+            "DECIMAL(18,2)", "MONEY", "FLOAT", "REAL",
+            "DATE", "DATETIME2", "DATETIMEOFFSET", "TIME",
+            "NVARCHAR(50)", "NVARCHAR(255)", "NVARCHAR(MAX)",
+            "VARCHAR(50)", "VARCHAR(255)", "VARCHAR(MAX)",
+            "CHAR(1)", "UNIQUEIDENTIFIER", "VARBINARY(MAX)", "XML")]
+
+    def list_schemas_detail(self, cursor):
+        cursor.execute("""
+            SELECT s.name,
+                   ISNULL(p.name, ''),
+                   CAST(COUNT(t.object_id) AS VARCHAR)
+            FROM sys.schemas s
+            LEFT JOIN sys.database_principals p
+              ON p.principal_id = s.principal_id
+            LEFT JOIN sys.tables t ON t.schema_id = s.schema_id
+            WHERE s.name NOT IN ('sys', 'INFORMATION_SCHEMA')
+              AND s.name NOT LIKE 'db[_]%'
+            GROUP BY s.name, p.name
+            ORDER BY s.name
+        """)
+        return (["Schema", "Owner", "Tables"],
+                [[str(v) if v is not None else "" for v in row]
+                 for row in cursor.fetchall()])
+
+    def schema_options(self, cursor, current=None):
+        owners = self._lookup(
+            cursor, "SELECT name FROM sys.database_principals "
+                    "WHERE type IN ('S','U','G','R') AND principal_id > 0 "
+                    "ORDER BY name")
+        return [
+            {"key": "name", "label": "Schema Name", "type": "string",
+             "default": "", "required": True},
+            {"key": "owner", "label": "Owner",
+             "type": "choice" if owners else "string",
+             "default": "dbo",
+             "choices": [[o, o] for o in owners] if owners else None},
+        ]
+
+    def sql_create_schema(self, opts):
+        name = self.quote_ddl_identifier(opts.get("name", ""))
+        owner = (opts.get("owner") or "").strip()
+        sql = f"CREATE SCHEMA {name}"
+        if owner:
+            sql += f" AUTHORIZATION {self.quote_ddl_identifier(owner)}"
+        return [sql]
+
+    def sql_drop_schema(self, name, cascade=False):
+        # SQL Server has no CASCADE: a schema holding objects must be
+        # emptied first, which is the user's decision to make.
+        return [f"DROP SCHEMA {self.quote_ddl_identifier(name)}"]
+
+    def list_tables_detail(self, cursor, schema):
+        cursor.execute("""
+            SELECT t.name,
+                   CAST(ISNULL(SUM(p.rows), 0) AS VARCHAR),
+                   CAST(CAST(ISNULL(SUM(a.total_pages), 0) * 8 / 1024.0
+                             AS DECIMAL(18,1)) AS VARCHAR),
+                   CONVERT(VARCHAR(19), t.create_date, 120)
+            FROM sys.tables t
+            JOIN sys.schemas s ON s.schema_id = t.schema_id
+            LEFT JOIN sys.partitions p
+              ON p.object_id = t.object_id AND p.index_id IN (0, 1)
+            LEFT JOIN sys.allocation_units a
+              ON a.container_id = p.partition_id
+            WHERE s.name = ?
+            GROUP BY t.name, t.create_date
+            ORDER BY t.name
+        """, [schema])
+        return (["Table", "Rows", "Size MB", "Created"],
+                [[str(v) if v is not None else "" for v in row]
+                 for row in cursor.fetchall()])
+
+    def table_options(self, cursor, schema):
+        return [
+            {"key": "name", "label": "Table Name", "type": "string",
+             "default": "", "required": True},
+            {"key": "columns", "label": "Columns", "type": "list",
+             "default": [["id", "INT IDENTITY(1,1)", False, True, ""]],
+             "item": [
+                 {"key": "name", "label": "Name", "type": "string",
+                  "size": 18},
+                 {"key": "type", "label": "Type", "type": "choice",
+                  "choices": self.column_types()},
+                 {"key": "nullable", "label": "Null", "type": "bool"},
+                 {"key": "primary_key", "label": "PK", "type": "bool"},
+                 {"key": "default", "label": "Default", "type": "string",
+                  "size": 12},
+             ],
+             "help": "name, type, nullable, primary key, default"},
+        ]
+
+    def sql_create_table(self, schema, opts):
+        name = opts.get("name", "")
+        qualified = (f"{self.quote_ddl_identifier(schema)}."
+                     f"{self.quote_ddl_identifier(name)}")
+        clauses, primary = self._column_clauses(opts)
+        if primary:
+            keys = ", ".join(self.quote_ddl_identifier(k) for k in primary)
+            clauses.append(
+                f"CONSTRAINT {self.quote_ddl_identifier('PK_' + name)} "
+                f"PRIMARY KEY ({keys})")
+        return [f"CREATE TABLE {qualified} (\n  "
+                + ",\n  ".join(clauses) + "\n)"]
+
+    def sql_drop_table(self, schema, name):
+        return [f"DROP TABLE {self.quote_ddl_identifier(schema)}."
+                f"{self.quote_ddl_identifier(name)}"]
+
     # --- Backup and restore ---
 
     supports_backup = True
