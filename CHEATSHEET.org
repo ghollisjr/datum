@@ -254,6 +254,7 @@ Database users view (=U=):
 | =TAB= / =S-TAB= | Next / previous field              |
 | up / down       | Next / previous field              |
 | =RET=           | Open a menu, press a button        |
+| =SPC=           | Toggle the checkbox at point       |
 | =TAB=           | Complete the field, else next one  |
 | =M-TAB=         | Complete the field (where offered) |
 | =C-c C-f=       | Browse the server for a path       |

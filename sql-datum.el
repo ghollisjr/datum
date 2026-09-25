@@ -48,6 +48,7 @@
 (declare-function widget-backward "wid-edit" (arg))
 (declare-function widget-field-at "wid-edit" (pos))
 (declare-function widget-at        "wid-edit" (&optional pos))
+(declare-function widget-button-press "wid-edit" (pos &optional event))
 (declare-function widget-field-start "wid-edit" (widget))
 (declare-function widget-field-end   "wid-edit" (widget))
 
@@ -2346,7 +2347,7 @@ SQLI-BUF is the originating SQLi buffer."
         ;; Store widgets for submit handler
         (setq-local sql-datum--schedule-widgets widgets)
         (setq-local sql-datum--admin-sqli-buf sqli-buf))
-      (use-local-map widget-keymap)
+      (use-local-map (sql-datum--widget-keymap))
       (widget-setup)
       (goto-char (point-min)))
     (switch-to-buffer buf)))
@@ -2534,7 +2535,7 @@ SQLI-BUF is the originating SQLi buffer."
         (widget-insert "\n")
         (setq-local sql-datum--step-widgets widgets)
         (setq-local sql-datum--admin-sqli-buf sqli-buf))
-      (use-local-map widget-keymap)
+      (use-local-map (sql-datum--widget-keymap))
       (widget-setup)
       (goto-char (point-min)))
     (switch-to-buffer buf)))
@@ -2693,6 +2694,30 @@ rather than fought with."
          (display-completion-list matches)))
       (_ (widget-forward 1)))))
 
+(defun sql-datum--form-has-checkbox-p (fields)
+  "Return non-nil if FIELDS render any checkbox.
+A box can sit in a field of its own or in the columns of a list, as
+the nullable and primary-key boxes of the table builder do."
+  (cl-some (lambda (f)
+             (or (member (alist-get 'type f) '("bool" "multi"))
+                 (cl-some (lambda (col)
+                            (equal (alist-get 'type col) "bool"))
+                          (alist-get 'item f))))
+           fields))
+
+(defun sql-datum-form-toggle ()
+  "Toggle the checkbox at point.
+
+SPC is where the hand already sits when working down a column of
+boxes, and it is what Customize toggles with.  RET still works.
+Anywhere else SPC keeps its usual meaning — which, on the form's
+read-only labels, is to refuse."
+  (interactive)
+  (let ((widget (widget-at (point))))
+    (if (and widget (eq (widget-type widget) 'checkbox))
+        (widget-button-press (point))
+      (call-interactively #'self-insert-command))))
+
 (defun sql-datum--form-widget-at-point ()
   "Return the widget at point, whether it is a field or a button."
   (or (widget-field-at (point)) (widget-at (point))))
@@ -2727,6 +2752,21 @@ widget order."
   "Move to the previous form field."
   (interactive)
   (sql-datum--form-line-move -1))
+
+(defvar sql-datum--widget-keymap nil
+  "`widget-keymap' with SPC toggling a checkbox.")
+
+(defun sql-datum--widget-keymap ()
+  "Return `widget-keymap' with SPC toggling a checkbox.
+The schedule and step editors predate the generic form renderer, but
+their Enabled boxes should answer to the same key as its boxes do."
+  (require 'wid-edit)
+  (or sql-datum--widget-keymap
+      (setq sql-datum--widget-keymap
+            (let ((map (make-sparse-keymap)))
+              (set-keymap-parent map widget-keymap)
+              (define-key map (kbd "SPC") #'sql-datum-form-toggle)
+              map))))
 
 (defun sql-datum--form-make-keymap (parent)
   "Return a keymap with the wizard form bindings layered over PARENT."
@@ -2772,7 +2812,11 @@ widget order."
   (require 'wid-edit)
   (unless sql-datum--form-keymap
     (setq sql-datum--form-keymap
-          (sql-datum--form-make-keymap widget-keymap)))
+          (sql-datum--form-make-keymap widget-keymap))
+    ;; Only here, not on the field maps: inside a text field SPC has to
+    ;; go on typing a space.  Checkboxes carry no keymap of their own,
+    ;; so the buffer's map is what governs at one.
+    (define-key sql-datum--form-keymap (kbd "SPC") #'sql-datum-form-toggle))
   (unless sql-datum--form-field-keymap
     (setq sql-datum--form-field-keymap
           (sql-datum--form-make-keymap widget-field-keymap)))
@@ -3178,6 +3222,8 @@ with `fields', `values', `submit_action', and optional `notes',
                     (sql-datum--admin-header-line
                      nil
                      (append '(("TAB" . "complete / next field"))
+                             (when (sql-datum--form-has-checkbox-p fields)
+                               '(("SPC" . "toggle")))
                              (when (cl-find-if
                                     (lambda (f)
                                       (equal (alist-get 'type f) "path"))

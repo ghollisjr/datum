@@ -952,6 +952,7 @@ library =M-x customize= uses.
 | =TAB= / =S-TAB= | Next / previous field               |
 | up / down       | Next / previous field               |
 | =RET=           | Open a menu or press a button       |
+| =SPC=           | Toggle the checkbox at point        |
 | =TAB=           | Complete the field, else next one   |
 | =M-TAB=         | Complete the field (where offered)  |
 | =C-c C-f=       | Browse the server for a path        |
