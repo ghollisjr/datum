@@ -23,6 +23,12 @@ standalone from any terminal.
 - Custom query templates with placeholders and ODBC parameters
 - Native org-mode table output: query results are valid org tables, ready to yank into any =.org= document
 - Emacs integration: completion-at-point, eldoc parameter signatures, mode line status, keybindings
+- Admin panels for server administration without leaving Emacs:
+  - Sessions and running queries, with the full text of any of them
+  - Databases: create, alter, drop; files and filegroups; backup and restore (MSSQL)
+  - Schemas and tables: a column builder, and altering columns of a table that exists
+  - Logins, roles and database users, with passwords treated as secrets
+  - SQL Agent jobs, steps, schedules and history (MSSQL)
 - Optional Polars backend for faster import/export (falls back to pyarrow or stdlib)
 
 * Installation
@@ -946,8 +952,13 @@ library =M-x customize= uses.
 
 Choice fields render as =Value Menu=, the same control Customize uses.
 Long lookups — MSSQL has over five thousand collations — are completing
-fields driven by =M-TAB= instead.  Labels and help text are read-only, so
+fields driven by =M-TAB= instead.  A password field is masked, and is
+never sent back out once set.  Labels and help text are read-only, so
 typing outside a field cannot corrupt the layout.
+
+Some fields hold a list of rows rather than one value — a table's
+columns, for instance.  =[INS]= adds a row at that point and =[DEL]=
+removes one; the headings above the rows name what each position means.
 
 Where a form has a *Preview SQL* button, it shows the statements that
 would run without running them.

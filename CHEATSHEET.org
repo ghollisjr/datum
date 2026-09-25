@@ -257,6 +257,7 @@ Database users view (=U=):
 | =C-c C-f=       | Browse the server for a path       |
 | =C-c C-c=       | Submit                             |
 | =C-c C-k=       | Cancel                             |
+| =[INS]= / =[DEL]= | Add / remove a row in a list field |
 
 Path browser:
 
