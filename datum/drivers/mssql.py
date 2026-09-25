@@ -1133,6 +1133,144 @@ class MSSQLDriver(BaseDriver):
         return [f"DROP TABLE {self.quote_ddl_identifier(schema)}."
                 f"{self.quote_ddl_identifier(name)}"]
 
+    def list_table_columns(self, cursor, schema, table):
+        cursor.execute("""
+            SELECT c.name, t.name, c.max_length, c.precision, c.scale,
+                   c.is_nullable, c.is_identity,
+                   ISNULL(dc.definition, ''),
+                   CASE WHEN EXISTS (
+                        SELECT 1 FROM sys.index_columns ic
+                        JOIN sys.indexes i
+                          ON i.object_id = ic.object_id
+                         AND i.index_id = ic.index_id
+                        WHERE ic.object_id = c.object_id
+                          AND ic.column_id = c.column_id
+                          AND i.is_primary_key = 1) THEN 1 ELSE 0 END
+            FROM sys.columns c
+            JOIN sys.types t ON t.user_type_id = c.user_type_id
+            LEFT JOIN sys.default_constraints dc
+              ON dc.object_id = c.default_object_id
+            WHERE c.object_id = OBJECT_ID(?)
+            ORDER BY c.column_id
+        """, [f"{schema}.{table}"])
+        rows = []
+        for (name, base, length, precision, scale, nullable, identity,
+             default, is_key) in cursor.fetchall():
+            rows.append([name,
+                         self._format_type(base, length, precision, scale,
+                                           identity),
+                         bool(nullable), bool(is_key),
+                         self._unwrap_default(default)])
+        return rows
+
+    @staticmethod
+    def _unwrap_default(definition):
+        """Strip the parentheses SQL Server wraps a default in.
+
+        A default stored as ((7)) or (getdate()) has to come back as 7 or
+        getdate(), or every column would look changed.
+        """
+        text = (definition or "").strip()
+        while text.startswith("(") and text.endswith(")"):
+            inner = text[1:-1].strip()
+            # Only unwrap a genuinely enclosing pair.
+            depth = 0
+            for index, ch in enumerate(inner):
+                depth += (ch == "(") - (ch == ")")
+                if depth < 0:
+                    return text
+            if depth != 0:
+                return text
+            text = inner
+        return text
+
+    def _format_type(self, base, length, precision, scale, identity=False):
+        """Render a column's type in the vocabulary `column_types` uses."""
+        base = base.upper()
+        if base in ("NVARCHAR", "NCHAR"):
+            size = "MAX" if length == -1 else str(length // 2)
+            rendered = f"{base}({size})"
+        elif base in ("VARCHAR", "CHAR", "VARBINARY", "BINARY"):
+            size = "MAX" if length == -1 else str(length)
+            rendered = f"{base}({size})"
+        elif base in ("DECIMAL", "NUMERIC"):
+            rendered = f"{base}({precision},{scale})"
+        else:
+            rendered = base
+        if identity:
+            rendered += " IDENTITY(1,1)"
+        return rendered
+
+    def sql_alter_table(self, schema, table, opts, current):
+        qualified = (f"{self.quote_ddl_identifier(schema)}."
+                     f"{self.quote_ddl_identifier(table)}")
+        added, dropped, changed = self._diff_columns(opts, current)
+        stmts = []
+
+        for row in added:
+            name = self.validate_identifier(str(row[0]).strip())
+            sql_type = self._checked_type(name, row[1])
+            clause = (f"{self.quote_ddl_identifier(name)} {sql_type}"
+                      f"{'' if bool(row[2]) else ' NOT NULL'}")
+            default = str(row[4] or "").strip() if len(row) > 4 else ""
+            if default:
+                clause += f" DEFAULT {self.validate_default(default)}"
+            stmts.append(f"ALTER TABLE {qualified} ADD {clause}")
+
+        for before, row in changed:
+            name = self.validate_identifier(str(row[0]).strip())
+            column = self.quote_ddl_identifier(name)
+            sql_type = self._checked_type(name, row[1])
+            # Type and nullability change together in one statement here,
+            # unlike PostgreSQL where they are separate.
+            if (str(before[1]) != str(row[1])
+                    or bool(before[2]) != bool(row[2])):
+                stmts.append(
+                    f"ALTER TABLE {qualified} ALTER COLUMN {column} "
+                    f"{sql_type}{'' if bool(row[2]) else ' NOT NULL'}")
+            old_default = str(before[4] or "").strip()
+            new_default = str(row[4] or "").strip() if len(row) > 4 else ""
+            if old_default != new_default:
+                if old_default:
+                    stmts.append(self._drop_default_sql(schema, table, name))
+                if new_default:
+                    stmts.append(
+                        f"ALTER TABLE {qualified} ADD DEFAULT "
+                        f"{self.validate_default(new_default)} FOR {column}")
+
+        for row in dropped:
+            name = self.validate_identifier(str(row[0]).strip())
+            # A column with a default cannot be dropped while its
+            # constraint stands, and the constraint's name is generated.
+            if str(row[4] or "").strip():
+                stmts.append(self._drop_default_sql(schema, table, name))
+            stmts.append(f"ALTER TABLE {qualified} DROP COLUMN "
+                         f"{self.quote_ddl_identifier(name)}")
+        return stmts
+
+    def _checked_type(self, column, sql_type):
+        sql_type = str(sql_type or "").strip()
+        if sql_type not in {t[0] for t in self.column_types()}:
+            raise ValueError(f"column {column} has an unknown type: "
+                             f"{sql_type}")
+        return sql_type
+
+    def _drop_default_sql(self, schema, table, column):
+        """Drop a column's default by looking its constraint name up.
+
+        SQL Server generates the name, so it has to be found at run time
+        rather than assumed.
+        """
+        target = self.quote_ddl_literal(f"{schema}.{table}")
+        return (
+            "DECLARE @c SYSNAME; "
+            "SELECT @c = dc.name FROM sys.default_constraints dc "
+            "JOIN sys.columns col ON col.default_object_id = dc.object_id "
+            f"WHERE dc.parent_object_id = OBJECT_ID({target}) "
+            f"AND col.name = {self.quote_ddl_literal(column)}; "
+            "IF @c IS NOT NULL EXEC('ALTER TABLE "
+            f"{schema}.{table} DROP CONSTRAINT [' + @c + ']')")
+
     # --- Backup and restore ---
 
     supports_backup = True

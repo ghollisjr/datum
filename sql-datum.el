@@ -1809,6 +1809,7 @@ Returns a list of strings by parsing the current line against column widths."
          ('("databases" . "files") (sql-datum-admin-edit-file))
          (`("databases" . ,_)      (sql-datum-admin-edit-database))
          ('("security" . "user-mappings") (sql-datum-admin-edit-mapping))
+         ('("schema" . "tables")   (sql-datum-admin-edit-table))
          (`("security" . ,_)       (sql-datum-admin-edit-principal))
          (_ (user-error "No editable item at point"))))))
 
@@ -1915,6 +1916,20 @@ Returns a list of strings by parsing the current line against column widths."
     (unless schema (user-error "No schema context available"))
     (sql-datum--admin-send-command
      (format ":admin-action schema new-table %s" schema))))
+
+(defun sql-datum-admin-edit-table ()
+  "Alter the columns of the table at point."
+  (interactive)
+  (let ((schema (alist-get 'schema sql-datum--admin-context))
+        (table (sql-datum--admin-row-id-at-point)))
+    (unless (and schema table) (user-error "No table at point"))
+    (sql-datum--admin-send-command
+     (format ":admin-action schema edit-table %s"
+             (base64-encode-string
+              (encode-coding-string
+               (json-serialize `((schema . ,schema) (table . ,table)))
+               'utf-8)
+              t)))))
 
 (defun sql-datum-admin-drop-table ()
   "Drop the table at point."

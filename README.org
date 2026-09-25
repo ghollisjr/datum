@@ -864,6 +864,7 @@ dropped or moved first, and the confirmation says so.
 | Key | Action                    |
 |-----+---------------------------|
 | =N= | New table (builder)       |
+| =E= | Alter columns             |
 | =D= | Drop table                |
 
 The table builder takes a list of columns — name, type, nullable,
@@ -871,6 +872,17 @@ primary key and default — with =[INS]= and =[DEL]= to add and remove
 rows.  Types are offered per dialect, so =INT IDENTITY(1,1)= appears on
 MSSQL and =BIGSERIAL= on PostgreSQL.  Ticking primary key on more than
 one column produces a composite key.
+
+=E= on a table opens the same list, prefilled with the columns it
+already has, and applies only what you change.  Adding a column, widening
+a type, changing nullability or setting a default all work; the dialect
+difference is handled for you, since MSSQL carries type and nullability
+in one =ALTER COLUMN= while PostgreSQL needs a statement for each.
+
+Renaming a column is deliberately not offered: a column list cannot tell
+a rename from a drop plus an add, and guessing wrong loses the data.  Any
+change that drops a column shows the full plan and asks for the table
+name to be typed before running.
 
 A default is an expression rather than a literal, so it can be neither
 quoted nor parameterised.  Only a number, a quoted string, or a bare

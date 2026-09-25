@@ -348,6 +348,128 @@ class PostgreSQLDriver(BaseDriver):
         return [f"DROP TABLE {self.quote_ddl_identifier(schema)}."
                 f"{self.quote_ddl_identifier(name)}"]
 
+    def list_table_columns(self, cursor, schema, table):
+        cursor.execute("""
+            SELECT c.column_name, c.data_type, c.character_maximum_length,
+                   c.numeric_precision, c.numeric_scale, c.is_nullable,
+                   COALESCE(c.column_default, ''),
+                   CASE WHEN pk.column_name IS NOT NULL THEN 1 ELSE 0 END
+            FROM information_schema.columns c
+            LEFT JOIN (
+                SELECT ku.column_name
+                FROM information_schema.table_constraints tc
+                JOIN information_schema.key_column_usage ku
+                  ON ku.constraint_name = tc.constraint_name
+                 AND ku.table_schema = tc.table_schema
+                WHERE tc.constraint_type = 'PRIMARY KEY'
+                  AND tc.table_schema = ? AND tc.table_name = ?
+            ) pk ON pk.column_name = c.column_name
+            WHERE c.table_schema = ? AND c.table_name = ?
+            ORDER BY c.ordinal_position
+        """, [schema, table, schema, table])
+        rows = []
+        for (name, base, length, precision, scale, nullable, default,
+             is_key) in cursor.fetchall():
+            rows.append([name,
+                         self._format_type(base, length, precision, scale,
+                                           default),
+                         nullable == "YES", bool(is_key),
+                         self._clean_default(default)])
+        return rows
+
+    _TYPE_NAMES = {
+        "integer": "INTEGER", "bigint": "BIGINT", "smallint": "SMALLINT",
+        "boolean": "BOOLEAN", "real": "REAL",
+        "double precision": "DOUBLE PRECISION", "text": "TEXT",
+        "date": "DATE", "time without time zone": "TIME",
+        "timestamp without time zone": "TIMESTAMP",
+        "timestamp with time zone": "TIMESTAMPTZ",
+        "interval": "INTERVAL", "uuid": "UUID", "jsonb": "JSONB",
+        "bytea": "BYTEA", "inet": "INET",
+    }
+
+    def _format_type(self, base, length, precision, scale, default=""):
+        """Render a column's type in the vocabulary `column_types` uses."""
+        # A serial is an integer with a nextval default; the builder
+        # offers it as SERIAL, so it has to read back that way.
+        if "nextval(" in (default or ""):
+            return {"integer": "SERIAL", "bigint": "BIGSERIAL"}.get(
+                base, base.upper())
+        if base == "character varying":
+            return f"VARCHAR({length})" if length else "VARCHAR(255)"
+        if base == "character":
+            return f"CHAR({length or 1})"
+        if base == "numeric":
+            return (f"NUMERIC({precision},{scale})" if precision is not None
+                    else "NUMERIC(18,2)")
+        return self._TYPE_NAMES.get(base, base.upper())
+
+    @staticmethod
+    def _clean_default(default):
+        """Strip the type annotation PostgreSQL records on a default.
+
+        A default stored as 'n/a'::text or 0 has to come back as the
+        expression the builder would have produced, or every column
+        looks changed.
+        """
+        text = (default or "").strip()
+        if not text or "nextval(" in text:
+            # A serial's default belongs to the type, not the column.
+            return ""
+        if "::" in text:
+            text = text.split("::", 1)[0].strip()
+        return text
+
+    def sql_alter_table(self, schema, table, opts, current):
+        qualified = (f"{self.quote_ddl_identifier(schema)}."
+                     f"{self.quote_ddl_identifier(table)}")
+        added, dropped, changed = self._diff_columns(opts, current)
+        stmts = []
+
+        for row in added:
+            name = self.validate_identifier(str(row[0]).strip())
+            sql_type = self._checked_type(name, row[1])
+            clause = (f"ADD COLUMN {self.quote_ddl_identifier(name)} "
+                      f"{sql_type}{'' if bool(row[2]) else ' NOT NULL'}")
+            default = str(row[4] or "").strip() if len(row) > 4 else ""
+            if default:
+                clause += f" DEFAULT {self.validate_default(default)}"
+            stmts.append(f"ALTER TABLE {qualified} {clause}")
+
+        for before, row in changed:
+            name = self.validate_identifier(str(row[0]).strip())
+            column = self.quote_ddl_identifier(name)
+            # Type, nullability and default are three separate statements
+            # here, unlike MSSQL where ALTER COLUMN carries all of them.
+            if str(before[1]) != str(row[1]):
+                sql_type = self._checked_type(name, row[1])
+                stmts.append(f"ALTER TABLE {qualified} ALTER COLUMN "
+                             f"{column} TYPE {sql_type}")
+            if bool(before[2]) != bool(row[2]):
+                stmts.append(
+                    f"ALTER TABLE {qualified} ALTER COLUMN {column} "
+                    f"{'DROP' if bool(row[2]) else 'SET'} NOT NULL")
+            old_default = str(before[4] or "").strip()
+            new_default = str(row[4] or "").strip() if len(row) > 4 else ""
+            if old_default != new_default:
+                stmts.append(
+                    f"ALTER TABLE {qualified} ALTER COLUMN {column} "
+                    + (f"SET DEFAULT {self.validate_default(new_default)}"
+                       if new_default else "DROP DEFAULT"))
+
+        for row in dropped:
+            name = self.validate_identifier(str(row[0]).strip())
+            stmts.append(f"ALTER TABLE {qualified} DROP COLUMN "
+                         f"{self.quote_ddl_identifier(name)}")
+        return stmts
+
+    def _checked_type(self, column, sql_type):
+        sql_type = str(sql_type or "").strip()
+        if sql_type not in {t[0] for t in self.column_types()}:
+            raise ValueError(f"column {column} has an unknown type: "
+                             f"{sql_type}")
+        return sql_type
+
     # --- Roles ---
     #
     # PostgreSQL has no separate login and user: a role that may log in

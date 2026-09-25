@@ -208,11 +208,14 @@ Tables view (=T=):
 | Key | Action              |
 |-----+---------------------|
 | =N= | New table (builder) |
+| =E= | Alter columns       |
 | =D= | Drop table          |
 
 The builder takes columns as a list — name, type, nullable, primary key,
 default — with =[INS]= / =[DEL]= to add and remove rows.  Types are per
-dialect.
+dialect.  =E= edits an existing table's columns the same way and applies
+only what changed; anything that drops a column shows the plan and asks
+for the table name first.
 
 ** Security panel
 

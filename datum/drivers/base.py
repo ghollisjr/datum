@@ -424,6 +424,66 @@ class BaseDriver(ABC):
         raise NotImplementedError(
             f"Table DDL is not supported on {self.dialect_name}")
 
+    def list_table_columns(self, cursor, schema, table):
+        """Return the table's columns as builder rows.
+
+        Each row is [name, type, nullable, primary_key, default], using
+        the same type vocabulary as `column_types` so that an untouched
+        column compares equal and generates no statement.
+        """
+        return []
+
+    def sql_alter_table(self, schema, table, opts, current):
+        """Return statements for the column changes between CURRENT and
+        the submitted rows."""
+        raise NotImplementedError(
+            f"Table DDL is not supported on {self.dialect_name}")
+
+    def _diff_columns(self, opts, current):
+        """Return (added, dropped, changed) comparing rows by name.
+
+        A rename cannot be told from a drop plus an add by looking at
+        names alone, so it is reported as both; the caller is expected to
+        show the plan before running it.
+        """
+        def keyed(rows):
+            out = {}
+            for row in rows or []:
+                if row and str(row[0] or "").strip():
+                    out[str(row[0]).strip()] = row
+            return out
+
+        want, have = keyed(opts.get("columns")), keyed(current)
+        added = [want[n] for n in want if n not in have]
+        dropped = [have[n] for n in have if n not in want]
+        changed = []
+        for name, row in want.items():
+            if name not in have:
+                continue
+            before = have[name]
+            if (str(row[1]) != str(before[1])
+                    or bool(row[2]) != bool(before[2])
+                    or bool(row[3]) != bool(before[3])
+                    or not self._same_default(
+                        row[4] if len(row) > 4 else "",
+                        before[4] if len(before) > 4 else "")):
+                changed.append((before, row))
+        return added, dropped, changed
+
+    @staticmethod
+    def _same_default(left, right):
+        """Compare two DEFAULT expressions.
+
+        The server may echo a function back in a different case than it
+        was written — GETDATE() comes out of SQL Server as getdate() —
+        which would otherwise read as a change on every comparison.  A
+        quoted string is compared exactly, because its case is data.
+        """
+        a, b = str(left or "").strip(), str(right or "").strip()
+        if "'" in a or "'" in b:
+            return a == b
+        return a.lower() == b.lower()
+
     # A DEFAULT is an expression rather than a literal, so it cannot be
     # quoted like one — a bare 0 and GETDATE() both have to pass through
     # unquoted.  It also cannot be parameterised, so only these shapes

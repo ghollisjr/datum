@@ -108,6 +108,11 @@ def run_action(cursor, driver, action_name, args):
         elif action_name in ("create-table", "preview-table"):
             _create_table(cursor, driver, args,
                           preview=action_name.startswith("preview"))
+        elif action_name == "edit-table":
+            _edit_table_form(cursor, driver, args)
+        elif action_name in ("alter-table", "preview-alter-table",
+                             "confirm-alter-table"):
+            _alter_table(cursor, driver, args, action_name)
         elif action_name == "drop-table":
             _drop_table(cursor, driver, args)
         else:
@@ -262,6 +267,7 @@ def _tables_panel(cursor, driver, schema):
         "row_id": 0,
         "actions": [
             {"key": "N", "label": "New table", "command": "new-table"},
+            {"key": "E", "label": "Alter columns", "command": "edit-table"},
             {"key": "D", "label": "Drop table", "command": "drop-table"},
         ],
         "info": (f"Tables in {schema}" if rows
@@ -349,6 +355,136 @@ def _create_table(cursor, driver, args, preview=False):
         _commit(cursor)
     envelope.info(f"Created table: {schema}.{name}")
     _refresh_tables(cursor, driver, schema)
+
+
+def _edit_table_form(cursor, driver, args):
+    """Send the table editor, prefilled with the current columns."""
+    from .. import envelope
+
+    payload = _decode_payload(args) if args else {}
+    schema_name = (payload.get("schema") or "").strip()
+    table = (payload.get("table") or "").strip()
+    if not (schema_name and table):
+        envelope.error("edit-table requires a schema and a table")
+        return
+    driver.validate_identifier(schema_name)
+    driver.validate_identifier(table)
+
+    columns = driver.list_table_columns(cursor, schema_name, table)
+    if not columns:
+        envelope.error(f"Table not found: {schema_name}.{table}")
+        return
+
+    fields = _clean_fields(driver.table_options(cursor, schema_name))
+    # The name is fixed here: renaming is not something a column diff can
+    # express, since it cannot be told from a drop plus an add.
+    fields = [f for f in fields if f["key"] != "name"]
+    for field in fields:
+        if field["key"] == "columns":
+            field["default"] = columns
+
+    envelope.admin_panel({
+        "panel": "schema",
+        "sub_panel": "form",
+        "title": f"Alter Table: {schema_name}.{table}",
+        "form": {
+            "fields": fields,
+            "values": {"schema": schema_name, "table": table},
+            "submit_action": "alter-table",
+            "submit_label": "Apply Changes",
+            "preview_action": "preview-alter-table",
+            "notes": [
+                "Only the columns you change are altered.",
+                "Renaming a column here reads as dropping it and adding "
+                "another, which loses its data — the plan is shown first.",
+            ],
+        },
+        "headers": [],
+        "rows": [],
+        "row_id": None,
+        "actions": [],
+        "info": None,
+        "context": {"schema": schema_name},
+    })
+
+
+def _alter_table(cursor, driver, args, action_name):
+    """Preview, confirm, or apply the column changes."""
+    from .. import envelope
+
+    opts = _decode_payload(args)
+    schema_name = (opts.get("schema") or "").strip()
+    table = (opts.get("table") or "").strip()
+    if not (schema_name and table):
+        envelope.error("the form did not say which table to alter")
+        return
+    driver.validate_identifier(schema_name)
+    driver.validate_identifier(table)
+
+    current = driver.list_table_columns(cursor, schema_name, table)
+    stmts = driver.sql_alter_table(schema_name, table, opts, current)
+    if not stmts:
+        envelope.info(f"No changes to apply to {schema_name}.{table}")
+        return
+
+    if action_name == "preview-alter-table":
+        envelope.definition(f"ALTER TABLE {schema_name}.{table}",
+                            ";\n\n".join(stmts) + ";")
+        return
+
+    # Dropping a column destroys its data, so the plan is shown and has
+    # to be confirmed before anything runs.
+    _added, dropped, _changed = driver._diff_columns(opts, current)
+    if dropped and action_name != "confirm-alter-table":
+        _confirm_alter(driver, schema_name, table, opts, dropped, stmts)
+        return
+
+    for index, sql in enumerate(stmts):
+        try:
+            cursor.execute(sql)
+            _commit(cursor)
+        except Exception as err:
+            envelope.error(
+                f"Applied {index} of {len(stmts)} change(s) to "
+                f"{schema_name}.{table} before failing — {_db_error(err)}")
+            return
+    envelope.info(f"Applied {len(stmts)} change(s) to "
+                  f"{schema_name}.{table}")
+    _refresh_tables(cursor, driver, schema_name)
+
+
+def _confirm_alter(driver, schema_name, table, opts, dropped, stmts):
+    """Ask before running a plan that drops columns."""
+    from .. import envelope
+
+    names = ", ".join(str(row[0]) for row in dropped)
+    notes = [f"Table: {schema_name}.{table}",
+             "",
+             f"These columns will be DROPPED, losing their data: {names}",
+             ""]
+    notes += [" ".join(sql.split())[:110] for sql in stmts]
+
+    values = dict(opts)
+    envelope.admin_panel({
+        "panel": "schema",
+        "sub_panel": "form",
+        "title": f"Drop columns from {schema_name}.{table}?",
+        "form": {
+            "fields": [],
+            "values": values,
+            "submit_action": "confirm-alter-table",
+            "submit_label": "Apply Anyway",
+            "notes": notes,
+            "confirm_text": table,
+            "danger": True,
+        },
+        "headers": [],
+        "rows": [],
+        "row_id": None,
+        "actions": [],
+        "info": None,
+        "context": {"schema": schema_name},
+    })
 
 
 def _drop_table(cursor, driver, args):
