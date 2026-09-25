@@ -2787,29 +2787,49 @@ typing outside a field silently corrupts the form layout."
 The legend above a column list is indented by this much so that its
 headings sit over the fields they name.")
 
-(defun sql-datum--form-list-widths (item)
+(defun sql-datum--form-list-rows (spec values)
+  "Return the rows a list field will be rendered with."
+  (let* ((key (alist-get 'key spec))
+         (supplied (and values key (assoc-string key values)))
+         (rows (if supplied (cdr supplied) (alist-get 'default spec))))
+    (append (and (listp rows) rows) nil)))
+
+(defun sql-datum--form-list-widths (item &optional rows)
   "Return the rendered width of each sub-field in ITEM.
 
-A row only lines up if every field has a known width, which means the
-type menu has to be padded: `menu-choice' renders the chosen item's
-tag, so its width would otherwise follow whatever is selected."
-  (mapcar (lambda (col)
-            (let ((ctype (or (alist-get 'type col) "string")))
-              (cond
-               ;; A checkbox renders as [X], but the column has to be at
-               ;; least as wide as its heading or the legend is clipped.
-               ((equal ctype "bool")
-                (max 3 (length (or (alist-get 'label col) ""))))
-               ((equal ctype "choice")
-                (apply #'max 4 (mapcar (lambda (c) (length (nth 1 c)))
-                                       (alist-get 'choices col))))
-               (t (or (alist-get 'size col) 14)))))
-          item))
+A row only lines up if every field has a known width.  The type menu is
+padded because `menu-choice' renders the chosen item's tag, so its width
+would otherwise follow whatever is selected.  A text field's `:size' is
+only a minimum — a longer value grows the field and pushes everything
+after it out of column — so the widest value actually present is taken
+into account as well."
+  (let ((index -1))
+    (mapcar
+     (lambda (col)
+       (setq index (1+ index))
+       (let ((ctype (or (alist-get 'type col) "string")))
+         (cond
+          ;; A checkbox renders as [X], but the column has to be at
+          ;; least as wide as its heading or the legend is clipped.
+          ((equal ctype "bool")
+           (max 3 (length (or (alist-get 'label col) ""))))
+          ((equal ctype "choice")
+           (apply #'max 4 (mapcar (lambda (c) (length (nth 1 c)))
+                                  (alist-get 'choices col))))
+          (t (apply #'max
+                    (or (alist-get 'size col) 14)
+                    (length (or (alist-get 'label col) ""))
+                    (mapcar (lambda (row)
+                              (let ((v (nth index row)))
+                                (if (stringp v) (length v) 0)))
+                            rows))))))
+     item)))
 
-(defun sql-datum--form-list-legend (spec)
+(defun sql-datum--form-list-legend (spec &optional values)
   "Return the heading line for the column list described by SPEC."
   (let* ((item (alist-get 'item spec))
-         (widths (sql-datum--form-list-widths item)))
+         (widths (sql-datum--form-list-widths
+                  item (sql-datum--form-list-rows spec values))))
     (concat (make-string sql-datum--form-list-indent ?\s)
             (mapconcat (lambda (pair)
                          (let ((label (or (alist-get 'label (car pair)) ""))
@@ -2895,7 +2915,9 @@ a form rebuilt after browsing for a path comes back as the user left it."
                         (alist-get 'choices col))))
               (t (list 'editable-field :size width :format "%v ")))))
          (alist-get 'item spec)
-         (sql-datum--form-list-widths (alist-get 'item spec))))))
+         (sql-datum--form-list-widths
+          (alist-get 'item spec)
+          (sql-datum--form-list-rows spec values))))))
      ((equal type "list")
       ;; A repeating group: [INS] and [DEL] add and remove rows, and
       ;; `widget-value' yields a list of rows.
@@ -3014,7 +3036,7 @@ with `fields', `values', `submit_action', and optional `notes',
                                            'face 'font-lock-comment-face)))
               (widget-insert "\n")
               (widget-insert
-               (propertize (sql-datum--form-list-legend spec)
+               (propertize (sql-datum--form-list-legend spec values)
                            'face 'font-lock-comment-face)))
              (t
               (widget-insert (format (format "%%-%ds  " label-width) label))))

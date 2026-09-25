@@ -502,7 +502,8 @@ class BaseDriver(ABC):
     # rather than interpolated.
     _SAFE_DEFAULT = re.compile(
         r"""^(?:
-              -?\d+(?:\.\d+)?          # 42, -1, 3.14
+              -?(?:\d+\.?\d*|\.\d+)    # 42, -1, 3.14, and the 12345.
+                                       #   form a server may normalise to
             | '(?:[^']|'')*'           # 'text', with '' escapes
             | [A-Za-z_][A-Za-z0-9_]*   # NULL, TRUE, CURRENT_TIMESTAMP
               (?:\s*\(\s*\))?          #   optionally GETDATE(), now()
