@@ -529,7 +529,7 @@ class MSSQLDriver(BaseDriver):
              "default": "",
              "choices": ([["", "(creator)"]] + [[n, n] for n in logins]
                          if logins else None),
-             "help": None if logins else "login name; blank leaves the creator as owner"},
+             "help": "the owner becomes dbo here, with full control"},
             {"key": "collation", "label": "Collation",
              "type": "completing" if collations else "string",
              "default": "",
@@ -685,13 +685,21 @@ class MSSQLDriver(BaseDriver):
                                    ON r.principal_id = rm.role_principal_id
                                  WHERE rm.member_principal_id = sp.principal_id
                                  FOR XML PATH('')), 1, 2, ''), ''),
+                   -- Owning a database makes a login dbo inside it, with
+                   -- full control, regardless of any server role.  Left
+                   -- off the list it reads as an unprivileged login.
+                   ISNULL(STUFF((SELECT ', ' + d.name
+                                 FROM sys.databases d
+                                 WHERE d.owner_sid = sp.sid
+                                 ORDER BY d.name
+                                 FOR XML PATH('')), 1, 2, ''), ''),
                    CONVERT(VARCHAR(19), sp.create_date, 120)
             FROM sys.server_principals sp
             WHERE sp.type IN ('S', 'U', 'G') AND sp.name NOT LIKE '##%'
             ORDER BY sp.name
         """)
         headers = ["Login", "Type", "State", "Default Database",
-                   "Server Roles", "Created"]
+                   "Server Roles", "Owns (dbo)", "Created"]
         rows = [[str(v) if v is not None else "" for v in row]
                 for row in cursor.fetchall()]
         return headers, rows
@@ -1207,7 +1215,8 @@ class MSSQLDriver(BaseDriver):
             {"key": "owner", "label": "Owner",
              "type": "choice" if logins else "string",
              "default": current.get("owner", ""),
-             "choices": [[n, n] for n in logins] if logins else None},
+             "choices": [[n, n] for n in logins] if logins else None,
+             "help": "the owner becomes dbo here, with full control"},
             {"key": "recovery_model", "label": "Recovery Model",
              "type": "choice", "default": current.get("recovery_model", ""),
              "choices": [["FULL", "Full"], ["SIMPLE", "Simple"],
