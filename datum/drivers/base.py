@@ -932,6 +932,48 @@ class BaseDriver(ABC):
         raise NotImplementedError(
             f"Reading server files is not supported on {self.dialect_name}")
 
+    @staticmethod
+    def decode_file_bytes(raw):
+        """Decode RAW file bytes to text, guessing the encoding.
+
+        A byte-order mark settles it where there is one.  Windows tools
+        write UTF-16 freely — XML especially — and often without a mark,
+        which shows up as a NUL after every character; that is worth
+        recognising rather than rendering as double-spaced text.
+        Anything still undecodable is shown with the bad bytes replaced
+        rather than refused, since this is for looking at a file.
+        """
+        if raw is None:
+            return ""
+        data = bytes(raw)
+        if not data:
+            return ""
+        for bom, encoding in ((b"\xef\xbb\xbf", "utf-8-sig"),
+                              (b"\xff\xfe", "utf-16"),
+                              (b"\xfe\xff", "utf-16")):
+            if data.startswith(bom):
+                try:
+                    return data.decode(encoding)
+                except UnicodeDecodeError:
+                    break
+        # No mark.  A NUL in what should be text is the giveaway for
+        # UTF-16 written without one; which byte carries it says which
+        # way round the pairs go.
+        head = data[:512]
+        if b"\x00" in head:
+            encoding = "utf-16-le" if head[1::2].count(0) >= head[0::2].count(0) \
+                else "utf-16-be"
+            # An odd trailing byte would split a pair.
+            trimmed = data[:len(data) - (len(data) % 2)]
+            try:
+                return trimmed.decode(encoding)
+            except UnicodeDecodeError:
+                pass
+        try:
+            return data.decode("utf-8")
+        except UnicodeDecodeError:
+            return data.decode("utf-8", errors="replace")
+
     def default_paths(self, cursor):
         """Return {"data": path, "log": path} defaults, empty when unknown."""
         return {}

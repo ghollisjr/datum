@@ -1527,7 +1527,9 @@ SQLI-BUF is the originating SQLi buffer."
     (define-key map "s" #'sql-datum-admin-start-job)
     ;; S stops a job, but shrinks a file in the database files view.
     (define-key map "S" #'sql-datum-admin-stop-or-shrink)
-    (define-key map "e" #'sql-datum-admin-toggle-enable)
+    ;; e toggles a job, but opens the entry at point in the filesystem
+    ;; panel, where dired has taught the hand that e means open.
+    (define-key map "e" #'sql-datum-admin-enable-or-open)
     (define-key map "H" #'sql-datum-admin-job-history)
     (define-key map "d" #'sql-datum-admin-detail)
     ;; SSIS panel
@@ -2219,6 +2221,17 @@ and the row names the database."
                               (securable . ,securable)
                               (column . ,column))
                             (when database `((database . ,database)))))))))))) 
+
+(defun sql-datum-admin-enable-or-open ()
+  "Open the entry at point, or toggle the job at point.
+
+`e\=' is dired's key for opening what point is on, which is what it
+means in the filesystem panel; everywhere else it keeps its meaning of
+enabling or disabling a job."
+  (interactive)
+  (if (equal sql-datum--admin-panel-name "filesystem")
+      (sql-datum-admin-open-path)
+    (sql-datum-admin-toggle-enable)))
 
 (defun sql-datum-admin-restore-or-revoke ()
   "Revoke the permission at point, or restore the backup at point.

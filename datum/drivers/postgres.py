@@ -850,10 +850,17 @@ class PostgreSQLDriver(BaseDriver):
     supports_file_read = True
 
     def read_file(self, cursor, path, max_bytes=262144):
-        """Return the first MAX_BYTES of PATH as text."""
-        cursor.execute("SELECT pg_read_file(?, 0, ?)", [path, max_bytes])
+        """Return the first MAX_BYTES of PATH as text.
+
+        Read as bytes and decoded here: pg_read_file insists the file is
+        valid in the server encoding and refuses anything else outright,
+        so a UTF-16 file — which is what Windows tools write — fails on
+        its first NUL rather than being shown.
+        """
+        cursor.execute("SELECT pg_read_binary_file(?, 0, ?)",
+                       [path, int(max_bytes)])
         row = cursor.fetchone()
-        return row[0] if row else ""
+        return self.decode_file_bytes(row[0] if row else None)
 
     def database_options(self, cursor=None):
         roles = self._lookup(cursor, r"""

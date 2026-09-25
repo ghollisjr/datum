@@ -245,6 +245,25 @@ class TestReading:
         assert [k for k, _ in captured] == ["error"], captured
         assert "Incorrect syntax" not in captured[0][1][0], captured
 
+    def test_a_real_file_comes_back_without_stray_nuls(self, mssql_env):
+        # The file is read as bytes and decoded here rather than by the
+        # server, so what arrives must be text.  Reading UTF-16 a byte
+        # at a time used to leave a NUL after every character.
+        cursor, driver = mssql_env
+        text = driver.read_file(cursor, "/var/opt/mssql/log/errorlog", 4096)
+        assert text and "\x00" not in text
+
+    def test_postgres_reads_bytes_rather_than_server_encoded_text(
+            self, pg_env):
+        # pg_read_file refuses anything not valid in the server encoding,
+        # so a UTF-16 file failed on its first NUL instead of showing.
+        cursor, driver = pg_env
+        cursor.execute("SHOW data_directory")
+        conf = cursor.fetchone()[0] + "/postgresql.conf"
+        text = driver.read_file(cursor, conf, 4096)
+        assert "PostgreSQL configuration file" in text
+        assert "\x00" not in text
+
     def test_opening_a_directory_returns_its_listing(self, mssql_env,
                                                      captured):
         from datum.panels import filesystem

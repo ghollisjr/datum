@@ -1931,6 +1931,55 @@ class TestServerFilesystem:
         # must not be able to close it.
         assert mssql.quote_ddl_literal("/tmp/it's.txt") == "'/tmp/it''s.txt'"
 
+    # --- decoding what comes back off the disk ---
+
+    def test_plain_utf8_is_read_as_written(self, mssql):
+        assert mssql.decode_file_bytes(b"<root/>\n") == "<root/>\n"
+
+    def test_a_utf8_byte_order_mark_is_not_shown(self, mssql):
+        # The mark is the file's business, not something to render.
+        assert mssql.decode_file_bytes(b"\xef\xbb\xbf<root/>") == "<root/>"
+
+    def test_utf16_with_a_mark_is_decoded(self, mssql):
+        raw = "<root/>".encode("utf-16")       # includes the BOM
+        assert mssql.decode_file_bytes(raw) == "<root/>"
+
+    def test_utf16_without_a_mark_is_still_decoded(self, mssql):
+        # Windows tools write these freely, XML especially, and SQL
+        # Server's SINGLE_NCLOB refuses a file with no mark -- which is
+        # why the bytes are decoded here instead.
+        raw = "<root/>".encode("utf-16-le")
+        assert mssql.decode_file_bytes(raw) == "<root/>"
+
+    def test_big_endian_utf16_without_a_mark_too(self, mssql):
+        raw = "<root/>".encode("utf-16-be")
+        assert mssql.decode_file_bytes(raw) == "<root/>"
+
+    def test_a_utf16_file_never_comes_back_double_spaced(self, mssql):
+        # Reading UTF-16 a byte at a time leaves a NUL after every
+        # character, which renders as though the text were spaced out.
+        text = mssql.decode_file_bytes("<?xml version=\"1.0\"?>".encode("utf-16-le"))
+        assert "\x00" not in text
+        assert text == "<?xml version=\"1.0\"?>"
+
+    def test_an_odd_trailing_byte_does_not_break_the_read(self, mssql):
+        raw = "<root/>".encode("utf-16-le") + b"\x3c"
+        assert "root" in mssql.decode_file_bytes(raw)
+
+    def test_undecodable_bytes_are_shown_rather_than_refused(self, mssql):
+        # This is for looking at a file; a bad byte should not empty the
+        # buffer.
+        text = mssql.decode_file_bytes(b"ok \xff\xfe\xfd here")
+        assert text.startswith("ok ") and text.endswith(" here")
+
+    def test_nothing_decodes_to_nothing(self, mssql):
+        assert mssql.decode_file_bytes(b"") == ""
+        assert mssql.decode_file_bytes(None) == ""
+
+    def test_both_dialects_decode_the_same_way(self, mssql, postgres):
+        raw = "<root/>".encode("utf-16-le")
+        assert mssql.decode_file_bytes(raw) == postgres.decode_file_bytes(raw)
+
     def test_the_epoch_placeholder_is_not_shown_as_a_date(self):
         # The DMV reports 1601-01-01 for a time the filesystem does not
         # keep, which on Linux is every creation and access time.

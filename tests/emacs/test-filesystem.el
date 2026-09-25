@@ -317,6 +317,33 @@
                       (equal sent ":admin filesystem :drives")))))
 
 
+
+(message "\n=== e opens, as it does in dired ===")
+
+(with-current-buffer (test-fs--panel)
+  (test-fs-assert "e is the contextual open/enable command"
+                  (eq (lookup-key sql-datum--admin-mode-map "e")
+                      'sql-datum-admin-enable-or-open))
+  (let (sent)
+    (cl-letf (((symbol-function 'sql-datum--admin-send-command)
+               (lambda (c) (setq sent c))))
+      (test-fs--goto "errorlog")
+      (sql-datum-admin-enable-or-open)
+      (test-fs-assert "e on a file views it"
+                      (string-prefix-p ":admin-action filesystem view " sent))
+      (setq sent nil)
+      (test-fs--goto "..")
+      (sql-datum-admin-enable-or-open)
+      (test-fs-assert "e on a directory opens it"
+                      (equal sent ":admin filesystem /var/opt/mssql")))))
+
+;; Everywhere else e keeps meaning enable/disable, and says so when
+;; there is no job to toggle rather than silently doing nothing.
+(with-temp-buffer
+  (setq-local sql-datum--admin-panel-name "databases")
+  (test-fs-error "e outside the filesystem panel is still the job toggle"
+                 (sql-datum-admin-enable-or-open)))
+
 (message "\n=== a directory is not polled ===")
 
 (with-current-buffer (test-fs--panel)

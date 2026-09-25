@@ -547,11 +547,16 @@ class MSSQLDriver(BaseDriver):
         # for the same reason.
         literal = self.quote_ddl_literal(path)
         limit = int(max_bytes)
+        # Read the bytes and decode here rather than letting the server
+        # do it.  SINGLE_CLOB reads a byte at a time, so a UTF-16 file
+        # comes back with a NUL after every character; SINGLE_NCLOB
+        # decodes UTF-16 but refuses a file with no byte-order mark,
+        # which is how plenty of them are written.
         cursor.execute(
-            f"SELECT LEFT(CAST(BulkColumn AS NVARCHAR(MAX)), {limit}) "
-            f"FROM OPENROWSET(BULK N{literal}, SINGLE_CLOB) AS contents")
+            f"SELECT SUBSTRING(BulkColumn, 1, {limit}) "
+            f"FROM OPENROWSET(BULK N{literal}, SINGLE_BLOB) AS contents")
         row = cursor.fetchone()
-        return row[0] if row else ""
+        return self.decode_file_bytes(row[0] if row else None)
 
     def browse_path(self, cursor, path):
         path = path or self.default_paths(cursor).get("data") or "/"

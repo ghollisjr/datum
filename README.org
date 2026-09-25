@@ -1041,12 +1041,15 @@ directory over SQL, so this presents that as a listing to walk through,
 in the spirit of dired but read-only: nothing here writes, renames or
 deletes.
 
-| Key   | Action                                  |
-|-------+-----------------------------------------|
-| =RET= | Open the directory, or view the file    |
-| =^=   | Parent directory                        |
-| =v=   | View the file at point                  |
-| =w=   | Copy the path at point to the kill ring |
+| Key         | Action                                  |
+|-------------+-----------------------------------------|
+| =RET= / =e= | Open the directory, or view the file    |
+| =^=         | Parent directory                        |
+| =v=         | View the file at point                  |
+| =w=         | Copy the path at point to the kill ring |
+
+=e= opens what point is on, as it does in dired; elsewhere in the admin
+panels it keeps its meaning of enabling or disabling a job.
 
 =C-c s b= opens it at the server's default data directory; with a
 prefix argument it asks where to start.  The parent directory is listed
@@ -1096,7 +1099,17 @@ assembled here; =i= shows it along with the rest of the row.
 Sizes are shown as plain byte counts rather than prettified, so that
 sorting the column with =o= sorts numerically.
 
-=v= reads the first 256KB into a read-only buffer.  The server reads as
+=v= reads the first 256KB into a read-only buffer.  The file is read as
+bytes and decoded on this side rather than by the server, because
+neither server decodes it usefully: SQL Server's =SINGLE_CLOB= reads a
+byte at a time, so a UTF-16 file — which is what Windows tools write,
+XML especially — arrives with a NUL after every character and renders
+as though double-spaced, while =SINGLE_NCLOB= refuses a UTF-16 file
+that carries no byte-order mark, and PostgreSQL's =pg_read_file=
+refuses anything not valid in the server encoding.  A byte-order mark
+settles the encoding where there is one, an interleaved NUL gives away
+UTF-16 where there is not, and bytes that decode as nothing are shown
+replaced rather than refused.  The server reads as
 *its own* service account rather than as you, so it reaches the files it
 owns — its error log, its configuration — and is refused for anything
 else, which is reported rather than raised.  On PostgreSQL, listing a
