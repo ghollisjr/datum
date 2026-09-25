@@ -42,6 +42,34 @@ directly.
 | =C-c t D= | Drop table (with confirmation)               |
 | =C-c t N= | New table — opens the table builder          |
 | =C-c t E= | Edit table — alter the columns it has        |
+| =C-c t S= | New schema                                   |
+| =C-c t X= | Drop schema (confirmation panel)             |
+
+** Databases (=C-c d=)
+
+Wizards that used to need =C-c s a= → =databases=.  The name completes
+from the cached database list and defaults to the one at point.
+
+| Key       | Action                                       |
+|-----------+----------------------------------------------|
+| =C-c d N= | New database                                 |
+| =C-c d E= | Alter database                               |
+| =C-c d D= | Drop database (confirmation panel)           |
+| =C-c d b= | Back up database                             |
+| =C-c d r= | Restore database                             |
+| =C-c d f= | Manage the files the database is made of     |
+
+** Logins, Roles and Users (=C-c g=)
+
+| Key       | Action                                       |
+|-----------+----------------------------------------------|
+| =C-c g N= | New login or role                            |
+| =C-c g E= | Edit a login or role                         |
+| =C-c g D= | Drop a login or role (confirmation panel)    |
+| =C-c g m= | Database user mappings for a login           |
+
+Names complete from whatever the security panel has listed on this
+connection; before it has been opened they are free text.
 
 ** Session Info (=C-c s=)
 

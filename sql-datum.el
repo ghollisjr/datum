@@ -177,6 +177,13 @@ meta envelope at connect time.")
 (defvar-local sql-datum--schemas nil
   "List of schema names populated by :schemas introspection.")
 
+(defvar-local sql-datum--principals nil
+  "Login and role names seen in the security panel.
+
+Principals are not part of the introspection the server pushes at
+connection time, so this fills in from the security panel instead —
+which is what the C-c g keys complete against.")
+
 (defvar-local sql-datum--databases nil
   "List of database names populated by :databases introspection.")
 
@@ -1007,6 +1014,21 @@ still letting an explicit request raise one.")
                        data sqli-buf))))
     (error (message "datum admin-panel error: %s" (error-message-string err)))))
 
+(defun sql-datum--cache-principals (rows sqli-buf)
+  "Remember the principal named in each of ROWS, for C-c g completion.
+SQLI-BUF is the connection the names belong to."
+  (let ((buf (or (and sqli-buf (buffer-live-p sqli-buf) sqli-buf)
+                 (let ((b (sql-find-sqli-buffer 'datum)))
+                   (and b (get-buffer b))))))
+    (when buf
+      (with-current-buffer buf
+        (setq sql-datum--principals
+              (delete-dups
+               (delq nil (mapcar (lambda (row)
+                                   (let ((name (elt row 0)))
+                                     (and name (format "%s" name))))
+                                 rows))))))))
+
 (defun sql-datum--admin-show-panel (data sqli-buf)
   "Display admin panel DATA in a dedicated buffer.
 SQLI-BUF is the originating SQLi buffer."
@@ -1022,6 +1044,8 @@ SQLI-BUF is the originating SQLi buffer."
          (buf-name (sql-datum--admin-buffer-name panel sub-panel))
          (buf (get-buffer-create buf-name))
          (initial (not (buffer-local-value 'sql-datum--admin-panel-name buf))))
+    (when (and (equal panel "security") (null sub-panel) (eql row-id 0))
+      (sql-datum--cache-principals rows sqli-buf))
     (with-current-buffer buf
       ;; Save cursor state before redraw.  Use the window's point if
       ;; the buffer is visible (works even when the user is in a
@@ -5491,6 +5515,128 @@ database, which these wizards do not reach."
                  (sql-datum--admin-payload
                   `((schema . ,(car parts)) (table . ,(cdr parts))))))))
 
+;;; ---------------------------------------------------------------------------
+;;; Database, schema and security wizards from a SQL buffer
+;;; ---------------------------------------------------------------------------
+
+(defun sql-datum--read-database (prompt)
+  "Read a database name with completion from the introspection cache.
+PROMPT is shown without a default; the database named by the first
+segment of the identifier at point is offered as one when it is known."
+  (let* ((buf (sql-find-sqli-buffer 'datum))
+         (buf-obj (and buf (get-buffer buf)))
+         (databases (and buf-obj (buffer-local-value 'sql-datum--databases
+                                                     buf-obj)))
+         (ident (sql-datum--identifier-at-point))
+         (first-seg (when ident (car (split-string ident "\\." t))))
+         (default (when (and first-seg databases)
+                    (cl-find first-seg databases
+                             :test #'string-equal-ignore-case))))
+    (completing-read (if default
+                         (format "%s(default %s) " prompt default)
+                       prompt)
+                     databases nil nil nil nil default)))
+
+(defun sql-datum--read-principal (prompt)
+  "Read a login or role name, completing against what the panel has seen.
+The list fills in from the security panel, so until it has been opened
+on this connection the name is free text."
+  (let* ((buf (sql-find-sqli-buffer 'datum))
+         (buf-obj (and buf (get-buffer buf)))
+         (principals (and buf-obj
+                          (buffer-local-value 'sql-datum--principals
+                                              buf-obj))))
+    (completing-read prompt principals)))
+
+(defun sql-datum--admin-request (panel cmd)
+  "Send CMD and let PANEL show itself when its data comes back."
+  (setq sql-datum--admin-display-request panel)
+  (sql-datum--admin-send-command-to nil cmd))
+
+;; --- Databases ---
+
+(defun sql-datum-new-database ()
+  "Open the wizard for creating a database."
+  (interactive)
+  (sql-datum--admin-send-command-to
+   nil ":admin-action databases new-database"))
+
+(defun sql-datum-alter-database (database)
+  "Open the wizard for altering DATABASE."
+  (interactive (list (sql-datum--read-database "Alter database: ")))
+  (sql-datum--admin-send-command-to
+   nil (format ":admin-action databases edit-database %s" database)))
+
+(defun sql-datum-drop-database (database)
+  "Drop DATABASE, by way of the panel that says what that would take.
+Nothing is dropped until that panel is confirmed."
+  (interactive (list (sql-datum--read-database "Drop database: ")))
+  (sql-datum--admin-request
+   "databases"
+   (format ":admin-action databases drop-check %s" database)))
+
+(defun sql-datum-backup-database (database)
+  "Open the backup wizard for DATABASE."
+  (interactive (list (sql-datum--read-database "Back up database: ")))
+  (sql-datum--admin-send-command-to
+   nil (format ":admin-action databases new-backup %s"
+               (sql-datum--admin-payload `((database . ,database))))))
+
+(defun sql-datum-restore-database (database)
+  "Open the restore wizard for DATABASE."
+  (interactive (list (sql-datum--read-database "Restore database: ")))
+  (sql-datum--admin-send-command-to
+   nil (format ":admin-action databases restore %s"
+               (sql-datum--admin-payload `((database . ,database))))))
+
+(defun sql-datum-database-files (database)
+  "Show the files making up DATABASE."
+  (interactive (list (sql-datum--read-database "Files of database: ")))
+  (sql-datum--admin-request
+   "databases" (format ":admin-action databases files %s" database)))
+
+;; --- Schemas ---
+
+(defun sql-datum-new-schema ()
+  "Open the wizard for creating a schema."
+  (interactive)
+  (sql-datum--admin-send-command-to nil ":admin-action schema new-schema"))
+
+(defun sql-datum-drop-schema (schema)
+  "Drop SCHEMA after the panel confirms what it holds."
+  (interactive (list (sql-datum--read-schema "Drop schema: ")))
+  (when (string-empty-p (string-trim schema))
+    (user-error "No schema given"))
+  (sql-datum--admin-request
+   "schema" (format ":admin-action schema drop-schema %s" schema)))
+
+;; --- Logins, roles and users ---
+
+(defun sql-datum-new-principal ()
+  "Open the wizard for creating a login or role."
+  (interactive)
+  (sql-datum--admin-send-command-to
+   nil ":admin-action security new-principal"))
+
+(defun sql-datum-edit-principal (name)
+  "Open the wizard for altering the login or role NAME."
+  (interactive (list (sql-datum--read-principal "Edit login or role: ")))
+  (sql-datum--admin-send-command-to
+   nil (format ":admin-action security edit-principal %s" name)))
+
+(defun sql-datum-drop-principal (name)
+  "Drop the login or role NAME, by way of its confirmation panel.
+Nothing is dropped until that panel is confirmed."
+  (interactive (list (sql-datum--read-principal "Drop login or role: ")))
+  (sql-datum--admin-request
+   "security" (format ":admin-action security drop-check %s" name)))
+
+(defun sql-datum-user-mappings (name)
+  "Show the databases the login NAME is a user in."
+  (interactive (list (sql-datum--read-principal "Mappings for login: ")))
+  (sql-datum--admin-request
+   "security" (format ":admin-action security mappings %s" name)))
+
 (defun sql-datum-pwd ()
   "Show current user, server, database, and version via :pwd."
   (interactive)
@@ -5950,6 +6096,20 @@ With prefix ARG, prompts for join type (LEFT, RIGHT, etc.)."
   (define-key sql-mode-map (kbd "C-c t D") #'sql-datum-drop-table)
   (define-key sql-mode-map (kbd "C-c t N") #'sql-datum-new-table)
   (define-key sql-mode-map (kbd "C-c t E") #'sql-datum-edit-table)
+  (define-key sql-mode-map (kbd "C-c t S") #'sql-datum-new-schema)
+  (define-key sql-mode-map (kbd "C-c t X") #'sql-datum-drop-schema)
+  ;; C-c d: database operations
+  (define-key sql-mode-map (kbd "C-c d N") #'sql-datum-new-database)
+  (define-key sql-mode-map (kbd "C-c d E") #'sql-datum-alter-database)
+  (define-key sql-mode-map (kbd "C-c d D") #'sql-datum-drop-database)
+  (define-key sql-mode-map (kbd "C-c d b") #'sql-datum-backup-database)
+  (define-key sql-mode-map (kbd "C-c d r") #'sql-datum-restore-database)
+  (define-key sql-mode-map (kbd "C-c d f") #'sql-datum-database-files)
+  ;; C-c g: logins, roles and users
+  (define-key sql-mode-map (kbd "C-c g N") #'sql-datum-new-principal)
+  (define-key sql-mode-map (kbd "C-c g E") #'sql-datum-edit-principal)
+  (define-key sql-mode-map (kbd "C-c g D") #'sql-datum-drop-principal)
+  (define-key sql-mode-map (kbd "C-c g m") #'sql-datum-user-mappings)
   ;; C-c s: session info
   (define-key sql-mode-map (kbd "C-c s p") #'sql-datum-pwd)
   (define-key sql-mode-map (kbd "C-c s t") #'sql-datum-tables)

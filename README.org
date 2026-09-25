@@ -472,6 +472,41 @@ All keybindings are active in =sql-mode= buffers.
 | =C-c t D= | =sql-datum-drop-table=   | Drop table (with confirmation)               |
 | =C-c t N= | =sql-datum-new-table=    | New table — opens the table builder          |
 | =C-c t E= | =sql-datum-edit-table=   | Edit table — alter the columns it has        |
+| =C-c t S= | =sql-datum-new-schema=   | New schema                                   |
+| =C-c t X= | =sql-datum-drop-schema=  | Drop schema (confirmation panel)             |
+
+*** Databases (=C-c d=)
+
+These open the wizards that otherwise need =C-c s a= → =databases=.
+The name completes from the cached database list, defaulting to the
+database named at point.
+
+| Key       | Command                        | Description                              |
+|-----------+--------------------------------+------------------------------------------|
+| =C-c d N= | =sql-datum-new-database=       | New database                             |
+| =C-c d E= | =sql-datum-alter-database=     | Alter database                           |
+| =C-c d D= | =sql-datum-drop-database=      | Drop database (confirmation panel)       |
+| =C-c d b= | =sql-datum-backup-database=    | Back up database                         |
+| =C-c d r= | =sql-datum-restore-database=   | Restore database                         |
+| =C-c d f= | =sql-datum-database-files=     | Manage the files the database is made of |
+
+=C-c d D= and =C-c t X= send the same dependency check the panels do:
+they open the panel that says what dropping would take, and nothing is
+dropped until you confirm there.
+
+*** Logins, Roles and Users (=C-c g=)
+
+| Key       | Command                      | Description                        |
+|-----------+------------------------------+------------------------------------|
+| =C-c g N= | =sql-datum-new-principal=    | New login or role                  |
+| =C-c g E= | =sql-datum-edit-principal=   | Edit a login or role               |
+| =C-c g D= | =sql-datum-drop-principal=   | Drop one (confirmation panel)      |
+| =C-c g m= | =sql-datum-user-mappings=    | Database user mappings for a login |
+
+Logins are not part of the introspection the server pushes when you
+connect, so these complete against whatever the security panel has
+listed on this connection; before it has been opened once, the name is
+free text.
 
 All table operations default to the identifier at point when it matches a
 known table name, so you can place your cursor on a table name and press
