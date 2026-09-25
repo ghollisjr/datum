@@ -3,6 +3,19 @@
 from .base import BaseDriver
 
 
+def _clean_timestamp(value):
+    """Return VALUE as text, or "" where the OS reported no time.
+
+    sys.dm_os_enumerate_filesystem reports 1601-01-01 — the Windows
+    epoch — for a time the filesystem does not keep, which on Linux is
+    every creation and access time.
+    """
+    if value is None:
+        return ""
+    text = str(value)
+    return "" if text.startswith("1601-01-01") else text
+
+
 class MSSQLDriver(BaseDriver):
 
     dialect_name = "mssql"
@@ -476,24 +489,47 @@ class MSSQLDriver(BaseDriver):
         return {"data": (row[0] or "").rstrip("/\\"),
                 "log": (row[1] or "").rstrip("/\\")}
 
+    supports_file_read = True
+
+    def read_file(self, cursor, path, max_bytes=262144):
+        """Return the first MAX_BYTES of PATH as text.
+
+        OPENROWSET reads as the SQL Server service account, so this
+        reaches the files the server itself owns — its error log, say —
+        and is refused for anything else.
+        """
+        # OPENROWSET takes the path as a literal, not a parameter, so it
+        # is escaped rather than bound.  The length is forced to an int
+        # for the same reason.
+        literal = self.quote_ddl_literal(path)
+        limit = int(max_bytes)
+        cursor.execute(
+            f"SELECT LEFT(CAST(BulkColumn AS NVARCHAR(MAX)), {limit}) "
+            f"FROM OPENROWSET(BULK N{literal}, SINGLE_CLOB) AS contents")
+        row = cursor.fetchone()
+        return row[0] if row else ""
+
     def browse_path(self, cursor, path):
         path = path or self.default_paths(cursor).get("data") or "/"
         # Documented and permission-light, but SQL Server 2017+ only.
         try:
             cursor.execute(
-                "SELECT full_filesystem_path, is_directory "
+                "SELECT full_filesystem_path, is_directory, size_in_bytes, "
+                "       last_write_time "
                 "FROM sys.dm_os_enumerate_filesystem(?, N'*') "
                 "ORDER BY is_directory DESC, full_filesystem_path", [path])
             rows = cursor.fetchall()
             entries = []
-            for full, is_dir in rows:
+            for full, is_dir, size, written in rows:
                 if not full:
                     continue
                 name = full.rstrip("/\\")
                 index = max(name.rfind("/"), name.rfind("\\"))
                 entries.append({"name": name[index + 1:] if index >= 0 else name,
                                 "path": full,
-                                "is_dir": bool(is_dir)})
+                                "is_dir": self.coerce_bool(is_dir),
+                                "size": None if size is None else int(size),
+                                "modified": _clean_timestamp(written)})
             return entries
         except Exception:
             pass
@@ -506,7 +542,7 @@ class MSSQLDriver(BaseDriver):
                 continue
             entries.append({"name": name,
                             "path": self.join_path(path, name, cursor),
-                            "is_dir": not bool(is_file)})
+                            "is_dir": not self.coerce_bool(is_file)})
         entries.sort(key=lambda e: (not e["is_dir"], e["name"].lower()))
         return entries
 

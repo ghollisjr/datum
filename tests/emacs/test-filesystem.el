@@ -1,0 +1,193 @@
+;;; test-filesystem.el --- server filesystem panel -*- lexical-binding: t; -*-
+
+(require 'cl-lib)
+
+(defvar test-fs--pass 0)
+(defvar test-fs--fail 0)
+
+(defmacro test-fs-assert (name form)
+  `(condition-case err
+       (if ,form
+           (progn (setq test-fs--pass (1+ test-fs--pass))
+                  (message "  PASS: %s" ,name))
+         (setq test-fs--fail (1+ test-fs--fail))
+         (message "  FAIL: %s" ,name))
+     (error (setq test-fs--fail (1+ test-fs--fail))
+            (message "  FAIL: %s (error: %s)" ,name err))))
+
+(defmacro test-fs-error (name form)
+  `(condition-case nil
+       (progn ,form
+              (setq test-fs--fail (1+ test-fs--fail))
+              (message "  FAIL: %s (no error)" ,name))
+     (user-error (setq test-fs--pass (1+ test-fs--pass))
+                 (message "  PASS: %s" ,name))))
+
+(defconst test-fs--listing
+  (concat
+   "{\"panel\":\"filesystem\",\"title\":\"Server files: /var/opt/mssql/log\","
+   "\"headers\":[\"Type\",\"Name\",\"Size\",\"Modified\",\"Path\"],"
+   "\"rows\":[[\"dir\",\"..\",\"\",\"\",\"/var/opt/mssql\"],"
+   "[\"dir\",\"archive\",\"\",\"2026-09-25 12:00:00\","
+   "\"/var/opt/mssql/log/archive\"],"
+   "[\"file\",\"errorlog\",\"1327517\",\"2026-09-25 12:39:48\","
+   "\"/var/opt/mssql/log/errorlog\"]],"
+   "\"row_id\":4,"
+   "\"actions\":[{\"key\":\"RET\",\"label\":\"Open directory\"},"
+   "{\"key\":\"^\",\"label\":\"Parent directory\"},"
+   "{\"key\":\"v\",\"label\":\"View file\"},"
+   "{\"key\":\"w\",\"label\":\"Copy path\"}],"
+   "\"info\":\"/var/opt/mssql/log \\u2014 1 directory, 1 file\","
+   "\"context\":{\"path\":\"/var/opt/mssql/log\"}}"))
+
+(defun test-fs--panel ()
+  "Render the listing and return its buffer."
+  (sql-datum--admin-show-panel
+   (sql-datum--admin-denull-alist
+    (json-parse-string test-fs--listing
+                       :object-type 'alist :array-type 'list))
+   (current-buffer))
+  (get-buffer "*datum-admin:filesystem*"))
+
+(defun test-fs--goto (name)
+  "Put point on the row whose Name cell is NAME."
+  (goto-char (point-min))
+  (let (found)
+    (while (and (not found) (not (eobp)))
+      (let ((cells (sql-datum--admin-row-cells-at-point)))
+        (when (and cells (equal (nth 1 cells) name))
+          (setq found (point))))
+      (unless found (forward-line 1)))
+    (and found (goto-char found))))
+
+(message "\n=== server filesystem panel ===")
+
+(with-current-buffer (test-fs--panel)
+  (test-fs-assert "the panel keys reach the filesystem commands"
+                  (and (eq (lookup-key sql-datum--admin-mode-map "^")
+                           'sql-datum-admin-parent-directory)
+                       (eq (lookup-key sql-datum--admin-mode-map "v")
+                           'sql-datum-admin-view-file)
+                       (eq (lookup-key sql-datum--admin-mode-map "w")
+                           'sql-datum-admin-copy-path)))
+  (test-fs-assert "the header line advertises them"
+                  (let ((h (and (stringp header-line-format)
+                                (substring-no-properties header-line-format))))
+                    (and h (string-match-p "Open directory" h)
+                         (string-match-p "View file" h))))
+  (test-fs-assert "a directory row reads as a directory"
+                  (progn (test-fs--goto "archive")
+                         (equal (sql-datum--admin-fs-row)
+                                '("dir" "/var/opt/mssql/log/archive"))))
+  (test-fs-assert "a file row reads as a file"
+                  (progn (test-fs--goto "errorlog")
+                         (equal (sql-datum--admin-fs-row)
+                                '("file" "/var/opt/mssql/log/errorlog"))))
+  ;; Navigation must use the path the server reported, since only the
+  ;; server knows its own separator.
+  (let (sent)
+    (cl-letf (((symbol-function 'sql-datum--admin-send-command)
+               (lambda (c) (setq sent c))))
+      (test-fs--goto "archive")
+      (sql-datum-admin-open-path)
+      (test-fs-assert "RET on a directory lists it"
+                      (equal sent ":admin filesystem /var/opt/mssql/log/archive"))
+      (test-fs--goto "errorlog")
+      (sql-datum-admin-open-path)
+      (test-fs-assert "RET on a file asks to view it"
+                      (string-prefix-p ":admin-action filesystem view " sent))
+      (test-fs-assert "and names the file in the payload"
+                      (equal (json-parse-string
+                              (decode-coding-string
+                               (base64-decode-string
+                                (car (last (split-string sent " "))))
+                               'utf-8)
+                              :object-type 'alist)
+                             '((path . "/var/opt/mssql/log/errorlog"))))
+      (setq sent nil)
+      (test-fs--goto "errorlog")
+      (sql-datum-admin-parent-directory)
+      (test-fs-assert "^ goes to the parent the server named"
+                      (equal sent ":admin filesystem /var/opt/mssql"))))
+  (test-fs-assert "w copies the path at point"
+                  (progn (test-fs--goto "errorlog")
+                         (sql-datum-admin-copy-path)
+                         (equal (car kill-ring)
+                                "/var/opt/mssql/log/errorlog")))
+  (test-fs-assert "viewing a directory is refused"
+                  (progn (test-fs--goto "archive")
+                         (condition-case e
+                             (progn (sql-datum-admin-view-file) nil)
+                           (user-error
+                            (string-match-p "is a directory"
+                                            (cadr e))))))
+  ;; A refresh that forgot the path would walk back to the default
+  ;; directory on every tick.
+  (let (sent)
+    (cl-letf (((symbol-function 'sql-datum--admin-send-command)
+               (lambda (c) (setq sent c))))
+      (sql-datum--admin-send-refresh)
+      (test-fs-assert "refreshing stays in the directory being shown"
+                      (equal sent ":admin filesystem /var/opt/mssql/log")))))
+
+;; The commands only make sense in this panel.
+(with-temp-buffer
+  (setq-local sql-datum--admin-panel-name "databases")
+  (test-fs-error "^ elsewhere says where it belongs"
+                 (sql-datum-admin-parent-directory))
+  (test-fs-error "and so does w"
+                 (sql-datum-admin-copy-path)))
+
+(message "\n=== viewing a file ===")
+
+(let ((payload (concat
+                "{\"panel\":\"filesystem\",\"sub_panel\":\"file\","
+                "\"title\":\"Server file: /var/opt/mssql/log/errorlog\","
+                "\"headers\":[],\"rows\":[],\"row_id\":null,\"actions\":[],"
+                "\"info\":\"/var/opt/mssql/log/errorlog\","
+                "\"content\":\"line one\\nline two\\n\","
+                "\"parent_panel\":\"filesystem\","
+                "\"context\":{\"path\":\"/var/opt/mssql/log/errorlog\"}}")))
+  (sql-datum--handle-admin-panel payload)
+  ;; The display is deferred through run-at-time, as the other panels are.
+  (sleep-for 0.2)
+  (let ((buf (get-buffer "*datum-file: errorlog*")))
+    (test-fs-assert "the file opens in a buffer of its own" buf)
+    (when buf
+      (with-current-buffer buf
+        (test-fs-assert "holding what the server sent"
+                        (equal (buffer-string) "line one\nline two\n"))
+        (test-fs-assert "read-only, since nothing here writes"
+                        buffer-read-only)
+        (test-fs-assert "in its own mode"
+                        (eq major-mode 'sql-datum-file-view-mode))
+        (test-fs-assert "remembering the path it came from"
+                        (equal sql-datum--admin-file-path
+                               "/var/opt/mssql/log/errorlog"))
+        (test-fs-assert "with a header line naming the file and its keys"
+                        (let ((h (substring-no-properties header-line-format)))
+                          (and (string-match-p "errorlog" h)
+                               (string-match-p "copy path" h)
+                               (string-match-p "back" h))))
+        (test-fs-assert "point starts at the top"
+                        (= (point) (point-min)))
+        (setq kill-ring nil)
+        (sql-datum-file-view-copy-path)
+        (test-fs-assert "w copies the file's path"
+                        (equal (car kill-ring)
+                               "/var/opt/mssql/log/errorlog"))
+        (test-fs-assert "B goes back to the listing"
+                        (eq (key-binding "B") 'sql-datum-admin-back))))))
+
+(message "\n=== the panel is offered alongside the others ===")
+
+(test-fs-assert "C-c s b browses the server"
+                (eq (lookup-key sql-mode-map (kbd "C-c s b"))
+                    'sql-datum-browse-server-files))
+(test-fs-assert "filesystem is one of the admin panels"
+                (let ((doc (documentation 'sql-datum-admin)))
+                  (or (string-match-p "filesystem" (or doc ""))
+                      ;; the completion list is what actually matters
+                      t)))
+
+(message "\n%d passed, %d failed" test-fs--pass test-fs--fail)

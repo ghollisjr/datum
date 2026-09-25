@@ -1004,6 +1004,10 @@ still letting an explicit request raise one.")
          ((equal sub-panel "path-browser")
           (run-at-time 0 nil #'sql-datum--admin-show-path-browser
                        data sqli-buf))
+         ;; A server file's contents, read-only
+         ((equal sub-panel "file")
+          (run-at-time 0 nil #'sql-datum--admin-show-file
+                       data sqli-buf))
          ;; Multi-section detail view (job detail)
          ((alist-get 'sections data)
           (run-at-time 0 nil #'sql-datum--admin-show-detail
@@ -1524,6 +1528,10 @@ SQLI-BUF is the originating SQLi buffer."
     (define-key map "U" #'sql-datum-admin-user-mappings)
     (define-key map "P" #'sql-datum-admin-permissions)
     (define-key map "G" #'sql-datum-admin-grant)
+    ;; Filesystem panel
+    (define-key map "^" #'sql-datum-admin-parent-directory)
+    (define-key map "v" #'sql-datum-admin-view-file)
+    (define-key map "w" #'sql-datum-admin-copy-path)
     ;; Query text (activity panel)
     (define-key map (kbd "M-.") #'sql-datum-admin-query-text)
     map)
@@ -1800,6 +1808,8 @@ Returns a list of strings by parsing the current line against column widths."
      ((equal panel "ssis")
       (sql-datum--admin-send-command
        (format ":admin ssis executions %s" id)))
+     ((equal panel "filesystem")
+      (sql-datum-admin-open-path))
      (t (message "No detail view for this panel")))))
 
 (defun sql-datum-admin-job-history ()
@@ -2198,6 +2208,64 @@ and the row names the database."
   (if (equal (sql-datum--admin-sub-panel) "permissions")
       (sql-datum-admin-revoke-permission)
     (sql-datum-admin-restore)))
+
+(defun sql-datum--admin-fs-row ()
+  "Return (TYPE PATH) for the filesystem row at point."
+  (unless (equal sql-datum--admin-panel-name "filesystem")
+    (user-error "Not in the server filesystem panel"))
+  (let ((cells (sql-datum--admin-row-cells-at-point))
+        (path (sql-datum--admin-row-id-at-point)))
+    (unless path (user-error "No file or directory at point"))
+    (list (if cells (nth 0 cells) "file") path)))
+
+(defun sql-datum-admin-open-path ()
+  "Open the directory at point, or view the file at point."
+  (interactive)
+  (pcase-let ((`(,type ,path) (sql-datum--admin-fs-row)))
+    (if (equal type "dir")
+        (progn
+          (setq sql-datum--admin-display-request "filesystem")
+          (sql-datum--admin-send-command
+           (format ":admin filesystem %s" path)))
+      (sql-datum-admin-view-file))))
+
+(defun sql-datum-admin-parent-directory ()
+  "Go up one directory in the server filesystem panel."
+  (interactive)
+  (unless (equal sql-datum--admin-panel-name "filesystem")
+    (user-error "Not in the server filesystem panel"))
+  ;; The panel lists the parent as its first row, so this is the same
+  ;; path the server already worked out rather than one guessed here.
+  (let ((parent (save-excursion
+                  (goto-char (point-min))
+                  (catch 'found
+                    (while (not (eobp))
+                      (let ((cells (sql-datum--admin-row-cells-at-point)))
+                        (when (and cells (equal (nth 1 cells) ".."))
+                          (throw 'found (sql-datum--admin-row-id-at-point))))
+                      (forward-line 1))
+                    nil))))
+    (unless parent (user-error "Already at the top"))
+    (setq sql-datum--admin-display-request "filesystem")
+    (sql-datum--admin-send-command
+     (format ":admin filesystem %s" parent))))
+
+(defun sql-datum-admin-view-file ()
+  "View the contents of the file at point."
+  (interactive)
+  (pcase-let ((`(,type ,path) (sql-datum--admin-fs-row)))
+    (when (equal type "dir")
+      (user-error "%s is a directory" path))
+    (sql-datum--admin-send-command
+     (format ":admin-action filesystem view %s"
+             (sql-datum--admin-payload `((path . ,path)))))))
+
+(defun sql-datum-admin-copy-path ()
+  "Copy the path at point to the kill ring."
+  (interactive)
+  (pcase-let ((`(,_type ,path) (sql-datum--admin-fs-row)))
+    (kill-new path)
+    (message "datum: %s" path)))
 
 (defun sql-datum-admin-stop-or-shrink ()
   "Shrink the file at point, or stop the job at point.
@@ -3524,6 +3592,57 @@ rebuilds the form.")
   (interactive)
   (sql-datum--path-browser-return nil))
 
+(defvar sql-datum--admin-file-path nil
+  "Path of the server file shown in this buffer.")
+(make-variable-buffer-local 'sql-datum--admin-file-path)
+
+(defvar sql-datum-file-view-mode-map
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map special-mode-map)
+    (define-key map "w" #'sql-datum-file-view-copy-path)
+    (define-key map "B" #'sql-datum-admin-back)
+    map)
+  "Keymap for a buffer showing a server file.")
+
+(define-derived-mode sql-datum-file-view-mode special-mode "datum-file"
+  "Major mode for viewing a file read from the server."
+  (setq buffer-read-only t))
+
+(defun sql-datum-file-view-copy-path ()
+  "Copy the path of the file being viewed to the kill ring."
+  (interactive)
+  (unless sql-datum--admin-file-path (user-error "No file here"))
+  (kill-new sql-datum--admin-file-path)
+  (message "datum: %s" sql-datum--admin-file-path))
+
+(defun sql-datum--admin-show-file (data sqli-buf)
+  "Show the contents of a server file described by DATA.
+SQLI-BUF is the originating SQLi buffer."
+  (let* ((path (or (alist-get 'path (alist-get 'context data)) ""))
+         (content (or (alist-get 'content data) ""))
+         (buf (get-buffer-create
+               (format "*datum-file: %s*" (file-name-nondirectory
+                                           (directory-file-name path))))))
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert content)
+        (goto-char (point-min)))
+      (sql-datum-file-view-mode)
+      (setq sql-datum--admin-file-path path)
+      (setq sql-datum--admin-sqli-buf sqli-buf)
+      ;; The panel this came from, so B goes back to the listing.
+      (setq sql-datum--admin-panel-data data)
+      ;; The helper takes the panel's action list, not a string, so the
+      ;; description is prepended rather than passed in.
+      (setq-local header-line-format
+                  (concat " " (or (alist-get 'info data) path) "  "
+                          (sql-datum--admin-header-line
+                           nil
+                           '(("w" . "copy path") ("B" . "back")
+                             ("q" . "quit"))))))
+    (switch-to-buffer buf)))
+
 (defun sql-datum--admin-show-path-browser (data sqli-buf)
   "Display a server directory listing from DATA."
   (let* ((rows (alist-get 'rows data))
@@ -3600,6 +3719,26 @@ rebuilds the form.")
                               (alist-get 'login context))
                          (format ":admin-action security mappings %s"
                                  (alist-get 'login context)))
+                        ;; Refreshing must stay on the principal and
+                        ;; database being looked at, not fall back to
+                        ;; the login list.
+                        ((and (equal sub "permissions")
+                              (alist-get 'principal context))
+                         (format ":admin-action security permissions %s"
+                                 (sql-datum--admin-payload
+                                  (let ((db (alist-get 'database context)))
+                                    (append
+                                     `((principal . ,(alist-get 'principal
+                                                                context)))
+                                     (when (and db (not (string-empty-p db)))
+                                       `((database . ,db))))))))
+                        ;; A directory listing has to refresh at the
+                        ;; directory being shown, or every tick would
+                        ;; walk back to the default one.
+                        ((and (equal panel "filesystem")
+                              (alist-get 'path context))
+                         (format ":admin filesystem %s"
+                                 (alist-get 'path context)))
                         (t (format ":admin %s" panel))))
                    (format ":admin %s" panel))))
         (sql-datum--admin-send-command cmd)))))
@@ -5796,11 +5935,22 @@ With a prefix argument, prompt for a filter pattern."
 With a prefix argument, prompts for the panel name."
   (interactive
    (list (completing-read "Admin panel: "
-                          '("activity" "databases" "jobs" "schema"
-                            "security" "ssis")
+                          '("activity" "databases" "filesystem" "jobs"
+                            "schema" "security" "ssis")
                           nil t)))
   (setq sql-datum--admin-display-request panel)
   (sql-datum--send-command (format ":admin %s" panel) t))
+
+(defun sql-datum-browse-server-files (path)
+  "Browse the server's filesystem, starting at PATH.
+With no PATH the server's default data directory is used."
+  (interactive
+   (list (when current-prefix-arg
+           (read-string "Server directory: "))))
+  (sql-datum--admin-request
+   "filesystem" (if (and path (not (string-empty-p (string-trim path))))
+                    (format ":admin filesystem %s" path)
+                  ":admin filesystem")))
 
 (defun sql-datum-version ()
   "Show server version via :version."
@@ -6213,6 +6363,7 @@ With prefix ARG, prompts for join type (LEFT, RIGHT, etc.)."
   (define-key sql-mode-map (kbd "C-c s R") #'sql-datum-routines)
   (define-key sql-mode-map (kbd "C-c s r") #'sql-datum-running)
   (define-key sql-mode-map (kbd "C-c s a") #'sql-datum-admin)
+  (define-key sql-mode-map (kbd "C-c s b") #'sql-datum-browse-server-files)
   (define-key sql-mode-map (kbd "C-c s v") #'sql-datum-version)
   (define-key sql-mode-map (kbd "C-c s u") #'sql-datum-user)
   ;; C-c s f: refresh introspection

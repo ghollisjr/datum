@@ -18,9 +18,11 @@ def _ensure_panels():
     """Lazy-load panel modules."""
     if _panels:
         return
-    from .panels import activity, databases, jobs, schema, security, ssis
+    from .panels import (activity, databases, filesystem, jobs, schema,
+                         security, ssis)
     _panels["activity"] = activity
     _panels["databases"] = databases
+    _panels["filesystem"] = filesystem
     _panels["jobs"] = jobs
     _panels["schema"] = schema
     _panels["security"] = security

@@ -29,6 +29,7 @@ standalone from any terminal.
   - Schemas and tables: a column builder, and altering columns of a table that exists
   - Logins, roles and database users, with passwords treated as secrets
   - Object-level permissions: grant, deny and revoke down to a column
+  - A read-only browser for the server's own filesystem
   - SQL Agent jobs, steps, schedules and history (MSSQL)
   - Reachable from the query buffer by key as well as from the panels:
     =C-c t= for tables and schemas, =C-c d= for databases, =C-c g= for
@@ -534,7 +535,8 @@ dialect-aware: they use =TOP= / =NEWID()= / =OBJECT_ID()= on MSSQL and
 | =C-c s R= | =sql-datum-routines=     | List routines (=C-u= to filter with LIKE)                  |
 | =C-c s v= | =sql-datum-version=      | Show server version                                        |
 | =C-c s u= | =sql-datum-user=         | Show current user                                          |
-| =C-c s a= | =sql-datum-admin=        | Open admin panel (activity, databases, jobs, schema, security, ssis) |
+| =C-c s a= | =sql-datum-admin=        | Open admin panel (activity, databases, filesystem, jobs, schema, security, ssis) |
+| =C-c s b= | =sql-datum-browse-server-files= | Browse the server's filesystem (=C-u= for a starting path) |
 | =C-c s f= | =sql-datum-refresh=      | Refresh introspection data (including cross-db caches)     |
 | =C-c s w= | =sql-datum-copy-last-result= | Copy last result to kill ring (already org table format)    |
 | =C-c s F= | =sql-datum-toggle-auto-refresh= | Toggle periodic introspection refresh (=C-u N= for interval) |
@@ -767,6 +769,7 @@ Admin panels provide interactive views for server administration.  Press
 - =databases= — Create, alter, drop databases; manage files, backup/restore (MSSQL, PostgreSQL)
 - =jobs=      — SQL Agent jobs, steps, schedules, history (MSSQL)
 - =schema=    — Schemas and tables of the current database (MSSQL, PostgreSQL)
+- =filesystem= — The server's own disk, read-only (MSSQL, PostgreSQL)
 - =security=  — Logins, roles, database users (MSSQL, PostgreSQL)
 - =ssis=      — SSIS packages (MSSQL)
 
@@ -1028,6 +1031,43 @@ Permission names are checked against the list for their scope rather
 than quoted into the statement, so a name that is not one of them cannot
 reach the server at all.  Identifiers are escaped per dialect as
 everywhere else.
+
+*** Server filesystem panel
+
+The files a database server cares about — data files, logs, backups —
+live on the *server's* filesystem, which is usually not the machine
+Emacs is running on.  Both MSSQL and PostgreSQL can enumerate a
+directory over SQL, so this presents that as a listing to walk through,
+in the spirit of dired but read-only: nothing here writes, renames or
+deletes.
+
+| Key   | Action                                  |
+|-------+-----------------------------------------|
+| =RET= | Open the directory, or view the file    |
+| =^=   | Parent directory                        |
+| =v=   | View the file at point                  |
+| =w=   | Copy the path at point to the kill ring |
+
+=C-c s b= opens it at the server's default data directory; with a
+prefix argument it asks where to start.  The parent directory is listed
+as a =..= row, so going up is visible rather than something you have to
+know.
+
+Path arithmetic stays on the server side, because the separator depends
+on the server's OS and the Emacs client has no way to know it — SQL
+Server runs on Linux as readily as on Windows.  Navigation therefore
+uses the full path the server reported for each entry rather than one
+assembled here.
+
+Sizes are shown as plain byte counts rather than prettified, so that
+sorting the column with =o= sorts numerically.
+
+=v= reads the first 256KB into a read-only buffer.  The server reads as
+*its own* service account rather than as you, so it reaches the files it
+owns — its error log, its configuration — and is refused for anything
+else, which is reported rather than raised.  On PostgreSQL, listing a
+directory needs superuser or membership of =pg_read_server_files=; a
+plain role gets a permission error from =pg_ls_dir=.
 
 *** SSIS panel
 

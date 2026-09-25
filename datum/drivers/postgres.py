@@ -832,13 +832,28 @@ class PostgreSQLDriver(BaseDriver):
         cursor.execute("""
             SELECT entry,
                    rtrim(?, '/') || '/' || entry AS full_path,
-                   COALESCE((pg_stat_file(rtrim(?, '/') || '/' || entry,
-                                          true)).isdir, false) AS is_dir
+                   COALESCE(st.isdir, false) AS is_dir,
+                   st.size, st.modification
             FROM pg_ls_dir(?) AS entry
+            LEFT JOIN LATERAL pg_stat_file(
+                rtrim(?, '/') || '/' || entry, true) AS st ON true
             ORDER BY is_dir DESC, entry
         """, [path, path, path])
-        return [{"name": name, "path": full, "is_dir": bool(is_dir)}
-                for name, full, is_dir in cursor.fetchall()]
+        return [{"name": name, "path": full,
+                 "is_dir": self.coerce_bool(is_dir),
+                 "size": None if size is None else int(size),
+                 "modified": "" if modified is None else str(modified)}
+                for name, full, is_dir, size, modified in cursor.fetchall()]
+
+    # --- Reading a file's contents ---
+
+    supports_file_read = True
+
+    def read_file(self, cursor, path, max_bytes=262144):
+        """Return the first MAX_BYTES of PATH as text."""
+        cursor.execute("SELECT pg_read_file(?, 0, ?)", [path, max_bytes])
+        row = cursor.fetchone()
+        return row[0] if row else ""
 
     def database_options(self, cursor=None):
         roles = self._lookup(cursor, r"""

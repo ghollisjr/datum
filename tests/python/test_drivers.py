@@ -1830,3 +1830,72 @@ class TestObjectPermissions:
     def test_postgres_form_has_no_denied_list(self, postgres):
         keys = [f["key"] for f in postgres.permission_options("object", {})]
         assert keys == ["granted"]
+
+
+class TestServerFilesystem:
+    """Listing and reading the server's filesystem."""
+
+    @pytest.fixture
+    def mssql(self):
+        return MSSQLDriver.__new__(MSSQLDriver)
+
+    @pytest.fixture
+    def postgres(self):
+        return PostgreSQLDriver.__new__(PostgreSQLDriver)
+
+    def test_both_dialects_can_list_and_read(self, mssql, postgres):
+        assert mssql.supports_path_browse and mssql.supports_file_read
+        assert postgres.supports_path_browse and postgres.supports_file_read
+
+    # --- the boolean the ODBC drivers hand back ---
+
+    def test_a_string_zero_is_false(self, mssql):
+        # The PostgreSQL driver returns booleans as "1" and "0", and
+        # bool("0") is True -- which reported every file as a directory.
+        assert mssql.coerce_bool("0") is False
+        assert mssql.coerce_bool("f") is False
+        assert mssql.coerce_bool("false") is False
+        assert mssql.coerce_bool("") is False
+
+    def test_a_string_one_is_true(self, mssql):
+        assert mssql.coerce_bool("1") is True
+        assert mssql.coerce_bool("t") is True
+        assert mssql.coerce_bool("true") is True
+
+    def test_integers_and_bools_still_work(self, mssql):
+        # MSSQL returns integers, which bool() always handled.
+        assert mssql.coerce_bool(1) is True
+        assert mssql.coerce_bool(0) is False
+        assert mssql.coerce_bool(True) is True
+        assert mssql.coerce_bool(None) is False
+
+    # --- path arithmetic happens on the server's terms ---
+
+    def test_parent_of_a_posix_root_stays_root(self, mssql):
+        assert mssql.parent_path("/") is None
+        assert mssql.parent_path("/var") == "/"
+        assert mssql.parent_path("/var/opt/mssql") == "/var/opt"
+
+    def test_a_windows_drive_root_keeps_its_separator(self, mssql):
+        # "C:" is not a usable path; "C:\" is.
+        assert mssql.parent_path("C:\\Data\\SQL") == "C:\\Data"
+        assert mssql.parent_path("C:\\Data") == "C:\\"
+
+    def test_joining_follows_the_separator_already_in_the_path(self, mssql):
+        assert mssql.join_path("C:\\Data", "x.mdf") == "C:\\Data\\x.mdf"
+        assert mssql.join_path("/var/opt", "x.mdf") == "/var/opt/x.mdf"
+
+    # --- reading ---
+
+    def test_mssql_escapes_the_path_it_cannot_parameterise(self, mssql):
+        # OPENROWSET takes the path as a literal, so a quote in a name
+        # must not be able to close it.
+        assert mssql.quote_ddl_literal("/tmp/it's.txt") == "'/tmp/it''s.txt'"
+
+    def test_the_epoch_placeholder_is_not_shown_as_a_date(self):
+        # The DMV reports 1601-01-01 for a time the filesystem does not
+        # keep, which on Linux is every creation and access time.
+        from datum.drivers.mssql import _clean_timestamp
+        assert _clean_timestamp("1601-01-01 00:00:00") == ""
+        assert _clean_timestamp(None) == ""
+        assert _clean_timestamp("2026-09-25 12:39:48") == "2026-09-25 12:39:48"

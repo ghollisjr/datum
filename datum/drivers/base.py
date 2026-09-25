@@ -812,6 +812,18 @@ class BaseDriver(ABC):
 
     supports_path_browse = False
 
+    @staticmethod
+    def coerce_bool(value):
+        """Return VALUE as a bool, however the ODBC driver spelled it.
+
+        The PostgreSQL driver hands booleans back as the strings "1" and
+        "0", and bool("0") is True, so a plain bool() call reports every
+        row as true.  MSSQL returns integers, which bool() does handle.
+        """
+        if isinstance(value, str):
+            return value.strip().lower() not in ("", "0", "f", "false", "n")
+        return bool(value)
+
     def path_separator(self, cursor=None):
         """Return the server's filesystem path separator."""
         return "/"
@@ -853,11 +865,22 @@ class BaseDriver(ABC):
     def browse_path(self, cursor, path):
         """List PATH on the server, newest strategy first.
 
-        Returns a list of dicts with `name`, `path` and `is_dir` keys.
+        Returns a list of dicts with `name`, `path` and `is_dir` keys,
+        and `size` and `modified` where the server reports them — an
+        older strategy may not, so both are optional.
         Raises NotImplementedError when the dialect cannot enumerate.
         """
         raise NotImplementedError(
             f"Browsing server paths is not supported on {self.dialect_name}")
+
+    # Reading a file back is a separate privilege from listing a
+    # directory, and a dialect may have one without the other.
+    supports_file_read = False
+
+    def read_file(self, cursor, path, max_bytes=262144):
+        """Return the first MAX_BYTES of PATH as text."""
+        raise NotImplementedError(
+            f"Reading server files is not supported on {self.dialect_name}")
 
     def default_paths(self, cursor):
         """Return {"data": path, "log": path} defaults, empty when unknown."""
