@@ -666,6 +666,349 @@ class MSSQLDriver(BaseDriver):
                 "JOIN sys.databases d ON s.database_id = d.database_id "
                 "WHERE d.name = ? AND s.session_id <> @@SPID", [name])
 
+    # --- Logins and database users ---
+
+    supports_security = True
+    supports_user_mapping = True
+    principal_noun = "login"
+
+    def list_principals(self, cursor):
+        cursor.execute("""
+            SELECT sp.name,
+                   sp.type_desc,
+                   CASE WHEN sp.is_disabled = 1 THEN 'Disabled'
+                        ELSE 'Enabled' END,
+                   ISNULL(sp.default_database_name, ''),
+                   ISNULL(STUFF((SELECT ', ' + r.name
+                                 FROM sys.server_role_members rm
+                                 JOIN sys.server_principals r
+                                   ON r.principal_id = rm.role_principal_id
+                                 WHERE rm.member_principal_id = sp.principal_id
+                                 FOR XML PATH('')), 1, 2, ''), ''),
+                   CONVERT(VARCHAR(19), sp.create_date, 120)
+            FROM sys.server_principals sp
+            WHERE sp.type IN ('S', 'U', 'G') AND sp.name NOT LIKE '##%'
+            ORDER BY sp.name
+        """)
+        headers = ["Login", "Type", "State", "Default Database",
+                   "Server Roles", "Created"]
+        rows = [[str(v) if v is not None else "" for v in row]
+                for row in cursor.fetchall()]
+        return headers, rows
+
+    def _server_roles(self, cursor):
+        return self._lookup(cursor,
+                            "SELECT name FROM sys.server_principals "
+                            "WHERE type = 'R' AND name NOT LIKE '##%' "
+                            "ORDER BY name")
+
+    def principal_settings(self, cursor, name):
+        cursor.execute("""
+            SELECT sp.name, sp.type_desc, sp.is_disabled,
+                   ISNULL(sp.default_database_name, ''),
+                   ISNULL(sl.is_policy_checked, 0),
+                   ISNULL(sl.is_expiration_checked, 0)
+            FROM sys.server_principals sp
+            LEFT JOIN sys.sql_logins sl ON sl.principal_id = sp.principal_id
+            WHERE sp.name = ? AND sp.type IN ('S', 'U', 'G')
+        """, [name])
+        row = cursor.fetchone()
+        if not row:
+            return {}
+        cursor.execute("""
+            SELECT r.name FROM sys.server_role_members rm
+            JOIN sys.server_principals r
+              ON r.principal_id = rm.role_principal_id
+            JOIN sys.server_principals m
+              ON m.principal_id = rm.member_principal_id
+            WHERE m.name = ? ORDER BY r.name
+        """, [name])
+        return {
+            "name": row[0],
+            "login_type": row[1],
+            "disabled": bool(row[2]),
+            "default_database": row[3],
+            "check_policy": bool(row[4]),
+            "check_expiration": bool(row[5]),
+            "roles": [r[0] for r in cursor.fetchall()],
+        }
+
+    def principal_options(self, cursor, current=None):
+        databases = self._lookup(
+            cursor, "SELECT name FROM sys.databases WHERE state = 0 "
+                    "ORDER BY name")
+        roles = self._server_roles(cursor)
+        editing = current is not None
+        current = current or {}
+        # A Windows login has no password to set here; the type is fixed
+        # once the login exists.
+        windows = editing and current.get("login_type") != "SQL_LOGIN"
+
+        fields = [
+            {"key": "name", "label": "Login Name", "type": "string",
+             "default": current.get("name", ""), "required": True,
+             "help": "DOMAIN\\user for a Windows login" if not editing else None},
+        ]
+        if not editing:
+            fields.append(
+                {"key": "login_type", "label": "Authentication",
+                 "type": "choice", "default": "SQL_LOGIN",
+                 "choices": [["SQL_LOGIN", "SQL Server authentication"],
+                             ["WINDOWS_LOGIN", "Windows authentication"]]})
+        if not windows:
+            fields.append(
+                {"key": "password", "label": "Password", "type": "password",
+                 "default": "",
+                 "help": ("leave blank to keep the current password"
+                          if editing else "required for SQL authentication")})
+            fields.extend([
+                {"key": "check_policy", "label": "Enforce Password Policy",
+                 "type": "bool", "default": current.get("check_policy", True)},
+                {"key": "check_expiration", "label": "Enforce Expiration",
+                 "type": "bool",
+                 "default": current.get("check_expiration", False)},
+            ])
+        fields.extend([
+            {"key": "default_database", "label": "Default Database",
+             "type": "choice" if databases else "string",
+             "default": current.get("default_database", "master"),
+             "choices": [[d, d] for d in databases] if databases else None},
+            {"key": "disabled", "label": "Disabled", "type": "bool",
+             "default": current.get("disabled", False)},
+            {"key": "roles", "label": "Server Roles", "type": "multi",
+             "default": current.get("roles", []),
+             "choices": [[r, r] for r in roles]},
+        ])
+        return fields
+
+    def sql_create_principal(self, opts):
+        name = opts.get("name", "")
+        login = self.quote_ddl_identifier(name)
+        windows = opts.get("login_type") == "WINDOWS_LOGIN"
+        stmts = []
+
+        if windows:
+            sql = f"CREATE LOGIN {login} FROM WINDOWS"
+            clauses = []
+        else:
+            password = opts.get("password") or ""
+            if not password:
+                raise ValueError(
+                    "a password is required for SQL Server authentication")
+            sql = (f"CREATE LOGIN {login} WITH PASSWORD = "
+                   f"{self.quote_ddl_literal(password)}")
+            clauses = [
+                f"CHECK_POLICY = {'ON' if opts.get('check_policy', True) else 'OFF'}",
+                f"CHECK_EXPIRATION = "
+                f"{'ON' if opts.get('check_expiration') else 'OFF'}",
+            ]
+        default_db = (opts.get("default_database") or "").strip()
+        if default_db:
+            clause = (f"DEFAULT_DATABASE = "
+                      f"{self.quote_ddl_identifier(default_db)}")
+            clauses = ([clause] + clauses if windows else clauses + [clause])
+        if clauses:
+            sql += (", " if not windows else " WITH ") + ", ".join(clauses)
+        stmts.append(sql)
+
+        if opts.get("disabled"):
+            stmts.append(f"ALTER LOGIN {login} DISABLE")
+        for role in opts.get("roles") or []:
+            stmts.append(f"ALTER SERVER ROLE "
+                         f"{self.quote_ddl_identifier(role)} "
+                         f"ADD MEMBER {login}")
+        return stmts
+
+    def sql_alter_principal(self, name, opts, current):
+        login = self.quote_ddl_identifier(name)
+        stmts = []
+
+        def changed(key):
+            return key in opts and opts[key] != current.get(key)
+
+        # A blank password field means "leave it alone", not "blank it".
+        password = (opts.get("password") or "").strip()
+        if password:
+            stmts.append(f"ALTER LOGIN {login} WITH PASSWORD = "
+                         f"{self.quote_ddl_literal(password)}")
+        for key, clause in (("check_policy", "CHECK_POLICY"),
+                            ("check_expiration", "CHECK_EXPIRATION")):
+            if changed(key):
+                stmts.append(f"ALTER LOGIN {login} WITH {clause} = "
+                             f"{'ON' if opts[key] else 'OFF'}")
+        if changed("default_database"):
+            stmts.append(
+                f"ALTER LOGIN {login} WITH DEFAULT_DATABASE = "
+                f"{self.quote_ddl_identifier(opts['default_database'])}")
+        if changed("disabled"):
+            stmts.append(f"ALTER LOGIN {login} "
+                         f"{'DISABLE' if opts['disabled'] else 'ENABLE'}")
+
+        wanted = set(opts.get("roles") or [])
+        held = set(current.get("roles") or [])
+        for role in sorted(wanted - held):
+            stmts.append(f"ALTER SERVER ROLE "
+                         f"{self.quote_ddl_identifier(role)} ADD MEMBER {login}")
+        for role in sorted(held - wanted):
+            stmts.append(f"ALTER SERVER ROLE "
+                         f"{self.quote_ddl_identifier(role)} DROP MEMBER {login}")
+
+        # Renaming last, so the statements above address the original name.
+        if changed("name"):
+            stmts.append(f"ALTER LOGIN {login} WITH NAME = "
+                         f"{self.quote_ddl_identifier(opts['name'])}")
+        return stmts
+
+    def sql_drop_principal(self, name, force=False):
+        stmts = []
+        if force:
+            # KILL takes a literal session id, so the ids are gathered
+            # into a batch and executed.
+            literal = self.quote_ddl_literal(self.validate_identifier(name))
+            stmts.append(
+                "DECLARE @kill NVARCHAR(MAX) = N''; "
+                "SELECT @kill += N'KILL ' + CAST(session_id AS NVARCHAR(10)) "
+                "+ N'; ' FROM sys.dm_exec_sessions "
+                f"WHERE login_name = {literal} AND session_id <> @@SPID; "
+                "IF LEN(@kill) > 0 EXEC sp_executesql @kill")
+        stmts.append(f"DROP LOGIN {self.quote_ddl_identifier(name)}")
+        return stmts
+
+    def sql_principal_sessions(self, name):
+        return ("SELECT COUNT(*) FROM sys.dm_exec_sessions "
+                "WHERE login_name = ? AND session_id <> @@SPID", [name])
+
+    # --- Database user mapping ---
+
+    def list_user_mappings(self, cursor, login):
+        # sys.database_principals only ever describes the current
+        # database, so each database is asked in turn rather than joined
+        # against — a single query would silently report master's users
+        # for every row.
+        databases = self._lookup(
+            cursor, "SELECT name FROM sys.databases WHERE state = 0 "
+                    "ORDER BY name")
+        headers = ["Database", "User", "Database Roles"]
+        rows = []
+        for database in databases:
+            db = self.quote_ddl_identifier(database)
+            try:
+                cursor.execute(f"""
+                    SELECT dp.name,
+                           ISNULL(STUFF((SELECT ', ' + r.name
+                                         FROM {db}.sys.database_role_members rm
+                                         JOIN {db}.sys.database_principals r
+                                           ON r.principal_id = rm.role_principal_id
+                                         WHERE rm.member_principal_id
+                                               = dp.principal_id
+                                         FOR XML PATH('')), 1, 2, ''), '')
+                    FROM {db}.sys.database_principals dp
+                    WHERE dp.sid = SUSER_SID(?)
+                """, [login])
+                row = cursor.fetchone()
+            except Exception:
+                # A database the caller cannot read is skipped rather
+                # than failing the whole listing.
+                continue
+            if row:
+                rows.append([database, row[0] or "", row[1] or ""])
+        return headers, rows
+
+    def user_roles(self, cursor, database, username):
+        """Return the database roles USERNAME holds in DATABASE."""
+        db = self.quote_ddl_identifier(database)
+        try:
+            cursor.execute(f"""
+                SELECT r.name
+                FROM {db}.sys.database_role_members rm
+                JOIN {db}.sys.database_principals r
+                  ON r.principal_id = rm.role_principal_id
+                JOIN {db}.sys.database_principals m
+                  ON m.principal_id = rm.member_principal_id
+                WHERE m.name = ? ORDER BY r.name
+            """, [username])
+            return [r[0] for r in cursor.fetchall()]
+        except Exception:
+            return []
+
+    def user_role_options(self, cursor, database, current_roles):
+        """Field descriptors for setting a user's roles in DATABASE."""
+        return [
+            {"key": "roles", "label": "Database Roles", "type": "multi",
+             "default": list(current_roles or []),
+             "choices": [[r, r]
+                         for r in self._database_roles(cursor, database)]},
+        ]
+
+    def sql_set_user_roles(self, database, username, roles, current_roles):
+        """Return statements reconciling USERNAME's roles in DATABASE."""
+        self.validate_identifier(database)
+        user = self.quote_ddl_identifier(username)
+        wanted, held = set(roles or []), set(current_roles or [])
+        stmts = []
+        for role in sorted(wanted - held):
+            stmts.append(self._in_database(
+                database, f"ALTER ROLE {self.quote_ddl_identifier(role)} "
+                          f"ADD MEMBER {user}"))
+        for role in sorted(held - wanted):
+            stmts.append(self._in_database(
+                database, f"ALTER ROLE {self.quote_ddl_identifier(role)} "
+                          f"DROP MEMBER {user}"))
+        return stmts
+
+    def _database_roles(self, cursor, database):
+        db = self.quote_ddl_identifier(database)
+        try:
+            cursor.execute(f"SELECT name FROM {db}.sys.database_principals "
+                           f"WHERE type = 'R' ORDER BY name")
+            return [r[0] for r in cursor.fetchall()]
+        except Exception:
+            return []
+
+    def user_mapping_options(self, cursor, login):
+        databases = self._lookup(
+            cursor, "SELECT name FROM sys.databases WHERE state = 0 "
+                    "AND name NOT IN ('master','tempdb','model','msdb') "
+                    "ORDER BY name")
+        return [
+            {"key": "database", "label": "Database",
+             "type": "choice" if databases else "string",
+             "default": databases[0] if databases else "",
+             "choices": [[d, d] for d in databases] if databases else None,
+             "required": True},
+            {"key": "username", "label": "User Name", "type": "string",
+             "default": login,
+             "help": "defaults to the login name"},
+        ]
+
+    def _in_database(self, database, statement):
+        """Wrap STATEMENT so it runs inside DATABASE.
+
+        CREATE USER and ALTER ROLE only act on the current database, and a
+        USE would move the shared session.
+        """
+        return (f"EXEC {self.quote_ddl_identifier(database)}..sp_executesql "
+                f"N{self.quote_ddl_literal(statement)}")
+
+    def sql_add_user_mapping(self, login, opts):
+        database = (opts.get("database") or "").strip()
+        username = (opts.get("username") or login).strip()
+        self.validate_identifier(database)
+        inner = (f"CREATE USER {self.quote_ddl_identifier(username)} "
+                 f"FOR LOGIN {self.quote_ddl_identifier(login)}")
+        stmts = [self._in_database(database, inner)]
+        for role in opts.get("roles") or []:
+            stmts.append(self._in_database(
+                database,
+                f"ALTER ROLE {self.quote_ddl_identifier(role)} "
+                f"ADD MEMBER {self.quote_ddl_identifier(username)}"))
+        return stmts
+
+    def sql_remove_user_mapping(self, login, database):
+        self.validate_identifier(database)
+        return [self._in_database(
+            database, f"DROP USER {self.quote_ddl_identifier(login)}")]
+
     # --- Database file management ---
 
     supports_file_management = True
@@ -792,9 +1135,20 @@ class MSSQLDriver(BaseDriver):
         return [f"ALTER DATABASE {db} MODIFY FILE "
                 f"{self._file_spec(logical, None, opts)}"]
 
-    def sql_remove_file(self, name, logical):
-        return [f"ALTER DATABASE {self.quote_ddl_identifier(name)} "
-                f"REMOVE FILE {self.quote_ddl_identifier(logical)}"]
+    def sql_remove_file(self, name, logical, empty_first=True):
+        self.validate_identifier(name)
+        self.validate_identifier(logical)
+        stmts = []
+        if empty_first:
+            # REMOVE FILE fails while the file still holds pages, and a
+            # plain shrink does not empty one.  EMPTYFILE migrates the
+            # pages to the filegroup's other files first.
+            stmts.append(self._in_database(
+                name, f"DBCC SHRINKFILE ("
+                      f"{self.quote_ddl_literal(logical)}, EMPTYFILE)"))
+        stmts.append(f"ALTER DATABASE {self.quote_ddl_identifier(name)} "
+                     f"REMOVE FILE {self.quote_ddl_identifier(logical)}")
+        return stmts
 
     def sql_shrink_file(self, name, logical, target_mb):
         # DBCC SHRINKFILE only acts on the current database, so it is run

@@ -239,6 +239,187 @@ class PostgreSQLDriver(BaseDriver):
     def safe_fallback_database(self):
         return "postgres"
 
+    # --- Roles ---
+    #
+    # PostgreSQL has no separate login and user: a role that may log in
+    # serves as both, so there is nothing to map per database.
+
+    supports_security = True
+    principal_noun = "role"
+
+    def list_principals(self, cursor):
+        cursor.execute(r"""
+            SELECT r.rolname,
+                   CASE WHEN r.rolcanlogin THEN 'Login' ELSE 'Group' END,
+                   CASE WHEN r.rolsuper THEN 'yes' ELSE '' END,
+                   CASE WHEN r.rolcreatedb THEN 'yes' ELSE '' END,
+                   CASE WHEN r.rolcreaterole THEN 'yes' ELSE '' END,
+                   CASE WHEN r.rolconnlimit = -1 THEN 'unlimited'
+                        ELSE r.rolconnlimit::text END,
+                   COALESCE(to_char(r.rolvaliduntil, 'YYYY-MM-DD'), ''),
+                   COALESCE((SELECT string_agg(g.rolname, ', '
+                                               ORDER BY g.rolname)
+                             FROM pg_auth_members m
+                             JOIN pg_roles g ON g.oid = m.roleid
+                             WHERE m.member = r.oid), '')
+            FROM pg_roles r
+            WHERE r.rolname NOT LIKE 'pg\_%'
+            ORDER BY r.rolname
+        """)
+        headers = ["Role", "Type", "Super", "Create DB", "Create Role",
+                   "Conn Limit", "Valid Until", "Member Of"]
+        rows = [[str(v) if v is not None else "" for v in row]
+                for row in cursor.fetchall()]
+        return headers, rows
+
+    def principal_settings(self, cursor, name):
+        cursor.execute("""
+            SELECT rolname, rolcanlogin, rolsuper, rolcreatedb, rolcreaterole,
+                   rolinherit, rolreplication, rolconnlimit,
+                   COALESCE(to_char(rolvaliduntil, 'YYYY-MM-DD'), '')
+            FROM pg_roles WHERE rolname = ?
+        """, [name])
+        row = cursor.fetchone()
+        if not row:
+            return {}
+        cursor.execute("""
+            SELECT g.rolname FROM pg_auth_members m
+            JOIN pg_roles g ON g.oid = m.roleid
+            JOIN pg_roles r ON r.oid = m.member
+            WHERE r.rolname = ? ORDER BY g.rolname
+        """, [name])
+        return {
+            "name": row[0],
+            "can_login": bool(row[1]),
+            "superuser": bool(row[2]),
+            "create_db": bool(row[3]),
+            "create_role": bool(row[4]),
+            "inherit": bool(row[5]),
+            "replication": bool(row[6]),
+            "connection_limit": int(row[7]) if row[7] is not None else -1,
+            "valid_until": row[8],
+            "roles": [r[0] for r in cursor.fetchall()],
+        }
+
+    def principal_options(self, cursor, current=None):
+        groups = self._lookup(cursor, r"""
+            SELECT rolname FROM pg_roles
+            WHERE rolname NOT LIKE 'pg\_%' ORDER BY rolname
+        """)
+        editing = current is not None
+        current = current or {}
+        if editing:
+            # A role cannot be a member of itself.
+            groups = [g for g in groups if g != current.get("name")]
+        return [
+            {"key": "name", "label": "Role Name", "type": "string",
+             "default": current.get("name", ""), "required": True},
+            {"key": "password", "label": "Password", "type": "password",
+             "default": "",
+             "help": ("leave blank to keep the current password"
+                      if editing else "blank for a role that cannot log in")},
+            {"key": "can_login", "label": "Can Log In", "type": "bool",
+             "default": current.get("can_login", True)},
+            {"key": "superuser", "label": "Superuser", "type": "bool",
+             "default": current.get("superuser", False)},
+            {"key": "create_db", "label": "Create Databases", "type": "bool",
+             "default": current.get("create_db", False)},
+            {"key": "create_role", "label": "Create Roles", "type": "bool",
+             "default": current.get("create_role", False)},
+            {"key": "inherit", "label": "Inherit Privileges", "type": "bool",
+             "default": current.get("inherit", True)},
+            {"key": "replication", "label": "Replication", "type": "bool",
+             "default": current.get("replication", False)},
+            {"key": "connection_limit", "label": "Connection Limit",
+             "type": "int", "default": current.get("connection_limit", -1),
+             "help": "-1 for unlimited"},
+            {"key": "valid_until", "label": "Valid Until", "type": "string",
+             "default": current.get("valid_until", ""),
+             "help": "YYYY-MM-DD; blank for no expiry"},
+            {"key": "roles", "label": "Member Of", "type": "multi",
+             "default": current.get("roles", []),
+             "choices": [[g, g] for g in groups]},
+        ]
+
+    _ROLE_FLAGS = (("can_login", "LOGIN", "NOLOGIN"),
+                   ("superuser", "SUPERUSER", "NOSUPERUSER"),
+                   ("create_db", "CREATEDB", "NOCREATEDB"),
+                   ("create_role", "CREATEROLE", "NOCREATEROLE"),
+                   ("inherit", "INHERIT", "NOINHERIT"),
+                   ("replication", "REPLICATION", "NOREPLICATION"))
+
+    def sql_create_principal(self, opts):
+        name = opts.get("name", "")
+        role = self.quote_ddl_identifier(name)
+        clauses = [on if opts.get(key) else off
+                   for key, on, off in self._ROLE_FLAGS]
+        password = opts.get("password") or ""
+        if password:
+            clauses.append(f"PASSWORD {self.quote_ddl_literal(password)}")
+        limit = opts.get("connection_limit")
+        if limit not in (None, "", -1, "-1"):
+            clauses.append(f"CONNECTION LIMIT {int(limit)}")
+        valid = (opts.get("valid_until") or "").strip()
+        if valid:
+            clauses.append(f"VALID UNTIL {self.quote_ddl_literal(valid)}")
+
+        stmts = [f"CREATE ROLE {role} WITH " + " ".join(clauses)]
+        for group in opts.get("roles") or []:
+            stmts.append(f"GRANT {self.quote_ddl_identifier(group)} TO {role}")
+        return stmts
+
+    def sql_alter_principal(self, name, opts, current):
+        role = self.quote_ddl_identifier(name)
+        stmts = []
+
+        def changed(key):
+            return key in opts and opts[key] != current.get(key)
+
+        clauses = [(on if opts[key] else off)
+                   for key, on, off in self._ROLE_FLAGS if changed(key)]
+        # A blank password field means "leave it alone", not "blank it".
+        password = (opts.get("password") or "").strip()
+        if password:
+            clauses.append(f"PASSWORD {self.quote_ddl_literal(password)}")
+        if changed("connection_limit"):
+            clauses.append(
+                f"CONNECTION LIMIT {int(opts['connection_limit'])}")
+        if changed("valid_until"):
+            valid = (opts.get("valid_until") or "").strip()
+            clauses.append(
+                f"VALID UNTIL {self.quote_ddl_literal(valid)}" if valid
+                else "VALID UNTIL 'infinity'")
+        if clauses:
+            stmts.append(f"ALTER ROLE {role} WITH " + " ".join(clauses))
+
+        wanted = set(opts.get("roles") or [])
+        held = set(current.get("roles") or [])
+        for group in sorted(wanted - held):
+            stmts.append(f"GRANT {self.quote_ddl_identifier(group)} TO {role}")
+        for group in sorted(held - wanted):
+            stmts.append(
+                f"REVOKE {self.quote_ddl_identifier(group)} FROM {role}")
+
+        # Renaming last, so the statements above address the original name.
+        if changed("name"):
+            stmts.append(f"ALTER ROLE {role} RENAME TO "
+                         f"{self.quote_ddl_identifier(opts['name'])}")
+        return stmts
+
+    def sql_drop_principal(self, name, force=False):
+        stmts = []
+        if force:
+            stmts.append(
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                f"WHERE usename = {self.quote_ddl_literal(name)} "
+                "AND pid <> pg_backend_pid()")
+        stmts.append(f"DROP ROLE {self.quote_ddl_identifier(name)}")
+        return stmts
+
+    def sql_principal_sessions(self, name):
+        return ("SELECT COUNT(*) FROM pg_stat_activity "
+                "WHERE usename = ? AND pid <> pg_backend_pid()", [name])
+
     # --- Server-side filesystem browsing ---
     #
     # CREATE DATABASE takes no file paths on PostgreSQL, so this is here

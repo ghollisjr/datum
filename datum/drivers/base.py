@@ -309,6 +309,75 @@ class BaseDriver(ABC):
         """Return a database that is safe to connect to while dropping another."""
         return None
 
+    # --- Logins, users and roles ---
+    #
+    # MSSQL separates server-level logins from per-database users;
+    # PostgreSQL has a single role that may or may not be able to log in.
+    # "Principal" is the term used here for whichever the dialect has.
+
+    supports_security = False
+
+    # Shown as the panel heading and in messages.
+    principal_noun = "principal"
+
+    def list_principals(self, cursor):
+        """Return (headers, rows) describing the server's principals."""
+        return [], []
+
+    def principal_settings(self, cursor, name):
+        """Return the current settings of principal NAME as a value map."""
+        return {}
+
+    def principal_options(self, cursor, current=None):
+        """Field descriptors for creating, or editing when CURRENT is given."""
+        return []
+
+    def sql_create_principal(self, opts):
+        """Return statements creating a principal."""
+        raise NotImplementedError(
+            f"Managing logins is not supported on {self.dialect_name}")
+
+    def sql_alter_principal(self, name, opts, current):
+        """Return statements for the principal settings that changed."""
+        raise NotImplementedError(
+            f"Managing logins is not supported on {self.dialect_name}")
+
+    def sql_drop_principal(self, name, force=False):
+        """Return statements dropping a principal.
+
+        When force is true, the statements first end any session the
+        principal holds — a login with a live connection cannot be
+        dropped, which is the usual state of one worth cleaning up.
+        """
+        raise NotImplementedError(
+            f"Managing logins is not supported on {self.dialect_name}")
+
+    def sql_principal_sessions(self, name):
+        """Return (sql, params) counting sessions held by a principal."""
+        raise NotImplementedError(
+            f"Managing logins is not supported on {self.dialect_name}")
+
+    # Per-database user mapping, where the dialect separates the two.
+    supports_user_mapping = False
+
+    def list_user_mappings(self, cursor, login):
+        """Return (headers, rows) of the databases LOGIN is a user in."""
+        return []
+
+    def user_mapping_options(self, cursor, login):
+        """Field descriptors for mapping LOGIN into a database."""
+        return []
+
+    def sql_add_user_mapping(self, login, opts):
+        """Return statements making LOGIN a user of a database."""
+        raise NotImplementedError(
+            f"User mapping is not supported on {self.dialect_name}")
+
+    def sql_remove_user_mapping(self, login, database):
+        """Return statements removing LOGIN as a user of DATABASE."""
+        raise NotImplementedError(
+            f"User mapping is not supported on {self.dialect_name}")
+
     # --- Database file management ---
     #
     # Only meaningful where a database is made of files the administrator

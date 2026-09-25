@@ -1461,6 +1461,8 @@ SQLI-BUF is the originating SQLi buffer."
     (define-key map "D" #'sql-datum-admin-delete-at-point)
     ;; Databases panel: file management
     (define-key map "F" #'sql-datum-admin-database-files)
+    ;; Security panel: database user mappings
+    (define-key map "U" #'sql-datum-admin-user-mappings)
     ;; Query text (activity panel)
     (define-key map (kbd "M-.") #'sql-datum-admin-query-text)
     map)
@@ -1776,6 +1778,8 @@ Returns a list of strings by parsing the current line against column widths."
     (_ (pcase (cons sql-datum--admin-panel-name (sql-datum--admin-sub-panel))
          ('("databases" . "files") (sql-datum-admin-edit-file))
          (`("databases" . ,_)      (sql-datum-admin-edit-database))
+         ('("security" . "user-mappings") (sql-datum-admin-edit-mapping))
+         (`("security" . ,_)       (sql-datum-admin-edit-principal))
          (_ (user-error "No editable item at point"))))))
 
 (defun sql-datum-admin-new-at-point ()
@@ -1785,8 +1789,10 @@ Returns a list of strings by parsing the current line against column widths."
     ("Steps"     (sql-datum-admin-new-step))
     ("Schedules" (sql-datum-admin-new-schedule))
     (_ (pcase (cons sql-datum--admin-panel-name (sql-datum--admin-sub-panel))
-         ('("databases" . "files") (sql-datum-admin-new-file))
-         (`("databases" . ,_)      (sql-datum-admin-new-database))
+         ('("databases" . "files")       (sql-datum-admin-new-file))
+         (`("databases" . ,_)            (sql-datum-admin-new-database))
+         ('("security" . "user-mappings") (sql-datum-admin-new-mapping))
+         (`("security" . ,_)             (sql-datum-admin-new-principal))
          (_ (user-error "No section at point for creating items"))))))
 
 (defun sql-datum-admin-delete-at-point ()
@@ -1796,8 +1802,10 @@ Returns a list of strings by parsing the current line against column widths."
     ("Steps"     (sql-datum-admin-delete-step))
     ("Schedules" (sql-datum-admin-delete-schedule))
     (_ (pcase (cons sql-datum--admin-panel-name (sql-datum--admin-sub-panel))
-         ('("databases" . "files") (sql-datum-admin-remove-file))
-         (`("databases" . ,_)      (sql-datum-admin-drop-database))
+         ('("databases" . "files")        (sql-datum-admin-remove-file))
+         (`("databases" . ,_)             (sql-datum-admin-drop-database))
+         ('("security" . "user-mappings") (sql-datum-admin-remove-mapping))
+         (`("security" . ,_)              (sql-datum-admin-drop-principal))
          (_ (user-error "No deletable item at point"))))))
 
 ;; --- Database wizard commands ---
@@ -1877,6 +1885,77 @@ Returns a list of strings by parsing the current line against column widths."
   (sql-datum--admin-send-command
    (format ":admin-action databases shrink-file %s"
            (sql-datum--admin-file-payload))))
+
+;; --- Security panel (logins, roles, database users) ---
+
+(defun sql-datum-admin-new-principal ()
+  "Create a new login or role."
+  (interactive)
+  (sql-datum--admin-send-command ":admin-action security new-principal"))
+
+(defun sql-datum-admin-edit-principal ()
+  "Edit the login or role at point."
+  (interactive)
+  (let ((name (sql-datum--admin-row-id-at-point)))
+    (unless name (user-error "Nothing at point"))
+    (sql-datum--admin-send-command
+     (format ":admin-action security edit-principal %s" name))))
+
+(defun sql-datum-admin-drop-principal ()
+  "Drop the login or role at point."
+  (interactive)
+  (let ((name (sql-datum--admin-row-id-at-point)))
+    (unless name (user-error "Nothing at point"))
+    (sql-datum--admin-send-command
+     (format ":admin-action security drop-check %s" name))))
+
+(defun sql-datum-admin-user-mappings ()
+  "Show the databases the login at point is a user in."
+  (interactive)
+  (let ((name (sql-datum--admin-row-id-at-point)))
+    (unless name (user-error "No login at point"))
+    (setq sql-datum--admin-display-request "security")
+    (sql-datum--admin-send-command
+     (format ":admin-action security mappings %s" name))))
+
+(defun sql-datum--admin-mapping-payload ()
+  "Return a base64 payload naming the login and the database at point."
+  (let ((login (alist-get 'login sql-datum--admin-context))
+        (database (sql-datum--admin-row-id-at-point)))
+    (unless login (user-error "No login context available"))
+    (base64-encode-string
+     (encode-coding-string
+      (json-serialize (append `((login . ,login))
+                              (when database `((database . ,database)))))
+      'utf-8)
+     t)))
+
+(defun sql-datum-admin-new-mapping ()
+  "Map the current login into a database."
+  (interactive)
+  (sql-datum--admin-send-command
+   (format ":admin-action security new-mapping %s"
+           (sql-datum--admin-mapping-payload))))
+
+(defun sql-datum-admin-edit-mapping ()
+  "Edit the database roles held in the database at point."
+  (interactive)
+  (unless (sql-datum--admin-row-id-at-point)
+    (user-error "No database at point"))
+  (sql-datum--admin-send-command
+   (format ":admin-action security edit-mapping %s"
+           (sql-datum--admin-mapping-payload))))
+
+(defun sql-datum-admin-remove-mapping ()
+  "Remove the current login's user from the database at point."
+  (interactive)
+  (let ((database (sql-datum--admin-row-id-at-point))
+        (login (alist-get 'login sql-datum--admin-context)))
+    (unless database (user-error "No database at point"))
+    (when (yes-or-no-p (format "Remove %s from %s? " login database))
+      (sql-datum--admin-send-command
+       (format ":admin-action security remove-mapping %s"
+               (sql-datum--admin-mapping-payload))))))
 
 (defun sql-datum-admin-stop-or-shrink ()
   "Shrink the file at point, or stop the job at point.
@@ -2528,6 +2607,13 @@ typing outside a field silently corrupts the form layout."
      ((equal type "bool") (if raw t :false))
      ((equal type "int")
       (if (stringp raw) (string-to-number raw) (or raw 0)))
+     ;; `json-serialize' reads a plain list as an alist, so a multi-select
+     ;; has to become a vector to come out as a JSON array.
+     ((equal type "multi") (vconcat (and (listp raw) raw)))
+     ;; A password is taken exactly as typed: trimming would silently
+     ;; change a credential that legitimately has leading or trailing
+     ;; whitespace.
+     ((equal type "password") (or raw ""))
      ((stringp raw) (string-trim raw))
      (t raw))))
 
@@ -2559,6 +2645,22 @@ a form rebuilt after browsing for a path comes back as the user left it."
                                  :tag (nth 1 c) :value (nth 0 c)))
                          choices)
                  '((item :format "%t" :tag "(none)" :value "")))))
+     ((equal type "password")
+      ;; `:secret' echoes a placeholder instead of the characters typed.
+      (widget-create 'editable-field
+                     :size 32
+                     :secret ?*
+                     :keymap sql-datum--form-field-keymap
+                     :value (format "%s" (or default ""))))
+     ((equal type "multi")
+      ;; A checklist: `widget-value' yields the list of ticked values.
+      (apply #'widget-create 'checklist
+             :format "%v"
+             :value (append (and (listp default) default) nil)
+             (mapcar (lambda (c)
+                       (list 'item :format "%t  " :tag (nth 1 c)
+                             :value (nth 0 c)))
+                     choices)))
      ((equal type "completing")
       ;; An editable field with a completion table: the right shape for
       ;; lookups too long to page through as a menu.  `editable-field'
@@ -4894,7 +4996,8 @@ With a prefix argument, prompt for a filter pattern."
 With a prefix argument, prompts for the panel name."
   (interactive
    (list (completing-read "Admin panel: "
-                          '("activity" "databases" "jobs" "ssis") nil t)))
+                          '("activity" "databases" "jobs" "security" "ssis")
+                          nil t)))
   (setq sql-datum--admin-display-request panel)
   (sql-datum--send-command (format ":admin %s" panel) t))
 
