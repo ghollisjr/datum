@@ -470,6 +470,8 @@ All keybindings are active in =sql-mode= buffers.
 | =C-c t d= | =sql-datum-describe=     | Describe table columns (alias for =columns=) |
 | =C-c t x= | =sql-datum-table-exists= | Check if table exists                        |
 | =C-c t D= | =sql-datum-drop-table=   | Drop table (with confirmation)               |
+| =C-c t N= | =sql-datum-new-table=    | New table — opens the table builder          |
+| =C-c t E= | =sql-datum-edit-table=   | Edit table — alter the columns it has        |
 
 All table operations default to the identifier at point when it matches a
 known table name, so you can place your cursor on a table name and press
@@ -872,6 +874,13 @@ dropped or moved first, and the confirmation says so.
 | =N= | New table (builder)       |
 | =E= | Alter columns             |
 | =D= | Drop table                |
+
+Both are also reachable without walking the panels: =C-c t N= opens
+the builder for a schema, and =C-c t E= opens the editor on the table
+at point, completing the name from the introspection cache the same
+way =C-c t d= and =C-c t D= do.  A bare name is resolved to its schema
+automatically, and you are asked which one only when the name appears
+in more than one.
 
 The table builder takes a list of columns — name, type, nullable,
 primary key and default — with =[INS]= and =[DEL]= to add and remove

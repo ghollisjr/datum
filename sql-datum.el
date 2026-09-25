@@ -1929,11 +1929,8 @@ Returns a list of strings by parsing the current line against column widths."
     (unless (and schema table) (user-error "No table at point"))
     (sql-datum--admin-send-command
      (format ":admin-action schema edit-table %s"
-             (base64-encode-string
-              (encode-coding-string
-               (json-serialize `((schema . ,schema) (table . ,table)))
-               'utf-8)
-              t)))))
+             (sql-datum--admin-payload
+              `((schema . ,schema) (table . ,table)))))))
 
 (defun sql-datum-admin-drop-table ()
   "Drop the table at point."
@@ -5406,6 +5403,94 @@ then asks for explicit confirmation before sending DROP TABLE."
     (sql-datum--send-command (format "DROP TABLE %s;;" table))
     (message "datum: dropped %s" table)))
 
+;;; ---------------------------------------------------------------------------
+;;; Table wizards from a SQL buffer
+;;; ---------------------------------------------------------------------------
+
+;; The table builder and editor live in the schema admin panel, reached
+;; by walking C-c s a -> schema -> tables.  These open them straight
+;; from the query buffer on the table already under the cursor, the way
+;; the rest of the C-c t tools work.
+
+(defun sql-datum--admin-payload (alist)
+  "Encode ALIST as the base64 JSON payload an admin action takes."
+  (base64-encode-string
+   (encode-coding-string (json-serialize alist) 'utf-8) t))
+
+(defun sql-datum--read-schema (prompt)
+  "Read a schema name with completion from the introspection cache.
+The schema of the identifier at point is offered as the default when it
+names a known schema."
+  (let* ((buf (sql-find-sqli-buffer 'datum))
+         (buf-obj (and buf (get-buffer buf)))
+         (schemas (and buf-obj (buffer-local-value 'sql-datum--schemas
+                                                   buf-obj)))
+         (ident (sql-datum--identifier-at-point))
+         (parts (and ident (sql-datum--split-identifier ident)))
+         (default (when (cdr parts)
+                    (let ((head (sql-datum--unquote-part (car parts))))
+                      (car (member head schemas))))))
+    (completing-read prompt schemas nil nil nil nil default)))
+
+(defun sql-datum--table-parts (table)
+  "Split TABLE into a (SCHEMA . NAME) pair for an admin action.
+
+A bare name is resolved against the introspection cache, since the
+wizards address a table by schema and name rather than by the string
+the query buffer happens to use.  A three-part name names another
+database, which these wizards do not reach."
+  (let* ((parts (mapcar #'sql-datum--unquote-part
+                        (sql-datum--split-identifier table))))
+    (pcase (length parts)
+      (3 (user-error
+          "%s is in another database — switch with C-c u first" table))
+      (2 (cons (nth 0 parts) (nth 1 parts)))
+      (1 (let* ((buf (sql-find-sqli-buffer 'datum))
+                (buf-obj (and buf (get-buffer buf)))
+                (cached (and buf-obj
+                             (buffer-local-value 'sql-datum--tables buf-obj)))
+                (name (car parts))
+                ;; Every cached "schema.name" whose name half matches.
+                (matches
+                 (cl-remove-if-not
+                  (lambda (cand)
+                    (let ((cp (mapcar #'sql-datum--unquote-part
+                                      (sql-datum--split-identifier cand))))
+                      (and (= 2 (length cp))
+                           (cl-equalp name (nth 1 cp)))))
+                  cached)))
+           (pcase (length matches)
+             (0 (user-error
+                 "Don't know which schema %s is in — qualify it" name))
+             (1 (let ((cp (mapcar #'sql-datum--unquote-part
+                                  (sql-datum--split-identifier
+                                   (car matches)))))
+                  (cons (nth 0 cp) (nth 1 cp))))
+             ;; The same name in several schemas: let the user say.
+             (_ (let ((pick (completing-read
+                             (format "Which %s? " name) matches nil t)))
+                  (let ((cp (mapcar #'sql-datum--unquote-part
+                                    (sql-datum--split-identifier pick))))
+                    (cons (nth 0 cp) (nth 1 cp))))))))
+      (_ (user-error "Cannot make sense of table name: %s" table)))))
+
+(defun sql-datum-new-table (schema)
+  "Open the table builder for a new table in SCHEMA."
+  (interactive (list (sql-datum--read-schema "New table in schema: ")))
+  (when (string-empty-p (string-trim schema))
+    (user-error "No schema given"))
+  (sql-datum--admin-send-command-to
+   nil (format ":admin-action schema new-table %s" schema)))
+
+(defun sql-datum-edit-table (table)
+  "Open the table editor on TABLE, altering the columns it already has."
+  (interactive (list (sql-datum--read-table "Edit table: ")))
+  (let ((parts (sql-datum--table-parts table)))
+    (sql-datum--admin-send-command-to
+     nil (format ":admin-action schema edit-table %s"
+                 (sql-datum--admin-payload
+                  `((schema . ,(car parts)) (table . ,(cdr parts))))))))
+
 (defun sql-datum-pwd ()
   "Show current user, server, database, and version via :pwd."
   (interactive)
@@ -5863,6 +5948,8 @@ With prefix ARG, prompts for join type (LEFT, RIGHT, etc.)."
   (define-key sql-mode-map (kbd "C-c t d") #'sql-datum-describe)
   (define-key sql-mode-map (kbd "C-c t x") #'sql-datum-table-exists)
   (define-key sql-mode-map (kbd "C-c t D") #'sql-datum-drop-table)
+  (define-key sql-mode-map (kbd "C-c t N") #'sql-datum-new-table)
+  (define-key sql-mode-map (kbd "C-c t E") #'sql-datum-edit-table)
   ;; C-c s: session info
   (define-key sql-mode-map (kbd "C-c s p") #'sql-datum-pwd)
   (define-key sql-mode-map (kbd "C-c s t") #'sql-datum-tables)

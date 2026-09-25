@@ -40,6 +40,8 @@ directly.
 | =C-c t d= | Describe table columns                       |
 | =C-c t x= | Check if table exists                        |
 | =C-c t D= | Drop table (with confirmation)               |
+| =C-c t N= | New table — opens the table builder          |
+| =C-c t E= | Edit table — alter the columns it has        |
 
 ** Session Info (=C-c s=)
 
