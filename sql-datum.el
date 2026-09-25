@@ -45,6 +45,7 @@
 ;; wid-edit is loaded.
 (eval-when-compile (require 'wid-edit))
 (declare-function widget-forward  "wid-edit" (arg))
+(declare-function widget-backward "wid-edit" (arg))
 (declare-function widget-field-at "wid-edit" (pos))
 
 ;;; ---------------------------------------------------------------------------
@@ -2253,6 +2254,42 @@ JOB-NAME the parent job, IS-NEW non-nil for creating a new step."
 (defvar-local sql-datum--form-submit-fn nil
   "Zero-argument function submitting the wizard form in this buffer.")
 
+(defvar-local sql-datum--form-browse-fn nil
+  "Function of one field key, opening the server path browser for it.")
+
+(defun sql-datum--form-path-fields ()
+  "Return the (KEY . LABEL) pairs of this form's path fields."
+  (let (found)
+    (dolist (entry sql-datum--form-widgets)
+      (when (equal (alist-get 'type (cadr entry)) "path")
+        (push (cons (car entry)
+                    (or (alist-get 'label (cadr entry)) (car entry)))
+              found)))
+    found))
+
+(defun sql-datum-form-browse ()
+  "Browse the server for a path field, without walking to its button.
+Uses the field at point when there is one, the only path field when the
+form has just one, and otherwise asks which."
+  (interactive)
+  (unless sql-datum--form-browse-fn
+    (user-error "Not in a datum wizard form"))
+  (let* ((fields (sql-datum--form-path-fields))
+         (at-point (let ((w (widget-field-at (point))))
+                     (car (cl-find-if
+                           (lambda (entry)
+                             (and (equal (alist-get 'type (cadr entry)) "path")
+                                  (eq (cddr entry) w)))
+                           sql-datum--form-widgets))))
+         (key (cond
+               (at-point at-point)
+               ((null fields) (user-error "This form has no path fields"))
+               ((null (cdr fields)) (caar fields))
+               (t (let* ((labels (mapcar #'cdr fields))
+                         (chosen (completing-read "Browse for: " labels nil t)))
+                    (car (rassoc chosen fields)))))))
+    (funcall sql-datum--form-browse-fn key)))
+
 (defun sql-datum-form-submit ()
   "Submit the wizard form in the current buffer."
   (interactive)
@@ -2296,6 +2333,14 @@ current field to move through."
     ;; the arrow keys walking character by character across protected text.
     (define-key map (kbd "<up>")    #'sql-datum-form-prev-field)
     (define-key map (kbd "<down>")  #'sql-datum-form-next-field)
+    ;; A graphical Emacs sends <tab>, and only falls back to the ASCII TAB
+    ;; binding when <tab> is unbound everywhere.  Configs that bind <tab>
+    ;; globally (to a completion command, say) would otherwise shadow the
+    ;; widget bindings throughout the form.
+    (define-key map (kbd "<tab>")     #'widget-forward)
+    (define-key map (kbd "<backtab>") #'widget-backward)
+    (define-key map (kbd "S-<tab>")   #'widget-backward)
+    (define-key map (kbd "C-c C-f") #'sql-datum-form-browse)
     (define-key map (kbd "C-c C-c") #'sql-datum-form-submit)
     (define-key map (kbd "C-c C-k") #'sql-datum-form-cancel)
     map))
@@ -2523,15 +2568,24 @@ with `fields', `values', `submit_action', and optional `notes',
           (widget-insert "\n\n")
           (widget-insert
            (propertize
-            (concat "up/down or TAB move between fields   "
+            (concat "TAB or up/down move between fields   "
+                    (if (cl-find-if (lambda (f)
+                                      (equal (alist-get 'type f) "path"))
+                                    fields)
+                        "C-c C-f browse   " "")
                     "C-c C-c submit   C-c C-k cancel\n")
             'face 'font-lock-comment-face))
-          ;; Expose the submit closure so C-c C-c can reach it.
+          ;; Expose the closures so the keys can reach them.
           (setq-local sql-datum--form-submit-fn
                       (lambda ()
                         (sql-datum--admin-form-submit
                          panel form widgets values sqli-buf
-                         confirm-widget confirm-text))))
+                         confirm-widget confirm-text)))
+          (setq-local sql-datum--form-browse-fn
+                      (lambda (field-key)
+                        (sql-datum--admin-form-browse-path
+                         panel form sql-datum--form-widgets values
+                         sqli-buf field-key))))
         (setq-local sql-datum--form-widgets widgets)
         (setq-local sql-datum--form-spec form)
         (setq-local sql-datum--admin-sqli-buf sqli-buf))
@@ -2629,6 +2683,12 @@ rebuilds the form.")
     (define-key map "s"         #'sql-datum-path-browser-select)
     (define-key map "n"         #'next-line)
     (define-key map "p"         #'previous-line)
+    (define-key map (kbd "<down>") #'next-line)
+    (define-key map (kbd "<up>")   #'previous-line)
+    ;; Bound for the same reason as in the form: a global <tab> binding
+    ;; would otherwise shadow movement here too.
+    (define-key map (kbd "<tab>")     #'next-line)
+    (define-key map (kbd "<backtab>") #'previous-line)
     (define-key map "q"         #'sql-datum-path-browser-cancel)
     map)
   "Keymap for the datum server path browser.")
