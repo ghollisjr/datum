@@ -239,6 +239,152 @@ class PostgreSQLDriver(BaseDriver):
     def safe_fallback_database(self):
         return "postgres"
 
+    # --- Object-level permissions ---
+
+    supports_object_permissions = True
+    # PostgreSQL has no DENY: a privilege is granted or it is revoked.
+    supports_deny = False
+
+    # Roles are cluster-wide but privileges are held on objects, and an
+    # object belongs to one database, so this is always the connected one.
+    permission_root_label = "in the current database"
+
+    _DATABASE_PRIVILEGES = ["CONNECT", "CREATE", "TEMPORARY"]
+    _SCHEMA_PRIVILEGES = ["USAGE", "CREATE"]
+    _TABLE_PRIVILEGES = ["SELECT", "INSERT", "UPDATE", "DELETE",
+                         "TRUNCATE", "REFERENCES", "TRIGGER"]
+    _COLUMN_PRIVILEGES = ["SELECT", "INSERT", "UPDATE", "REFERENCES"]
+
+    def permission_scopes(self, database=None):
+        return [["database", "Database"], ["schema", "Schema"],
+                ["object", "Table or view"],
+                ["column", "Column of a table or view"]]
+
+    def permission_choices(self, scope):
+        return {
+            "database": self._DATABASE_PRIVILEGES,
+            "schema": self._SCHEMA_PRIVILEGES,
+            "object": self._TABLE_PRIVILEGES,
+            "column": self._COLUMN_PRIVILEGES,
+        }.get(scope, [])
+
+    def securable_choices(self, cursor, scope, database=None):
+        if scope == "database":
+            return []
+        if scope == "schema":
+            sql = ("SELECT nspname FROM pg_namespace "
+                   "WHERE nspname NOT LIKE 'pg\\_%' "
+                   "AND nspname <> 'information_schema' ORDER BY nspname")
+        else:
+            sql = ("SELECT n.nspname || '.' || c.relname "
+                   "FROM pg_class c JOIN pg_namespace n "
+                   "  ON n.oid = c.relnamespace "
+                   "WHERE c.relkind IN ('r','v','m','p') "
+                   "AND n.nspname NOT LIKE 'pg\\_%' "
+                   "AND n.nspname <> 'information_schema' "
+                   "ORDER BY 1")
+        try:
+            cursor.execute(sql)
+            return [r[0] for r in cursor.fetchall()]
+        except Exception:
+            return []
+
+    # aclexplode turns an ACL array into one row per grant, which is the
+    # only way to see the grants actually recorded.  The
+    # information_schema views expand a table grant across every column,
+    # which would bury the explicit column grants among hundreds of
+    # rows that were never granted separately.
+    _PERMISSION_SQL = """
+        SELECT 'GRANT', a.privilege_type, 'Database', d.datname, ''
+          FROM pg_database d, aclexplode(d.datacl) a
+         WHERE a.grantee = %(role)s AND d.datname = current_database()
+        UNION ALL
+        SELECT 'GRANT', a.privilege_type, 'Schema', n.nspname, ''
+          FROM pg_namespace n, aclexplode(n.nspacl) a
+         WHERE a.grantee = %(role)s
+        UNION ALL
+        SELECT 'GRANT', a.privilege_type, 'Object',
+               n.nspname || '.' || c.relname, ''
+          FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace,
+               aclexplode(c.relacl) a
+         WHERE a.grantee = %(role)s
+        UNION ALL
+        SELECT 'GRANT', a.privilege_type, 'Object',
+               n.nspname || '.' || c.relname, att.attname
+          FROM pg_attribute att
+          JOIN pg_class c ON c.oid = att.attrelid
+          JOIN pg_namespace n ON n.oid = c.relnamespace,
+               aclexplode(att.attacl) a
+         WHERE a.grantee = %(role)s
+         ORDER BY 3, 4, 5, 2
+    """
+
+    def list_permissions(self, cursor, principal, database=None):
+        self.validate_identifier(principal)
+        headers = ["State", "Permission", "Scope", "Securable", "Column"]
+        # The role has to exist before ::regrole will resolve it.
+        cursor.execute("SELECT oid FROM pg_roles WHERE rolname = ?",
+                       (principal,))
+        row = cursor.fetchone()
+        if not row:
+            return headers, []
+        oid = row[0]
+        sql = self._PERMISSION_SQL.replace("%(role)s", "?")
+        cursor.execute(sql, (oid,) * sql.count("?"))
+        return headers, [[str(c) if c is not None else "" for c in r]
+                         for r in cursor.fetchall()]
+
+    def _securable_clause(self, scope, securable, column=None):
+        if scope == "database":
+            return f" ON DATABASE {self.quote_ddl_identifier(securable)}"
+        if scope == "schema":
+            return f" ON SCHEMA {self.quote_ddl_identifier(securable)}"
+        parts = securable.split(".", 1)
+        if len(parts) == 2:
+            obj = (f"{self.quote_ddl_identifier(parts[0])}."
+                   f"{self.quote_ddl_identifier(parts[1])}")
+        else:
+            obj = self.quote_ddl_identifier(securable)
+        return f" ON TABLE {obj}"
+
+    def _permission_statement(self, verb, principal, scope, securable,
+                              permission, column=None):
+        self.validate_identifier(principal)
+        if permission not in self.permission_choices(scope):
+            raise ValueError(f"{permission} is not a privilege that can be "
+                             f"granted at the {scope} level")
+        target = self.quote_ddl_identifier(principal)
+        cols = ""
+        if scope == "column":
+            self.validate_identifier(column)
+            cols = f" ({self.quote_ddl_identifier(column)})"
+        preposition = "FROM" if verb == "REVOKE" else "TO"
+        return (f"{verb} {permission}{cols}"
+                f"{self._securable_clause(scope, securable, column)} "
+                f"{preposition} {target}")
+
+    def sql_set_permissions(self, principal, scope, securable, granted,
+                            denied, current, database=None, column=None):
+        if denied:
+            raise ValueError("PostgreSQL has no DENY; revoke instead")
+        if scope not in (s[0] for s in self.permission_scopes(database)):
+            raise ValueError(f"{scope} is not a scope in this context")
+        wanted = set(granted or [])
+        held = set(current or {})
+        stmts = []
+        for name in sorted(held - wanted):
+            stmts.append(self._permission_statement(
+                "REVOKE", principal, scope, securable, name, column))
+        for name in sorted(wanted - held):
+            stmts.append(self._permission_statement(
+                "GRANT", principal, scope, securable, name, column))
+        return stmts
+
+    def sql_revoke_permission(self, principal, scope, securable, permission,
+                              database=None, column=None):
+        return [self._permission_statement(
+            "REVOKE", principal, scope, securable, permission, column)]
+
     # --- Schemas and tables ---
 
     supports_schema_ddl = True

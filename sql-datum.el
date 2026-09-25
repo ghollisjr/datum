@@ -1518,9 +1518,12 @@ SQLI-BUF is the originating SQLi buffer."
     (define-key map "K" #'sql-datum-admin-database-backups)
     ;; Schema panel
     (define-key map "T" #'sql-datum-admin-schema-tables)
-    (define-key map "R" #'sql-datum-admin-restore)
-    ;; Security panel: database user mappings
+    ;; R restores a backup, but revokes in the permissions view.
+    (define-key map "R" #'sql-datum-admin-restore-or-revoke)
+    ;; Security panel: database user mappings and permissions
     (define-key map "U" #'sql-datum-admin-user-mappings)
+    (define-key map "P" #'sql-datum-admin-permissions)
+    (define-key map "G" #'sql-datum-admin-grant)
     ;; Query text (activity panel)
     (define-key map (kbd "M-.") #'sql-datum-admin-query-text)
     map)
@@ -2112,6 +2115,89 @@ When point is on a recorded backup, its file is offered as the source."
       (sql-datum--admin-send-command
        (format ":admin-action security remove-mapping %s"
                (sql-datum--admin-mapping-payload))))))
+
+(defun sql-datum--admin-permission-context ()
+  "Return the principal and database the permissions view is about.
+
+From the principal list the row at point names the principal and there
+is no database; from a user-mapping row the context carries the login
+and the row names the database."
+  (pcase (cons sql-datum--admin-panel-name (sql-datum--admin-sub-panel))
+    ('("security" . "user-mappings")
+     (let ((login (alist-get 'login sql-datum--admin-context))
+           (database (sql-datum--admin-row-id-at-point)))
+       (unless (and login database) (user-error "No database at point"))
+       (list login database)))
+    ('("security" . "permissions")
+     (list (alist-get 'principal sql-datum--admin-context)
+           (let ((db (alist-get 'database sql-datum--admin-context)))
+             (and db (not (string-empty-p db)) db))))
+    (`("security" . ,_)
+     (let ((name (sql-datum--admin-row-id-at-point)))
+       (unless name (user-error "No login or role at point"))
+       (list name nil)))
+    (_ (user-error "Permissions are shown from the security panel"))))
+
+(defun sql-datum-admin-permissions ()
+  "Show what the login or role at point may do."
+  (interactive)
+  (pcase-let ((`(,principal ,database)
+               (sql-datum--admin-permission-context)))
+    (setq sql-datum--admin-display-request "security")
+    (sql-datum--admin-send-command
+     (format ":admin-action security permissions %s"
+             (sql-datum--admin-payload
+              (append `((principal . ,principal))
+                      (when database `((database . ,database)))))))))
+
+(defun sql-datum-admin-grant ()
+  "Grant or deny a permission to the principal this panel is about."
+  (interactive)
+  (unless (equal (sql-datum--admin-sub-panel) "permissions")
+    (user-error "Granting is done from the permissions view (P)"))
+  (pcase-let ((`(,principal ,database)
+               (sql-datum--admin-permission-context)))
+    (sql-datum--admin-send-command
+     (format ":admin-action security new-permission %s"
+             (sql-datum--admin-payload
+              (append `((principal . ,principal))
+                      (when database `((database . ,database)))))))))
+
+(defun sql-datum-admin-revoke-permission ()
+  "Revoke the permission on the row at point."
+  (interactive)
+  (let ((cells (sql-datum--admin-row-cells-at-point)))
+    (unless cells (user-error "No permission at point"))
+    (pcase-let ((`(,principal ,database)
+                 (sql-datum--admin-permission-context)))
+      (let ((state (nth 0 cells))
+            (permission (nth 1 cells))
+            (scope (nth 2 cells))
+            (securable (nth 3 cells))
+            (column (or (nth 4 cells) "")))
+        (when (yes-or-no-p
+               (format "Revoke %s %s on %s%s from %s? "
+                       state permission securable
+                       (if (string-empty-p column) ""
+                         (format " (%s)" column))
+                       principal))
+          (sql-datum--admin-send-command
+           (format ":admin-action security revoke-permission %s"
+                   (sql-datum--admin-payload
+                    (append `((principal . ,principal)
+                              (permission . ,permission)
+                              (scope . ,scope)
+                              (securable . ,securable)
+                              (column . ,column))
+                            (when database `((database . ,database)))))))))))) 
+
+(defun sql-datum-admin-restore-or-revoke ()
+  "Revoke the permission at point, or restore the backup at point.
+`R\=' means restore in the backups view and revoke in the permissions one."
+  (interactive)
+  (if (equal (sql-datum--admin-sub-panel) "permissions")
+      (sql-datum-admin-revoke-permission)
+    (sql-datum-admin-restore)))
 
 (defun sql-datum-admin-stop-or-shrink ()
   "Shrink the file at point, or stop the job at point.
@@ -5631,6 +5717,13 @@ Nothing is dropped until that panel is confirmed."
   (sql-datum--admin-request
    "security" (format ":admin-action security drop-check %s" name)))
 
+(defun sql-datum-permissions (name)
+  "Show what the login or role NAME may do."
+  (interactive (list (sql-datum--read-principal "Permissions for: ")))
+  (sql-datum--admin-request
+   "security" (format ":admin-action security permissions %s"
+                      (sql-datum--admin-payload `((principal . ,name))))))
+
 (defun sql-datum-user-mappings (name)
   "Show the databases the login NAME is a user in."
   (interactive (list (sql-datum--read-principal "Mappings for login: ")))
@@ -6110,6 +6203,7 @@ With prefix ARG, prompts for join type (LEFT, RIGHT, etc.)."
   (define-key sql-mode-map (kbd "C-c g E") #'sql-datum-edit-principal)
   (define-key sql-mode-map (kbd "C-c g D") #'sql-datum-drop-principal)
   (define-key sql-mode-map (kbd "C-c g m") #'sql-datum-user-mappings)
+  (define-key sql-mode-map (kbd "C-c g P") #'sql-datum-permissions)
   ;; C-c s: session info
   (define-key sql-mode-map (kbd "C-c s p") #'sql-datum-pwd)
   (define-key sql-mode-map (kbd "C-c s t") #'sql-datum-tables)

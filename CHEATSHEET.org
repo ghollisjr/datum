@@ -67,6 +67,7 @@ from the cached database list and defaults to the one at point.
 | =C-c g E= | Edit a login or role                         |
 | =C-c g D= | Drop a login or role (confirmation panel)    |
 | =C-c g m= | Database user mappings for a login           |
+| =C-c g P= | Permissions held by a login or role          |
 
 Names complete from whatever the security panel has listed on this
 connection; before it has been opened they are free text.
@@ -261,17 +262,40 @@ drops a column shows the plan and asks for the table name first.
 | =E= | Edit login/role                       |
 | =D= | Drop login/role                       |
 | =U= | Database users for this login (MSSQL) |
+| =P= | Permissions                           |
 
 The *Owns (dbo)* column matters: owning a database makes a login =dbo=
 inside it with full control, whatever its server roles say.
 
 Database users view (=U=):
 
-| Key | Action                       |
-|-----+------------------------------|
-| =N= | Map the login to a database  |
-| =E= | Edit its roles there         |
-| =D= | Remove the mapping           |
+| Key | Action                          |
+|-----+---------------------------------|
+| =N= | Map the login to a database     |
+| =E= | Edit its roles there            |
+| =D= | Remove the mapping              |
+| =P= | Permissions in this database    |
+
+Permissions view (=P=):
+
+| Key | Action                                      |
+|-----+---------------------------------------------|
+| =G= | Grant or deny on a securable                |
+| =R= | Revoke the permission on the row at point   |
+
+On MSSQL, =P= from the login list shows *server* permissions; a login's
+rights inside a database belong to the user it maps to, so go =U= then
+=P=.  On PostgreSQL a role is cluster-wide but privileges hang off
+objects, so =P= shows the connected database.
+
+=G= asks for the scope first — database, schema, object or column —
+because the permissions worth offering depend on it.  The checklist
+then opens ticked as things already stand, and applying reconciles the
+difference: unticking revokes.  PostgreSQL has no =DENY=, so it has no
+*Denied* list.
+
+A =REVOKE= row is not leftover noise: it excludes one column from a
+grant held on the whole object.
 
 ** SSIS panel (MSSQL)
 

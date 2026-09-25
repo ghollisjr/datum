@@ -989,6 +989,203 @@ class MSSQLDriver(BaseDriver):
              "help": "defaults to the login name"},
         ]
 
+    # --- Object-level permissions ---
+
+    supports_object_permissions = True
+    supports_deny = True
+
+    # Logins are server-wide; a login's rights inside a database belong
+    # to the user it maps to, which is a level down.
+    permission_root_label = "at server level"
+
+    # Permission names per scope.  Deliberately the ones worth granting
+    # by hand rather than everything sys.fn_builtin_permissions lists —
+    # that is over two hundred names, most of which nobody grants.
+    _SERVER_PERMISSIONS = [
+        "CONNECT SQL", "VIEW SERVER STATE", "VIEW ANY DATABASE",
+        "VIEW ANY DEFINITION", "ALTER ANY LOGIN", "ALTER ANY DATABASE",
+        "ALTER ANY LINKED SERVER", "ALTER TRACE", "CREATE ANY DATABASE",
+        "CONNECT ANY DATABASE", "IMPERSONATE ANY LOGIN", "CONTROL SERVER",
+    ]
+    _DATABASE_PERMISSIONS = [
+        "CONNECT", "SELECT", "INSERT", "UPDATE", "DELETE", "EXECUTE",
+        "REFERENCES", "VIEW DEFINITION", "ALTER", "CONTROL",
+        "CREATE TABLE", "CREATE VIEW", "CREATE PROCEDURE",
+        "CREATE FUNCTION", "CREATE SCHEMA", "BACKUP DATABASE",
+        "ALTER ANY SCHEMA", "ALTER ANY USER", "ALTER ANY ROLE",
+    ]
+    _SCHEMA_PERMISSIONS = [
+        "SELECT", "INSERT", "UPDATE", "DELETE", "EXECUTE", "REFERENCES",
+        "VIEW DEFINITION", "ALTER", "CONTROL", "TAKE OWNERSHIP",
+    ]
+    _OBJECT_PERMISSIONS = [
+        "SELECT", "INSERT", "UPDATE", "DELETE", "EXECUTE", "REFERENCES",
+        "VIEW DEFINITION", "ALTER", "CONTROL", "TAKE OWNERSHIP",
+    ]
+    # Only these reach a single column.
+    _COLUMN_PERMISSIONS = ["SELECT", "UPDATE", "REFERENCES"]
+
+    def permission_scopes(self, database=None):
+        if database is None:
+            return [["server", "Server"]]
+        return [["database", "Database"], ["schema", "Schema"],
+                ["object", "Table, view or routine"],
+                ["column", "Column of a table or view"]]
+
+    def permission_choices(self, scope):
+        return {
+            "server": self._SERVER_PERMISSIONS,
+            "database": self._DATABASE_PERMISSIONS,
+            "schema": self._SCHEMA_PERMISSIONS,
+            "object": self._OBJECT_PERMISSIONS,
+            "column": self._COLUMN_PERMISSIONS,
+        }.get(scope, [])
+
+    def securable_choices(self, cursor, scope, database=None):
+        if scope in ("server", "database"):
+            return []
+        db = self.quote_ddl_identifier(database) if database else ""
+        prefix = f"{db}." if db else ""
+        if scope == "schema":
+            sql = (f"SELECT name FROM {prefix}sys.schemas "
+                   f"WHERE name NOT IN ('sys','INFORMATION_SCHEMA') "
+                   f"ORDER BY name")
+        else:
+            # Tables, views and the routines worth granting EXECUTE on.
+            sql = (f"SELECT SCHEMA_NAME(o.schema_id) + '.' + o.name "
+                   f"FROM {prefix}sys.objects o "
+                   f"WHERE o.type IN ('U','V','P','FN','IF','TF') "
+                   f"AND o.is_ms_shipped = 0 "
+                   f"ORDER BY SCHEMA_NAME(o.schema_id), o.name")
+        try:
+            cursor.execute(sql)
+            return [r[0] for r in cursor.fetchall()]
+        except Exception:
+            return []
+
+    # Class numbers used by sys.database_permissions / server_permissions.
+    _CLASS_DATABASE = 0
+    _CLASS_OBJECT = 1
+    _CLASS_SCHEMA = 3
+
+    def list_permissions(self, cursor, principal, database=None):
+        """Return the permissions PRINCIPAL holds, at server or in a database."""
+        self.validate_identifier(principal)
+        headers = ["State", "Permission", "Scope", "Securable", "Column"]
+        if database is None:
+            sql = ("SELECT pe.state_desc, pe.permission_name, 'Server', "
+                   "       @@SERVERNAME, ''"
+                   "  FROM sys.server_permissions pe"
+                   "  JOIN sys.server_principals pr"
+                   "    ON pr.principal_id = pe.grantee_principal_id"
+                   " WHERE pr.name = ?"
+                   " ORDER BY pe.permission_name")
+            params = (principal,)
+        else:
+            self.validate_identifier(database)
+            db = self.quote_ddl_identifier(database)
+            # Every catalog view here is database-scoped, so each one has
+            # to be read inside the target database rather than whichever
+            # the session happens to sit in.
+            sql = (
+                f"SELECT pe.state_desc, pe.permission_name,"
+                f"       CASE pe.class WHEN 0 THEN 'Database'"
+                f"                     WHEN 1 THEN 'Object'"
+                f"                     WHEN 3 THEN 'Schema'"
+                f"                     ELSE pe.class_desc END,"
+                f"       CASE pe.class"
+                f"         WHEN 0 THEN ?"
+                f"         WHEN 1 THEN SCHEMA_NAME(o.schema_id) + '.' + o.name"
+                f"         WHEN 3 THEN s.name"
+                f"         ELSE CAST(pe.major_id AS NVARCHAR(32)) END,"
+                f"       ISNULL(c.name, '')"
+                f"  FROM {db}.sys.database_permissions pe"
+                f"  LEFT JOIN {db}.sys.objects o"
+                f"    ON o.object_id = pe.major_id AND pe.class = 1"
+                f"  LEFT JOIN {db}.sys.columns c"
+                f"    ON c.object_id = pe.major_id"
+                f"   AND c.column_id = pe.minor_id AND pe.minor_id > 0"
+                f"  LEFT JOIN {db}.sys.schemas s"
+                f"    ON s.schema_id = pe.major_id AND pe.class = 3"
+                f"  JOIN {db}.sys.database_principals pr"
+                f"    ON pr.principal_id = pe.grantee_principal_id"
+                f" WHERE pr.name = ?"
+                f" ORDER BY pe.class, 4, pe.permission_name")
+            params = (database, principal)
+        cursor.execute(sql, params)
+        return headers, [[str(c) if c is not None else "" for c in row]
+                         for row in cursor.fetchall()]
+
+    def _securable_clause(self, scope, securable, column=None):
+        """Return the ON ... fragment for a scope, or '' where there is none."""
+        if scope in ("server", "database"):
+            return ""
+        if scope == "schema":
+            return f" ON SCHEMA::{self.quote_ddl_identifier(securable)}"
+        parts = securable.split(".", 1)
+        if len(parts) == 2:
+            obj = (f"{self.quote_ddl_identifier(parts[0])}."
+                   f"{self.quote_ddl_identifier(parts[1])}")
+        else:
+            obj = self.quote_ddl_identifier(securable)
+        return f" ON OBJECT::{obj}"
+
+    def _permission_statement(self, verb, principal, scope, securable,
+                              permission, column=None):
+        self.validate_identifier(principal)
+        if permission not in self.permission_choices(scope):
+            raise ValueError(f"{permission} is not a permission that can be "
+                             f"granted at the {scope} level")
+        target = self.quote_ddl_identifier(principal)
+        cols = ""
+        if scope == "column":
+            self.validate_identifier(column)
+            cols = f" ({self.quote_ddl_identifier(column)})"
+        # REVOKE takes the principal FROM, GRANT and DENY take it TO.
+        preposition = "FROM" if verb == "REVOKE" else "TO"
+        return (f"{verb} {permission}{cols}"
+                f"{self._securable_clause(scope, securable, column)} "
+                f"{preposition} {target}")
+
+    def sql_set_permissions(self, principal, scope, securable, granted,
+                            denied, current, database=None, column=None):
+        if scope not in (s[0] for s in self.permission_scopes(database)):
+            raise ValueError(f"{scope} is not a scope in this context")
+        if scope not in ("server", "database"):
+            self.validate_identifier(securable.split(".")[-1])
+        wanted = {}
+        for name in granted or []:
+            wanted[name] = "GRANT"
+        # DENY outranks GRANT, so a permission named in both is denied.
+        for name in denied or []:
+            wanted[name] = "DENY"
+
+        stmts = []
+        for name in sorted(set(current or {}) - set(wanted)):
+            stmts.append(self._permission_statement(
+                "REVOKE", principal, scope, securable, name, column))
+        for name in sorted(wanted):
+            if (current or {}).get(name) == wanted[name]:
+                continue
+            # Switching between GRANT and DENY needs the old one gone
+            # first, or the two rows sit side by side.
+            if name in (current or {}):
+                stmts.append(self._permission_statement(
+                    "REVOKE", principal, scope, securable, name, column))
+            stmts.append(self._permission_statement(
+                "GRANT" if wanted[name] == "GRANT" else "DENY",
+                principal, scope, securable, name, column))
+        if database is not None:
+            stmts = [self._in_database(database, st) for st in stmts]
+        return stmts
+
+    def sql_revoke_permission(self, principal, scope, securable, permission,
+                              database=None, column=None):
+        stmt = self._permission_statement(
+            "REVOKE", principal, scope, securable, permission, column)
+        return [self._in_database(database, stmt) if database is not None
+                else stmt]
+
     def _in_database(self, database, statement):
         """Wrap STATEMENT so it runs inside DATABASE.
 

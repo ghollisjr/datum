@@ -92,6 +92,17 @@ def _refresh_mappings(cursor, driver, login):
         pass
 
 
+def _refresh_permissions(cursor, driver, principal, database):
+    """Re-send the permissions panel for PRINCIPAL."""
+    from .. import envelope
+
+    try:
+        envelope.admin_panel(
+            _permissions_panel(cursor, driver, principal, database))
+    except Exception:
+        pass
+
+
 def _commit(cursor):
     try:
         cursor.connection.commit()
@@ -125,6 +136,9 @@ def get_data(cursor, driver, args):
     if driver.supports_user_mapping:
         actions.append({"key": "U", "label": "Database users",
                         "command": "mappings"})
+    if driver.supports_object_permissions:
+        actions.append({"key": "P", "label": "Permissions",
+                        "command": "permissions"})
     return {
         "panel": "security",
         "headers": headers,
@@ -170,6 +184,16 @@ def run_action(cursor, driver, action_name, args):
             _set_mapping_roles(cursor, driver, args)
         elif action_name == "remove-mapping":
             _remove_mapping(cursor, driver, args)
+        elif action_name == "permissions":
+            _permissions(cursor, driver, args)
+        elif action_name == "new-permission":
+            _permission_scope_form(cursor, driver, args)
+        elif action_name == "permission-edit":
+            _permission_form(cursor, driver, args)
+        elif action_name == "set-permissions":
+            _set_permissions(cursor, driver, args)
+        elif action_name == "revoke-permission":
+            _revoke_permission(cursor, driver, args)
         else:
             envelope.error(f"Unknown security action: {action_name}")
     except ValueError as err:
@@ -432,7 +456,9 @@ def _mapping_panel(cursor, driver, login):
             {"key": "E", "label": "Edit roles", "command": "edit-mapping"},
             {"key": "D", "label": "Remove mapping",
              "command": "remove-mapping"},
-        ],
+        ] + ([{"key": "P", "label": "Permissions in this database",
+               "command": "permissions"}]
+             if driver.supports_object_permissions else []),
         "info": f"Databases {login} is a user in",
         "parent_panel": "security",
         "context": {"login": login},
@@ -585,3 +611,274 @@ def _remove_mapping(cursor, driver, args):
         _commit(cursor)
     envelope.info(f"Removed {login} from {database}")
     _refresh_mappings(cursor, driver, login)
+
+
+# --- Object-level permissions ---
+
+# The panel shows a scope by name; the driver takes the key.
+_SCOPE_KEYS = {"Server": "server", "Database": "database",
+               "Schema": "schema", "Object": "object"}
+
+
+def _row_scope(scope_label, column):
+    """Return the driver's scope key for a row of the permissions panel.
+
+    A row carrying a column name is a grant on that column, however the
+    catalog classes it.
+    """
+    if column:
+        return "column"
+    return _SCOPE_KEYS.get(scope_label, scope_label.lower())
+
+
+def _require_permissions(driver):
+    from .. import envelope
+
+    if not driver.supports_object_permissions:
+        envelope.error(f"Permissions are not supported on "
+                       f"{driver.dialect_name}")
+        return False
+    return True
+
+
+def _permissions_panel(cursor, driver, principal, database=None):
+    """Return the panel listing what PRINCIPAL may do."""
+    principal = principal.strip()
+    driver.validate_identifier(principal)
+    if database:
+        driver.validate_identifier(database)
+    headers, rows = driver.list_permissions(cursor, principal, database)
+    where = f"in {database}" if database else driver.permission_root_label
+    info = f"Permissions held by {principal} {where}".strip()
+    if not rows:
+        info = f"{principal} holds no permissions {where}".strip()
+    elif any(r[0] == "REVOKE" for r in rows):
+        # Revoking one column of a table that is granted as a whole
+        # leaves a REVOKE row behind, and that row is what keeps the
+        # column out of the grant.  It is state, not leftover noise.
+        info += ("  A REVOKE row excludes that column from a grant held "
+                 "on the whole object.")
+    return {
+        "panel": "security",
+        "sub_panel": "permissions",
+        "title": f"Permissions: {principal}"
+                 + (f" in {database}" if database else ""),
+        "headers": headers,
+        "rows": rows,
+        # The securable is what the cursor should stay on across a
+        # refresh; several rows share one, which is close enough.
+        "row_id": 3,
+        "actions": [
+            {"key": "G", "label": "Grant or deny", "command": "new-permission"},
+            {"key": "R", "label": "Revoke this one",
+             "command": "revoke-permission"},
+        ],
+        "info": info,
+        "parent_panel": "security",
+        "context": {"principal": principal, "database": database or ""},
+    }
+
+
+def _permissions(cursor, driver, args):
+    """Show the permissions panel for a principal."""
+    from .. import envelope
+
+    if not _require_permissions(driver):
+        return
+    payload = _decode_payload(args) if args else {}
+    if not payload:
+        # Sent as a bare name from the principal list.
+        payload = {"principal": " ".join(args)}
+    principal = (payload.get("principal") or "").strip()
+    database = (payload.get("database") or "").strip() or None
+    if not principal:
+        envelope.error("permissions requires a principal")
+        return
+    envelope.admin_panel(
+        _permissions_panel(cursor, driver, principal, database))
+
+
+def _permission_scope_form(cursor, driver, args):
+    """Ask which securable to change before offering its permissions.
+
+    The permissions that mean anything depend on the scope — SELECT on a
+    table, USAGE on a schema, CONNECT on a database — so the scope has
+    to be settled before the list can be offered.
+    """
+    from .. import envelope
+
+    if not _require_permissions(driver):
+        return
+    payload = _decode_payload(args) if args else {}
+    principal = (payload.get("principal") or "").strip()
+    database = (payload.get("database") or "").strip() or None
+    if not principal:
+        envelope.error("no principal given")
+        return
+    driver.validate_identifier(principal)
+
+    scopes = driver.permission_scopes(database)
+    if not scopes:
+        envelope.error("nothing can be granted in this context")
+        return
+    # Every securable the scopes can name, so the field can complete
+    # whichever scope is picked.
+    securables = sorted({name
+                         for scope, _label in scopes
+                         for name in driver.securable_choices(
+                             cursor, scope, database)})
+    fields = [
+        {"key": "scope", "label": "Scope", "type": "choice",
+         "default": scopes[-1][0] if len(scopes) > 1 else scopes[0][0],
+         "choices": [list(s) for s in scopes], "required": True},
+        {"key": "securable", "label": "Securable",
+         "type": "completing" if securables else "string",
+         "default": "", "completions": securables or None,
+         "help": "the schema or object to grant on; "
+                 "leave empty for the server or database itself"},
+        {"key": "column", "label": "Column", "type": "string",
+         "default": "",
+         "help": "only for the column scope"},
+    ]
+    envelope.admin_panel({
+        "panel": "security",
+        "sub_panel": "form",
+        "title": f"Grant to {principal}",
+        "form": {
+            "fields": _clean_fields(fields),
+            "values": {"principal": principal, "database": database or ""},
+            "submit_action": "permission-edit",
+            "submit_label": "Choose Permissions",
+            "notes": ["The permissions on offer depend on the scope, so "
+                      "this step settles the scope first."],
+        },
+        "headers": [],
+        "rows": [],
+        "row_id": None,
+        "actions": [],
+        "info": None,
+        "context": {"principal": principal, "database": database or ""},
+    })
+
+
+def _permission_form(cursor, driver, args):
+    """Offer the permissions valid at a scope, ticked as they stand."""
+    from .. import envelope
+
+    if not _require_permissions(driver):
+        return
+    opts = _decode_payload(args)
+    principal = (opts.get("principal") or "").strip()
+    database = (opts.get("database") or "").strip() or None
+    scope = (opts.get("scope") or "").strip()
+    securable = (opts.get("securable") or "").strip()
+    column = (opts.get("column") or "").strip()
+    if not (principal and scope):
+        envelope.error("the form did not say what to change")
+        return
+    driver.validate_identifier(principal)
+    if scope in ("server", "database") and not securable:
+        securable = database or ""
+    if scope not in ("server", "database") and not securable:
+        envelope.error(f"the {scope} scope needs a securable")
+        return
+    if scope == "column" and not column:
+        envelope.error("the column scope needs a column")
+        return
+
+    current = driver.current_permissions(cursor, principal, scope, securable,
+                                         database, column or None)
+    fields = driver.permission_options(scope, current)
+    if not fields:
+        envelope.error(f"nothing can be granted at the {scope} level")
+        return
+    target = securable or (database or "the server")
+    if column:
+        target = f"{target} ({column})"
+    notes = [f"Permissions for {principal} on {target}.",
+             "Ticked is granted; unticking revokes."]
+    if driver.supports_deny:
+        notes.append("Denying outranks any grant the principal gets from "
+                     "a role, and wins over a tick in both lists.")
+    envelope.admin_panel({
+        "panel": "security",
+        "sub_panel": "form",
+        "title": f"Permissions: {principal} on {target}",
+        "form": {
+            "fields": _clean_fields(fields),
+            "values": {"principal": principal, "database": database or "",
+                       "scope": scope, "securable": securable,
+                       "column": column},
+            "submit_action": "set-permissions",
+            "submit_label": "Apply",
+            "notes": notes,
+        },
+        "headers": [],
+        "rows": [],
+        "row_id": None,
+        "actions": [],
+        "info": None,
+        "context": {"principal": principal, "database": database or ""},
+    })
+
+
+def _set_permissions(cursor, driver, args):
+    """Reconcile a principal's permissions on one securable."""
+    from .. import envelope
+
+    if not _require_permissions(driver):
+        return
+    opts = _decode_payload(args)
+    principal = (opts.get("principal") or "").strip()
+    database = (opts.get("database") or "").strip() or None
+    scope = (opts.get("scope") or "").strip()
+    securable = (opts.get("securable") or "").strip()
+    column = (opts.get("column") or "").strip() or None
+    if not (principal and scope):
+        envelope.error("the form did not say what to change")
+        return
+    driver.validate_identifier(principal)
+
+    current = driver.current_permissions(cursor, principal, scope, securable,
+                                         database, column)
+    stmts = driver.sql_set_permissions(
+        principal, scope, securable,
+        list(opts.get("granted") or []), list(opts.get("denied") or []),
+        current, database, column)
+    if not stmts:
+        envelope.info(f"No permission changes for {principal}")
+        _refresh_permissions(cursor, driver, principal, database)
+        return
+    for sql in stmts:
+        cursor.execute(sql)
+        _commit(cursor)
+    envelope.info(f"Updated permissions for {principal} on "
+                  f"{securable or database or 'the server'}")
+    _refresh_permissions(cursor, driver, principal, database)
+
+
+def _revoke_permission(cursor, driver, args):
+    """Take back the single permission the cursor is on."""
+    from .. import envelope
+
+    if not _require_permissions(driver):
+        return
+    opts = _decode_payload(args)
+    principal = (opts.get("principal") or "").strip()
+    database = (opts.get("database") or "").strip() or None
+    permission = (opts.get("permission") or "").strip()
+    securable = (opts.get("securable") or "").strip()
+    column = (opts.get("column") or "").strip() or None
+    scope = _row_scope((opts.get("scope") or "").strip(), column)
+    if not (principal and permission):
+        envelope.error("revoke-permission requires a principal "
+                       "and a permission")
+        return
+    driver.validate_identifier(principal)
+
+    for sql in driver.sql_revoke_permission(principal, scope, securable,
+                                            permission, database, column):
+        cursor.execute(sql)
+        _commit(cursor)
+    envelope.info(f"Revoked {permission} on {securable} from {principal}")
+    _refresh_permissions(cursor, driver, principal, database)

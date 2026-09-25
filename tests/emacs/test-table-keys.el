@@ -201,4 +201,151 @@
                             (equal (sql-datum--read-principal "x: ")
                                    "typed"))))
 
+
+(message "\n=== permissions keys ===")
+
+(test-table-keys-assert "C-c g P shows permissions"
+                        (eq (lookup-key sql-mode-map (kbd "C-c g P"))
+                            'sql-datum-permissions))
+(dolist (spec '(("P" sql-datum-admin-permissions)
+                ("G" sql-datum-admin-grant)
+                ("R" sql-datum-admin-restore-or-revoke)
+                ("U" sql-datum-admin-user-mappings)))
+  (test-table-keys-assert
+   (format "panel key %s runs %s" (nth 0 spec) (nth 1 spec))
+   (eq (lookup-key sql-datum--admin-mode-map (nth 0 spec)) (nth 1 spec))))
+
+;; R already meant restore in the backups view; it must keep doing so.
+(with-temp-buffer
+  (setq-local sql-datum--admin-panel-name "databases")
+  (setq-local sql-datum--admin-panel-data '((sub_panel . "backups")))
+  (let (called)
+    (cl-letf (((symbol-function 'sql-datum-admin-restore)
+               (lambda () (setq called 'restore)))
+              ((symbol-function 'sql-datum-admin-revoke-permission)
+               (lambda () (setq called 'revoke))))
+      (sql-datum-admin-restore-or-revoke)
+      (test-table-keys-assert "R still restores in the backups view"
+                              (eq called 'restore)))))
+
+(with-temp-buffer
+  (setq-local sql-datum--admin-panel-name "security")
+  (setq-local sql-datum--admin-panel-data '((sub_panel . "permissions")))
+  (let (called)
+    (cl-letf (((symbol-function 'sql-datum-admin-restore)
+               (lambda () (setq called 'restore)))
+              ((symbol-function 'sql-datum-admin-revoke-permission)
+               (lambda () (setq called 'revoke))))
+      (sql-datum-admin-restore-or-revoke)
+      (test-table-keys-assert "and revokes in the permissions view"
+                              (eq called 'revoke)))))
+
+(message "\n=== which principal and database the panel is about ===")
+
+;; From the principal list the row names the principal, server-wide.
+(with-temp-buffer
+  (setq-local sql-datum--admin-panel-name "security")
+  (setq-local sql-datum--admin-panel-data '((sub_panel . nil)))
+  (cl-letf (((symbol-function 'sql-datum--admin-row-id-at-point)
+             (lambda () "app_login")))
+    (test-table-keys-assert "a login row means that login, no database"
+                            (equal (sql-datum--admin-permission-context)
+                                   '("app_login" nil)))))
+
+;; From a user-mapping row the database is the row, the login the context.
+(with-temp-buffer
+  (setq-local sql-datum--admin-panel-name "security")
+  (setq-local sql-datum--admin-panel-data '((sub_panel . "user-mappings")))
+  (setq-local sql-datum--admin-context '((login . "app_login")))
+  (cl-letf (((symbol-function 'sql-datum--admin-row-id-at-point)
+             (lambda () "payroll")))
+    (test-table-keys-assert "a mapping row means that login in that database"
+                            (equal (sql-datum--admin-permission-context)
+                                   '("app_login" "payroll")))))
+
+;; Inside the permissions view both come from the context it carries.
+(with-temp-buffer
+  (setq-local sql-datum--admin-panel-name "security")
+  (setq-local sql-datum--admin-panel-data '((sub_panel . "permissions")))
+  (setq-local sql-datum--admin-context
+              '((principal . "app_login") (database . "payroll")))
+  (test-table-keys-assert "the permissions view remembers both"
+                          (equal (sql-datum--admin-permission-context)
+                                 '("app_login" "payroll"))))
+
+;; An empty database string means server level, not a database named "".
+(with-temp-buffer
+  (setq-local sql-datum--admin-panel-name "security")
+  (setq-local sql-datum--admin-panel-data '((sub_panel . "permissions")))
+  (setq-local sql-datum--admin-context
+              '((principal . "app_login") (database . "")))
+  (test-table-keys-assert "an empty database reads as server level"
+                          (equal (sql-datum--admin-permission-context)
+                                 '("app_login" nil))))
+
+(message "\n=== what the permission keys send ===")
+
+(let (sent)
+  (cl-letf (((symbol-function 'sql-datum--admin-send-command)
+             (lambda (cmd) (setq sent cmd))))
+    (with-temp-buffer
+      (setq-local sql-datum--admin-panel-name "security")
+      (setq-local sql-datum--admin-panel-data '((sub_panel . "user-mappings")))
+      (setq-local sql-datum--admin-context '((login . "app_login")))
+      (cl-letf (((symbol-function 'sql-datum--admin-row-id-at-point)
+                 (lambda () "payroll")))
+        (sql-datum-admin-permissions))
+      (test-table-keys-assert "P carries the login and the database"
+                              (equal (json-parse-string
+                                      (decode-coding-string
+                                       (base64-decode-string
+                                        (car (last (split-string sent " "))))
+                                       'utf-8)
+                                      :object-type 'alist)
+                                     '((principal . "app_login")
+                                       (database . "payroll")))))
+    ;; Revoking must name the exact row, column grants included.
+    (with-temp-buffer
+      (setq-local sql-datum--admin-panel-name "security")
+      (setq-local sql-datum--admin-panel-data '((sub_panel . "permissions")))
+      (setq-local sql-datum--admin-context
+                  '((principal . "app_login") (database . "payroll")))
+      (cl-letf (((symbol-function 'sql-datum--admin-row-cells-at-point)
+                 (lambda () '("GRANT" "SELECT" "Object"
+                              "dbo.customers" "email")))
+                ((symbol-function 'yes-or-no-p) (lambda (_) t)))
+        (sql-datum-admin-revoke-permission))
+      (test-table-keys-assert "R names the row it is revoking"
+                              (equal (json-parse-string
+                                      (decode-coding-string
+                                       (base64-decode-string
+                                        (car (last (split-string sent " "))))
+                                       'utf-8)
+                                      :object-type 'alist)
+                                     '((principal . "app_login")
+                                       (permission . "SELECT")
+                                       (scope . "Object")
+                                       (securable . "dbo.customers")
+                                       (column . "email")
+                                       (database . "payroll")))))
+    ;; Nothing is revoked without agreement.
+    (with-temp-buffer
+      (setq-local sql-datum--admin-panel-name "security")
+      (setq-local sql-datum--admin-panel-data '((sub_panel . "permissions")))
+      (setq-local sql-datum--admin-context '((principal . "app_login")))
+      (setq sent nil)
+      (cl-letf (((symbol-function 'sql-datum--admin-row-cells-at-point)
+                 (lambda () '("GRANT" "SELECT" "Object" "dbo.t" "")))
+                ((symbol-function 'yes-or-no-p) (lambda (_) nil)))
+        (sql-datum-admin-revoke-permission))
+      (test-table-keys-assert "declining the prompt revokes nothing"
+                              (null sent)))))
+
+;; Granting belongs to the permissions view, where the principal is known.
+(with-temp-buffer
+  (setq-local sql-datum--admin-panel-name "security")
+  (setq-local sql-datum--admin-panel-data '((sub_panel . nil)))
+  (test-table-keys-error "G outside the permissions view says where to go"
+                         (sql-datum-admin-grant)))
+
 (message "\n%d passed, %d failed" test-table-keys--pass test-table-keys--fail)

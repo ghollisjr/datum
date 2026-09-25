@@ -380,6 +380,110 @@ class BaseDriver(ABC):
         raise NotImplementedError(
             f"User mapping is not supported on {self.dialect_name}")
 
+    # --- Object-level permissions ---
+    #
+    # Who may do what to which securable.  The scopes form a hierarchy —
+    # server, database, schema, object, column — and a dialect grants on
+    # whichever of them it has.
+
+    supports_object_permissions = False
+
+    # How the panel describes the scope a principal's permissions are
+    # listed at when no database has been picked.
+    permission_root_label = ""
+
+    # MSSQL can DENY, which outranks any GRANT the principal gets from a
+    # role.  The SQL standard, and PostgreSQL with it, only grants and
+    # revokes.
+    supports_deny = False
+
+    def list_permissions(self, cursor, principal, database=None):
+        """Return (headers, rows) of the permissions PRINCIPAL holds.
+
+        DATABASE selects which database to look in, where the dialect
+        keeps permissions per database; None means the server level.
+        """
+        return [], []
+
+    def permission_scopes(self, database=None):
+        """Return [value, label] pairs for the scopes that can be granted on."""
+        return []
+
+    def permission_choices(self, scope):
+        """Return the permission names that mean something at SCOPE."""
+        return []
+
+    def securable_choices(self, cursor, scope, database=None):
+        """Return the names of the securables at SCOPE."""
+        return []
+
+    def current_permissions(self, cursor, principal, scope, securable,
+                            database=None, column=None):
+        """Return {permission: state} already held on SECURABLE.
+
+        State is "GRANT" or "DENY"; a permission the principal does not
+        hold is simply absent.  Read back out of `list_permissions' so
+        that what the form opens with is exactly what the panel shows.
+        """
+        headers, rows = self.list_permissions(cursor, principal, database)
+        wanted_scope = {"server": "Server", "database": "Database",
+                        "schema": "Schema", "object": "Object",
+                        "column": "Object"}.get(scope, scope)
+        held = {}
+        for state, permission, row_scope, row_securable, row_column in rows:
+            if row_scope != wanted_scope:
+                continue
+            # A database-scope grant names the database itself.
+            if scope not in ("server", "database") and row_securable != securable:
+                continue
+            if scope == "column":
+                if row_column != (column or ""):
+                    continue
+            elif row_column:
+                # A column grant is not a grant on the whole object.
+                continue
+            held[permission] = state
+        return held
+
+    def sql_set_permissions(self, principal, scope, securable, granted,
+                            denied, current, database=None, column=None):
+        """Return statements reconciling PRINCIPAL's rights on SECURABLE.
+
+        GRANTED and DENIED are the permissions wanted in each state;
+        CURRENT is what `current_permissions' returned.  Anything held
+        but named in neither is revoked.
+        """
+        raise NotImplementedError(
+            f"Permissions are not supported on {self.dialect_name}")
+
+    def sql_revoke_permission(self, principal, scope, securable, permission,
+                              database=None, column=None):
+        """Return statements taking one permission back."""
+        raise NotImplementedError(
+            f"Permissions are not supported on {self.dialect_name}")
+
+    def permission_options(self, scope, current):
+        """Field descriptors for the permissions held at SCOPE.
+
+        CURRENT is {permission: state}, so the form opens showing what
+        the principal already has and submitting it reconciles the
+        difference rather than reapplying everything.
+        """
+        names = self.permission_choices(scope)
+        if not names:
+            return []
+        fields = [{"key": "granted", "label": "Granted", "type": "multi",
+                   "default": sorted(p for p, st in (current or {}).items()
+                                     if st == "GRANT"),
+                   "choices": [[n, n] for n in names]}]
+        if self.supports_deny:
+            fields.append(
+                {"key": "denied", "label": "Denied", "type": "multi",
+                 "default": sorted(p for p, st in (current or {}).items()
+                                   if st == "DENY"),
+                 "choices": [[n, n] for n in names]})
+        return fields
+
     # --- Schemas and tables ---
 
     supports_schema_ddl = False

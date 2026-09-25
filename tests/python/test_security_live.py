@@ -130,7 +130,11 @@ def pg_env():
     cursor, driver = conn.cursor(), PostgreSQLDriver()
 
     def cleanup():
-        for stmt in (f"DROP ROLE IF EXISTS {PG_ROLE}",
+        # A role holding privileges cannot be dropped, and DROP ROLE
+        # says so rather than cascading, so the grants go first.
+        for stmt in (f"DROP OWNED BY {PG_ROLE}",
+                     "DROP OWNED BY datum_sec_group",
+                     f"DROP ROLE IF EXISTS {PG_ROLE}",
                      "DROP ROLE IF EXISTS datum_sec_group"):
             try:
                 cursor.execute(stmt)
@@ -548,3 +552,184 @@ class TestMutationsRefreshThePanel:
         # The mapping was made; only the redraw failed.
         assert "error" not in _kinds(captured), captured
         assert _kinds(captured)[0] == "info"
+
+
+class TestObjectPermissions:
+    """Granting, denying and revoking against the real servers."""
+
+    # pg_env connects to the maintenance database, which has none of the
+    # sample tables, so these make their own to grant on.
+    PG_TABLE = "public.datum_perm_pytest"
+
+    @pytest.fixture
+    def pg_table(self, pg_env):
+        cursor, _driver = pg_env
+        cursor.execute(f"DROP TABLE IF EXISTS {self.PG_TABLE}")
+        cursor.execute(f"CREATE TABLE {self.PG_TABLE} (id int, email text)")
+        yield self.PG_TABLE
+        cursor.execute(f"DROP TABLE IF EXISTS {self.PG_TABLE}")
+
+    def _perm_rows(self, cursor, driver, principal, database=None):
+        return driver.list_permissions(cursor, principal, database)[1]
+
+    def test_mssql_grant_deny_and_revoke_on_an_object(self, mssql_env,
+                                                      captured):
+        cursor, driver = mssql_env
+        from datum.panels import security
+        _create_mssql_login(cursor, driver)
+        security.run_action(cursor, driver, "add-mapping",
+                            [_payload({"login": MS_LOGIN,
+                                       "database": "datum_test"})])
+        captured.clear()
+
+        security.run_action(cursor, driver, "set-permissions", [_payload({
+            "principal": MS_LOGIN, "database": "datum_test",
+            "scope": "object", "securable": "dbo.customers",
+            "granted": ["SELECT", "UPDATE"], "denied": ["DELETE"]})])
+        _assert_ok(captured, refreshes="permissions")
+
+        held = {(r[1], r[0]) for r in self._perm_rows(
+            cursor, driver, MS_LOGIN, "datum_test") if r[3] == "dbo.customers"}
+        assert ("SELECT", "GRANT") in held
+        assert ("UPDATE", "GRANT") in held
+        assert ("DELETE", "DENY") in held
+
+        # Unticking a permission has to take it away, not leave it.
+        captured.clear()
+        security.run_action(cursor, driver, "set-permissions", [_payload({
+            "principal": MS_LOGIN, "database": "datum_test",
+            "scope": "object", "securable": "dbo.customers",
+            "granted": ["SELECT"], "denied": []})])
+        _assert_ok(captured, refreshes="permissions")
+        held = {r[1] for r in self._perm_rows(
+            cursor, driver, MS_LOGIN, "datum_test") if r[3] == "dbo.customers"}
+        assert held == {"SELECT"}
+
+    def test_mssql_reapplying_the_same_set_changes_nothing(self, mssql_env,
+                                                           captured):
+        cursor, driver = mssql_env
+        from datum.panels import security
+        _create_mssql_login(cursor, driver)
+        security.run_action(cursor, driver, "add-mapping",
+                            [_payload({"login": MS_LOGIN,
+                                       "database": "datum_test"})])
+        opts = {"principal": MS_LOGIN, "database": "datum_test",
+                "scope": "schema", "securable": "dbo",
+                "granted": ["SELECT"], "denied": []}
+        security.run_action(cursor, driver, "set-permissions", [_payload(opts)])
+        captured.clear()
+        security.run_action(cursor, driver, "set-permissions", [_payload(opts)])
+        messages = [a[0] for k, a in captured if k == "info"]
+        assert any("No permission changes" in m for m in messages), captured
+
+    def test_mssql_column_grant_is_separate_from_the_table(self, mssql_env):
+        cursor, driver = mssql_env
+        from datum.panels import security
+        _create_mssql_login(cursor, driver)
+        security.run_action(cursor, driver, "add-mapping",
+                            [_payload({"login": MS_LOGIN,
+                                       "database": "datum_test"})])
+        for sql in driver.sql_set_permissions(
+                MS_LOGIN, "column", "dbo.customers", ["SELECT"], [], {},
+                database="datum_test", column="email"):
+            cursor.execute(sql)
+        rows = self._perm_rows(cursor, driver, MS_LOGIN, "datum_test")
+        assert ["GRANT", "SELECT", "Object", "dbo.customers", "email"] in rows
+        # A column grant is not a grant on the whole object.
+        assert driver.current_permissions(
+            cursor, MS_LOGIN, "object", "dbo.customers",
+            database="datum_test") == {}
+
+    def test_mssql_server_permissions_are_listed_separately(self, mssql_env):
+        cursor, driver = mssql_env
+        _create_mssql_login(cursor, driver)
+        cursor.execute(f"GRANT VIEW SERVER STATE TO [{MS_LOGIN}]")
+        rows = self._perm_rows(cursor, driver, MS_LOGIN)
+        assert any(r[1] == "VIEW SERVER STATE" and r[2] == "Server"
+                   for r in rows), rows
+
+    def test_mssql_revoking_one_row_leaves_the_others(self, mssql_env,
+                                                      captured):
+        cursor, driver = mssql_env
+        from datum.panels import security
+        _create_mssql_login(cursor, driver)
+        security.run_action(cursor, driver, "add-mapping",
+                            [_payload({"login": MS_LOGIN,
+                                       "database": "datum_test"})])
+        security.run_action(cursor, driver, "set-permissions", [_payload({
+            "principal": MS_LOGIN, "database": "datum_test",
+            "scope": "object", "securable": "dbo.customers",
+            "granted": ["SELECT", "UPDATE"], "denied": []})])
+        captured.clear()
+        security.run_action(cursor, driver, "revoke-permission", [_payload({
+            "principal": MS_LOGIN, "database": "datum_test",
+            "scope": "Object", "securable": "dbo.customers",
+            "column": "", "permission": "UPDATE"})])
+        _assert_ok(captured, refreshes="permissions")
+        held = {r[1] for r in self._perm_rows(
+            cursor, driver, MS_LOGIN, "datum_test") if r[3] == "dbo.customers"}
+        assert held == {"SELECT"}
+
+    def test_pg_grant_and_revoke_on_a_table(self, pg_env, pg_table, captured):
+        cursor, driver = pg_env
+        from datum.panels import security
+        cursor.execute(f"CREATE ROLE {PG_ROLE}")
+        captured.clear()
+        security.run_action(cursor, driver, "set-permissions", [_payload({
+            "principal": PG_ROLE, "scope": "object",
+            "securable": pg_table,
+            "granted": ["SELECT", "INSERT"], "denied": []})])
+        _assert_ok(captured, refreshes="permissions")
+        held = {r[1] for r in self._perm_rows(cursor, driver, PG_ROLE)
+                if r[3] == pg_table}
+        assert held == {"SELECT", "INSERT"}
+
+        captured.clear()
+        security.run_action(cursor, driver, "revoke-permission", [_payload({
+            "principal": PG_ROLE, "scope": "Object",
+            "securable": pg_table, "column": "",
+            "permission": "INSERT"})])
+        _assert_ok(captured, refreshes="permissions")
+        held = {r[1] for r in self._perm_rows(cursor, driver, PG_ROLE)
+                if r[3] == pg_table}
+        assert held == {"SELECT"}
+
+    def test_pg_schema_and_database_scopes(self, pg_env):
+        cursor, driver = pg_env
+        cursor.execute(f"CREATE ROLE {PG_ROLE}")
+        for sql in driver.sql_set_permissions(
+                PG_ROLE, "schema", "public", ["USAGE"], [], {}):
+            cursor.execute(sql)
+        cursor.execute("SELECT current_database()")
+        database = cursor.fetchone()[0]
+        for sql in driver.sql_set_permissions(
+                PG_ROLE, "database", database, ["CONNECT"], [], {}):
+            cursor.execute(sql)
+        rows = self._perm_rows(cursor, driver, PG_ROLE)
+        assert ["GRANT", "USAGE", "Schema", "public", ""] in rows
+        assert any(r[2] == "Database" and r[1] == "CONNECT" for r in rows)
+
+    def test_pg_a_role_with_nothing_granted_lists_nothing(self, pg_env):
+        cursor, driver = pg_env
+        cursor.execute(f"CREATE ROLE {PG_ROLE}")
+        assert self._perm_rows(cursor, driver, PG_ROLE) == []
+
+    def test_the_form_opens_ticked_from_the_server(self, mssql_env, captured):
+        cursor, driver = mssql_env
+        from datum.panels import security
+        _create_mssql_login(cursor, driver)
+        security.run_action(cursor, driver, "add-mapping",
+                            [_payload({"login": MS_LOGIN,
+                                       "database": "datum_test"})])
+        security.run_action(cursor, driver, "set-permissions", [_payload({
+            "principal": MS_LOGIN, "database": "datum_test",
+            "scope": "object", "securable": "dbo.customers",
+            "granted": ["SELECT"], "denied": ["DELETE"]})])
+        captured.clear()
+        security.run_action(cursor, driver, "permission-edit", [_payload({
+            "principal": MS_LOGIN, "database": "datum_test",
+            "scope": "object", "securable": "dbo.customers"})])
+        form = [a[0] for k, a in captured if k == "admin_panel"][0]["form"]
+        by_key = {f["key"]: f for f in form["fields"]}
+        assert by_key["granted"]["default"] == ["SELECT"]
+        assert by_key["denied"]["default"] == ["DELETE"]

@@ -1644,3 +1644,189 @@ class TestColumnTypeValidation:
         edited = [["a", new, True, False, "", "a"]]
         stmts = d.sql_alter_table("s", "t", {"columns": edited}, current)
         assert any(new in s for s in stmts)
+
+
+class TestObjectPermissions:
+    """GRANT, DENY and REVOKE across the scopes each dialect has."""
+
+    @pytest.fixture
+    def mssql(self):
+        return MSSQLDriver.__new__(MSSQLDriver)
+
+    @pytest.fixture
+    def postgres(self):
+        return PostgreSQLDriver.__new__(PostgreSQLDriver)
+
+    @staticmethod
+    def _inner(statement):
+        """Return the statement MSSQL wraps to run inside a database."""
+        marker = "sp_executesql N'"
+        if marker in statement:
+            body = statement.split(marker, 1)[1][:-1]
+            return body.replace("''", "'")
+        return statement
+
+    def test_both_dialects_declare_support(self, mssql, postgres):
+        assert mssql.supports_object_permissions
+        assert postgres.supports_object_permissions
+
+    def test_only_mssql_can_deny(self, mssql, postgres):
+        # The SQL standard has no DENY, and neither does PostgreSQL.
+        assert mssql.supports_deny
+        assert not postgres.supports_deny
+
+    def test_mssql_server_scope_stands_alone(self, mssql):
+        # A login's rights inside a database belong to the user it maps
+        # to, so the server level offers only itself.
+        assert mssql.permission_scopes(None) == [["server", "Server"]]
+        keys = [s[0] for s in mssql.permission_scopes("db")]
+        assert keys == ["database", "schema", "object", "column"]
+
+    def test_postgres_has_no_server_scope(self, postgres):
+        # Roles are cluster-wide but privileges hang off objects, which
+        # belong to one database.
+        keys = [s[0] for s in postgres.permission_scopes(None)]
+        assert "server" not in keys
+        assert keys == ["database", "schema", "object", "column"]
+
+    # --- statement shape ---
+
+    def test_mssql_object_grant_uses_object_class(self, mssql):
+        sql = mssql.sql_set_permissions(
+            "bob", "object", "dbo.customers", ["SELECT"], [], {},
+            database="db")
+        assert [self._inner(x) for x in sql] == [
+            "GRANT SELECT ON OBJECT::[dbo].[customers] TO [bob]"]
+
+    def test_mssql_schema_grant_uses_schema_class(self, mssql):
+        sql = mssql.sql_set_permissions(
+            "bob", "schema", "dbo", ["EXECUTE"], [], {}, database="db")
+        assert [self._inner(x) for x in sql] == [
+            "GRANT EXECUTE ON SCHEMA::[dbo] TO [bob]"]
+
+    def test_mssql_database_grant_has_no_on_clause(self, mssql):
+        sql = mssql.sql_set_permissions(
+            "bob", "database", "", ["CREATE TABLE"], [], {}, database="db")
+        assert [self._inner(x) for x in sql] == [
+            "GRANT CREATE TABLE TO [bob]"]
+
+    def test_postgres_object_grant_uses_on_table(self, postgres):
+        sql = postgres.sql_set_permissions(
+            "bob", "object", "public.customers", ["SELECT"], [], {})
+        assert sql == ['GRANT SELECT ON TABLE "public"."customers" TO "bob"']
+
+    def test_revoke_takes_the_principal_from_not_to(self, mssql, postgres):
+        # GRANT ... TO, but REVOKE ... FROM.
+        assert mssql.sql_revoke_permission(
+            "bob", "object", "dbo.t", "SELECT")[0].endswith("FROM [bob]")
+        assert postgres.sql_revoke_permission(
+            "bob", "object", "public.t", "SELECT")[0].endswith('FROM "bob"')
+
+    def test_column_scope_names_the_column(self, mssql, postgres):
+        assert [self._inner(x) for x in mssql.sql_set_permissions(
+            "bob", "column", "dbo.customers", ["SELECT"], [], {},
+            database="db", column="email")] == [
+            "GRANT SELECT ([email]) ON OBJECT::[dbo].[customers] TO [bob]"]
+        assert postgres.sql_set_permissions(
+            "bob", "column", "public.customers", ["SELECT"], [], {},
+            column="email") == [
+            'GRANT SELECT ("email") ON TABLE "public"."customers" TO "bob"']
+
+    # --- the diff ---
+
+    def test_only_the_difference_is_applied(self, mssql):
+        sql = mssql.sql_set_permissions(
+            "bob", "object", "dbo.t", ["SELECT", "UPDATE"], [],
+            {"SELECT": "GRANT", "DELETE": "GRANT"}, database="db")
+        # SELECT is unchanged and must not be reapplied.
+        assert not any("GRANT SELECT" in s for s in sql)
+        assert any("REVOKE DELETE" in s for s in sql)
+        assert any("GRANT UPDATE" in s for s in sql)
+
+    def test_nothing_to_do_yields_no_statements(self, mssql, postgres):
+        assert mssql.sql_set_permissions(
+            "bob", "object", "dbo.t", ["SELECT"], [],
+            {"SELECT": "GRANT"}, database="db") == []
+        assert postgres.sql_set_permissions(
+            "bob", "object", "public.t", ["SELECT"], [],
+            {"SELECT": "GRANT"}) == []
+
+    def test_flipping_grant_to_deny_revokes_first(self, mssql):
+        # Without the revoke the two states sit side by side.
+        sql = mssql.sql_set_permissions(
+            "bob", "object", "dbo.t", [], ["SELECT"], {"SELECT": "GRANT"},
+            database="db")
+        assert [self._inner(x) for x in sql] == [
+            "REVOKE SELECT ON OBJECT::[dbo].[t] FROM [bob]",
+            "DENY SELECT ON OBJECT::[dbo].[t] TO [bob]"]
+
+    def test_deny_wins_when_a_permission_is_in_both_lists(self, mssql):
+        sql = mssql.sql_set_permissions(
+            "bob", "object", "dbo.t", ["SELECT"], ["SELECT"], {},
+            database="db")
+        assert [self._inner(x) for x in sql] == [
+            "DENY SELECT ON OBJECT::[dbo].[t] TO [bob]"]
+
+    def test_postgres_refuses_to_pretend_it_can_deny(self, postgres):
+        with pytest.raises(ValueError, match="no DENY"):
+            postgres.sql_set_permissions(
+                "bob", "object", "public.t", [], ["SELECT"], {})
+
+    # --- validation ---
+
+    def test_a_permission_must_belong_to_its_scope(self, mssql, postgres):
+        # USAGE is a PostgreSQL schema privilege, not an MSSQL object one.
+        with pytest.raises(ValueError, match="object level"):
+            mssql.sql_set_permissions(
+                "bob", "object", "dbo.t", ["USAGE"], [], {}, database="db")
+        # TRUNCATE is a table privilege, not a schema one.
+        with pytest.raises(ValueError, match="schema level"):
+            postgres.sql_set_permissions(
+                "bob", "schema", "public", ["TRUNCATE"], [], {})
+
+    def test_an_unknown_scope_is_refused(self, mssql):
+        with pytest.raises(ValueError, match="not a scope"):
+            mssql.sql_set_permissions(
+                "bob", "galaxy", "x", ["SELECT"], [], {})
+
+    def test_a_permission_name_is_never_interpolated_raw(self, mssql):
+        # The permission is checked against a list rather than quoted,
+        # so anything not on it cannot reach the statement at all.
+        with pytest.raises(ValueError):
+            mssql.sql_set_permissions(
+                "bob", "object", "dbo.t", ["SELECT; DROP TABLE x--"], [], {},
+                database="db")
+
+    def test_identifiers_are_escaped(self, mssql, postgres):
+        sql = self._inner(mssql.sql_set_permissions(
+            "bo]b", "object", "dbo.cus]tomers", ["SELECT"], [], {},
+            database="db")[0])
+        assert "[bo]]b]" in sql and "[cus]]tomers]" in sql
+        sql = postgres.sql_set_permissions(
+            'bo"b', "object", 'public.cus"t', ["SELECT"], [], {})[0]
+        assert 'bo""b' in sql and 'cus""t' in sql
+
+    def test_mssql_runs_database_scoped_statements_in_that_database(self, mssql):
+        # A session cannot USE its way around, so each statement is
+        # executed inside the database it is about.
+        sql = mssql.sql_set_permissions(
+            "bob", "object", "dbo.t", ["SELECT"], [], {}, database="payroll")
+        assert sql[0].startswith("EXEC [payroll]..sp_executesql")
+
+    def test_server_scope_is_not_wrapped(self, mssql):
+        sql = mssql.sql_set_permissions(
+            "bob", "server", "", ["VIEW SERVER STATE"], [], {})
+        assert sql == ["GRANT VIEW SERVER STATE TO [bob]"]
+
+    # --- the form the panel builds from the driver ---
+
+    def test_the_form_opens_showing_what_is_already_held(self, mssql):
+        fields = mssql.permission_options(
+            "object", {"SELECT": "GRANT", "DELETE": "DENY"})
+        by_key = {f["key"]: f for f in fields}
+        assert by_key["granted"]["default"] == ["SELECT"]
+        assert by_key["denied"]["default"] == ["DELETE"]
+
+    def test_postgres_form_has_no_denied_list(self, postgres):
+        keys = [f["key"] for f in postgres.permission_options("object", {})]
+        assert keys == ["granted"]

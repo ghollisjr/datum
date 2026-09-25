@@ -28,6 +28,7 @@ standalone from any terminal.
   - Databases: create, alter, drop; files and filegroups; backup and restore (MSSQL)
   - Schemas and tables: a column builder, and altering columns of a table that exists
   - Logins, roles and database users, with passwords treated as secrets
+  - Object-level permissions: grant, deny and revoke down to a column
   - SQL Agent jobs, steps, schedules and history (MSSQL)
   - Reachable from the query buffer by key as well as from the panels:
     =C-c t= for tables and schemas, =C-c d= for databases, =C-c g= for
@@ -505,6 +506,7 @@ dropped until you confirm there.
 | =C-c g E= | =sql-datum-edit-principal=   | Edit a login or role               |
 | =C-c g D= | =sql-datum-drop-principal=   | Drop one (confirmation panel)      |
 | =C-c g m= | =sql-datum-user-mappings=    | Database user mappings for a login |
+| =C-c g P= | =sql-datum-permissions=      | Permissions held by a login or role |
 
 Logins are not part of the introspection the server pushes when you
 connect, so these complete against whatever the security panel has
@@ -963,6 +965,7 @@ separate database user: a role that can log in is already both.
 | =E= | Edit login/role                               |
 | =D= | Drop login/role (confirmation)                |
 | =U= | Database users for this login (MSSQL)         |
+| =P= | Permissions held by this login or role        |
 
 The login list includes an *Owns (dbo)* column.  Owning a database makes
 a login =dbo= inside it with full control, regardless of any server
@@ -977,8 +980,54 @@ Dropping counts the principal's live sessions first — a login holding a
 connection cannot be dropped — and offers a force that ends them.
 
 In the database-users view (=U=), =N= maps the login into a database, =E=
-edits the roles it holds there, and =D= removes the mapping.  Roles are
-offered per database, since they only exist once the database is known.
+edits the roles it holds there, =D= removes the mapping, and =P= shows
+the permissions the login holds in that database.  Roles are offered per
+database, since they only exist once the database is known.
+
+**** Object-level permissions (=P=)
+
+The permissions view lists every permission a principal holds, one row
+per permission, with the scope and the securable it applies to:
+
+| Key | Action                                    |
+|-----+-------------------------------------------|
+| =G= | Grant or deny on a securable              |
+| =R= | Revoke the permission on the row at point |
+
+Where the view starts from differs by dialect, because the dialects
+differ.  On MSSQL a login is a server principal, and its rights inside a
+database belong to the user it maps to — so =P= on the login list shows
+*server* permissions, and =U= then =P= shows what it may do in one
+database.  On PostgreSQL a role is cluster-wide but privileges hang off
+objects, and an object belongs to one database, so =P= shows the
+connected database.  The panel title says which.
+
+=G= asks for the scope before offering permissions, the same way editing
+a user's roles asks for the database first: what can be granted depends
+on it.  SELECT means something on a table, =USAGE= on a schema and
+=CONNECT= on a database, and offering all of them at once would be
+offering nonsense.  Scopes are database, schema, object and column —
+MSSQL adds server at the login level.
+
+The checklist then opens ticked as things already stand on the server,
+and submitting reconciles the difference rather than reapplying
+everything: unticking a permission revokes it, and a permission left
+alone is not touched, so a grant carrying =WITH GRANT OPTION= keeps it.
+
+MSSQL can =DENY=, which outranks any grant the principal picks up from a
+role; PostgreSQL cannot, so it has no *Denied* list, and asking it to
+deny is refused rather than quietly turned into a revoke.  Naming a
+permission in both lists denies it.
+
+A row whose state is =REVOKE= is not leftover noise.  Revoking one
+column of a table that is granted as a whole leaves that row behind, and
+it is what keeps the column out of the grant — the column is excluded
+while the rest of the table stays readable.
+
+Permission names are checked against the list for their scope rather
+than quoted into the statement, so a name that is not one of them cannot
+reach the server at all.  Identifiers are escaped per dialect as
+everywhere else.
 
 *** SSIS panel
 
