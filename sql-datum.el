@@ -878,6 +878,15 @@ Set to nil to disable auto-refresh."
 (defvar-local sql-datum--admin-timer nil
   "Auto-refresh timer for this admin buffer.")
 
+(defvar sql-datum--admin-display-request nil
+  "Panel name the user has explicitly asked to see, or nil.
+
+Panel data arrives asynchronously, so by the time it does there is no
+way to tell an auto-refresh from a deliberate request.  The interactive
+entry points set this; `sql-datum--admin-show-panel' consumes it.  That
+keeps a refresh from dragging a buried panel back into a window while
+still letting an explicit request raise one.")
+
 (defvar-local sql-datum--admin-quit-flag nil
   "Non-nil when the user has explicitly quit this admin buffer.")
 
@@ -1038,10 +1047,14 @@ SQLI-BUF is the originating SQLi buffer."
         ;; Also set window point so the visible cursor moves
         (when-let ((w (get-buffer-window buf t)))
           (set-window-point w (point)))))
-    ;; Only show the buffer on first creation — refreshes should not
-    ;; steal focus or force the buffer visible.
-    (when initial
-      (pop-to-buffer buf))
+    ;; Show the buffer on first creation, or when the user explicitly
+    ;; asked for this panel.  A plain auto-refresh must not steal focus
+    ;; or drag a buried panel back into a window.
+    (let ((requested (equal sql-datum--admin-display-request panel)))
+      (when requested
+        (setq sql-datum--admin-display-request nil))
+      (when (or initial requested)
+        (pop-to-buffer buf)))
     ;; Start auto-refresh for top-level panels (not sub-panels)
     (when (and initial (not sub-panel))
       (sql-datum--admin-start-timer buf))))
@@ -1452,8 +1465,10 @@ SQLI-BUF is the originating SQLi buffer."
   (interactive)
   (let ((parent (alist-get 'parent_panel sql-datum--admin-panel-data)))
     (if parent
-        (sql-datum--admin-send-command
-         (format ":admin %s" parent))
+        (progn
+          (setq sql-datum--admin-display-request parent)
+          (sql-datum--admin-send-command
+           (format ":admin %s" parent)))
       (message "datum admin: no parent panel"))))
 
 (defun sql-datum--admin-navigable-line-p ()
@@ -4499,6 +4514,7 @@ With a prefix argument, prompts for the panel name."
   (interactive
    (list (completing-read "Admin panel: "
                           '("activity" "databases" "jobs" "ssis") nil t)))
+  (setq sql-datum--admin-display-request panel)
   (sql-datum--send-command (format ":admin %s" panel) t))
 
 (defun sql-datum-version ()
