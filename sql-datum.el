@@ -1081,6 +1081,15 @@ SQLI-BUF is the originating SQLi buffer."
               sql-datum--admin-panel-data data
               sql-datum--admin-sqli-buf sqli-buf
               sql-datum--admin-context (alist-get 'context data))
+        ;; Re-set on every redraw: the keys change with the panel.
+        (setq-local header-line-format
+                    (sql-datum--admin-header-line
+                     actions
+                     (append '(("g" . "refresh") ("o" . "sort")
+                               ("i" . "inspect"))
+                             (when (alist-get 'parent_panel data)
+                               '(("B" . "back")))
+                             '(("q" . "quit")))))
         ;; Restore cursor position
         (sql-datum--admin-restore-cursor
          saved-row-id saved-line saved-col row-id rows initial)
@@ -1221,23 +1230,36 @@ ROW-ID is the column index used as row identifier."
         (when face-entry
           (put-text-property start end 'face (cdr face-entry)))))))
 
-(defun sql-datum--admin-insert-help-line (actions)
-  "Insert a help line showing available ACTIONS and standard keys."
-  (insert (propertize "Keys: " 'face 'font-lock-comment-face))
-  (when actions
+(defun sql-datum--admin-header-line (actions &optional extra)
+  "Return a header line describing ACTIONS and the common keys.
+
+A panel long enough to scroll puts its help off-screen, which is where
+it is least useful.  A header line stays pinned to the top of the window
+and costs no buffer lines, so `sql-datum--admin-header-line-count' and
+the cursor restore are unaffected."
+  (let ((parts nil))
     (dolist (action actions)
       (let ((key (alist-get 'key action))
             (label (alist-get 'label action)))
-        (insert (propertize key 'face 'bold)
-                "=" label "  "))))
-  (insert (propertize "g" 'face 'bold) "=refresh  "
-          (propertize "a" 'face 'bold) "=auto-refresh  "
-          (propertize "o" 'face 'bold) "=sort  "
-          (propertize "i" 'face 'bold) "=inspect  "
-          (propertize "q" 'face 'bold) "=quit\n")
+        (when (and key label)
+          (push (concat (propertize key 'face 'bold) " " label) parts))))
+    (dolist (pair (or extra '(("g" . "refresh") ("q" . "quit"))))
+      (push (concat (propertize (car pair) 'face 'bold) " " (cdr pair))
+            parts))
+    ;; Panel actions lead, so a narrow window truncates the generic keys
+    ;; rather than the ones specific to what is on screen.
+    (concat " " (mapconcat #'identity (nreverse parts) "   "))))
+
+(defun sql-datum--admin-insert-help-line (_actions)
+  "Insert the navigation help below the table.
+
+The actions and the keys reached for most often live in the header line,
+which stays visible however far the table scrolls.  What is left here is
+the navigation detail worth reading once."
   (insert (propertize "Nav: " 'face 'font-lock-comment-face)
           "arrows=cell  TAB/S-TAB=next/prev cell  n/p=row  "
-          "RET=sort(header)/detail(row)\n"))
+          "RET=sort(header)/detail(row)  "
+          (propertize "a" 'face 'bold) "=auto-refresh\n"))
 
 ;; --- Sorting ---
 
@@ -1397,18 +1419,22 @@ SQLI-BUF is the originating SQLi buffer."
                   (put-text-property table-start (point)
                                      'sql-datum-section sec-title)))
               (insert "\n")))
-          ;; Back navigation
-          (insert (propertize "Press " 'face 'font-lock-comment-face)
-                  (propertize "B" 'face 'bold)
-                  (propertize " to go back, " 'face 'font-lock-comment-face)
-                  (propertize "i" 'face 'bold)
-                  (propertize "=inspect, " 'face 'font-lock-comment-face)
-                  (propertize "q" 'face 'bold)
-                  (propertize " to quit\n" 'face 'font-lock-comment-face)))
+          ;; The keys live in the header line, which stays visible
+          ;; however far the sections scroll.
+          (insert (propertize "Nav: " 'face 'font-lock-comment-face)
+                  "n/p=row  arrows=cell\n"))
         (setq sql-datum--admin-panel-name panel
               sql-datum--admin-panel-data data
               sql-datum--admin-sqli-buf sqli-buf
               sql-datum--admin-context (alist-get 'context data))
+        ;; A detail view collects the actions of all its sections.
+        (setq-local header-line-format
+                    (sql-datum--admin-header-line
+                     (apply #'append
+                            (mapcar (lambda (s) (alist-get 'actions s))
+                                    sections))
+                     '(("g" . "refresh") ("i" . "inspect")
+                       ("B" . "back") ("q" . "quit"))))
         (if saved-line
             (progn
               (goto-char (point-min))
@@ -2792,14 +2818,8 @@ with `fields', `values', `submit_action', and optional `notes',
                          "Cancel")
           (widget-insert "\n\n")
           (widget-insert
-           (propertize
-            (concat "TAB or up/down move between fields   "
-                    (if (cl-find-if (lambda (f)
-                                      (equal (alist-get 'type f) "path"))
-                                    fields)
-                        "C-c C-f browse   " "")
-                    "C-c C-c submit   C-c C-k cancel\n")
-            'face 'font-lock-comment-face))
+           (propertize "up/down also move between fields\n"
+                       'face 'font-lock-comment-face))
           ;; Expose the closures so the keys can reach them.
           (setq-local sql-datum--form-submit-fn
                       (lambda ()
@@ -2813,7 +2833,19 @@ with `fields', `values', `submit_action', and optional `notes',
                          sqli-buf field-key))))
         (setq-local sql-datum--form-widgets widgets)
         (setq-local sql-datum--form-spec form)
-        (setq-local sql-datum--admin-sqli-buf sqli-buf))
+        (setq-local sql-datum--admin-sqli-buf sqli-buf)
+        ;; A form with many fields pushes its help below the fold too.
+        (setq-local header-line-format
+                    (sql-datum--admin-header-line
+                     nil
+                     (append '(("TAB" . "next field"))
+                             (when (cl-find-if
+                                    (lambda (f)
+                                      (equal (alist-get 'type f) "path"))
+                                    fields)
+                               '(("C-c C-f" . "browse")))
+                             '(("C-c C-c" . "submit")
+                               ("C-c C-k" . "cancel"))))))
       (use-local-map sql-datum--form-keymap)
       (widget-setup)
       (sql-datum--form-protect-static-text)
@@ -3029,11 +3061,15 @@ rebuilds the form.")
               (put-text-property start (point) 'sql-datum-is-parent t))
             (insert "\n")))
         (insert "\n"
-                (propertize
-                 "RET open   ^ up   s select this directory   q cancel\n"
-                 'face 'font-lock-comment-face)))
+                (propertize "n/p or arrows move between entries\n"
+                            'face 'font-lock-comment-face)))
       (setq sql-datum--browser-context context
             sql-datum--admin-sqli-buf sqli-buf)
+      (setq-local header-line-format
+                  (sql-datum--admin-header-line
+                   nil
+                   '(("RET" . "open") ("^" . "up")
+                     ("s" . "select this directory") ("q" . "cancel"))))
       (goto-char (point-min))
       (forward-line (if info 3 2)))
     (pop-to-buffer buf)))
