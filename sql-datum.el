@@ -238,7 +238,21 @@ Cleared on `sql-datum-refresh'.")
   "Non-nil while a silent command is in-flight (sent but not yet ready).
 Set by `sql-datum--queue-send-next' for silent transactions, cleared
 by `sql-datum--queue-advance' when `ready' arrives.  The preoutput
-filter uses this to strip the PTY echo and prompt of silent commands.")
+filter uses this to strip the PTY echo of silent commands.")
+
+(defvar-local sql-datum--silent-prompt-pending nil
+  "Non-nil when a silent command's prompt has not been stripped yet.
+
+The REPL prints a prompt after every command, silent ones included, but
+that prompt often lands in a later chunk than the `ready' envelope which
+clears `sql-datum--silent-in-flight'.  Keying the strip on that flag
+alone let the prompt through whenever nothing else was queued behind it
+— precisely the idle case of a panel auto-refreshing.
+
+Set when a silent command's `ready' arrives and cleared once its prompt
+is consumed.  Because the process handles one command at a time, the
+prompt owed is always the very next thing to arrive, so this stays
+narrow enough not to swallow a prompt belonging to the user.")
 
 (defvar-local sql-datum--refresh-in-progress nil
   "Non-nil while an async refresh chain is running.
@@ -328,6 +342,10 @@ ARGS are keyword args: :silent :done-fn :priority."
 
 (defun sql-datum--queue-advance ()
   "Called when a `ready' envelope arrives.  Advance the queue state."
+  ;; The prompt for a silent command follows its `ready', so remember
+  ;; that one is owed before clearing the in-flight flag.
+  (when sql-datum--silent-in-flight
+    (setq sql-datum--silent-prompt-pending t))
   (setq sql-datum--silent-in-flight nil)
   (cond
    ;; Current transaction has more commands — send next
@@ -493,14 +511,31 @@ Handles partial envelope lines split across multiple filter calls."
       ;; the flag) and the prompt (arrives after ready, but queue-send-next
       ;; may have already set the flag for the next command).
       (when (or sql-datum--silent-in-flight
+                sql-datum--silent-prompt-pending
                 (and sql-datum--queue-current
                      (plist-get sql-datum--queue-current :silent)))
-        ;; Strip echoed command text (lines starting with ":")
-        (when (string-match "\\`[\n\r]*:[^\n]*[\n\r]*" result)
-          (setq result (substring result (match-end 0))))
-        ;; Strip trailing prompt
-        (when (string-match "[\n\r ]*>\\'" result)
-          (setq result (substring result 0 (match-beginning 0)))))
+        ;; A chunk can hold the echoed command, the prompt owed by the
+        ;; previous silent command, or both in either order — the queue
+        ;; dispatches the next command as soon as `ready' arrives.  Peel
+        ;; whichever is in front until neither is.
+        (let ((peeled t))
+          (while peeled
+            (setq peeled nil)
+            (when (and sql-datum--silent-prompt-pending
+                       (string-match "\\`[\n\r ]*>[ ]*" result))
+              (setq result (substring result (match-end 0))
+                    sql-datum--silent-prompt-pending nil
+                    peeled t))
+            ;; Echoed command text (lines starting with ":").
+            (when (string-match "\\`[\n\r]*:[^\n]*[\n\r]*" result)
+              (setq result (substring result (match-end 0))
+                    peeled t))))
+        ;; Anything else arriving first means that prompt is not coming;
+        ;; drop the claim rather than hold it against a later prompt of
+        ;; the user's own.
+        (when (and sql-datum--silent-prompt-pending
+                   (not (string-blank-p result)))
+          (setq sql-datum--silent-prompt-pending nil)))
       ;; LEAK DETECTION: if result still contains envelope markers,
       ;; something went wrong — log it prominently.
       (when (string-match-p "##DATUM:" result)
