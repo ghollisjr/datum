@@ -716,7 +716,7 @@ Admin panels provide interactive views for server administration.  Press
 =C-c s a= and select a panel:
 
 - =activity=  — Active sessions and queries (MSSQL, PostgreSQL)
-- =databases= — Create, alter, drop databases; manage files (MSSQL, PostgreSQL)
+- =databases= — Create, alter, drop databases; manage files, backup/restore (MSSQL, PostgreSQL)
 - =jobs=      — SQL Agent jobs, steps, schedules, history (MSSQL)
 - =security=  — Logins, roles, database users (MSSQL, PostgreSQL)
 - =ssis=      — SSIS packages (MSSQL)
@@ -766,6 +766,7 @@ MSSQL and encoding and session count on PostgreSQL.
 | =N= | New database (wizard)                    |
 | =E= | Edit settings                            |
 | =F= | Manage files (MSSQL)                     |
+| =K= | Backup and restore (MSSQL)               |
 | =D= | Drop database (confirmation)             |
 
 The create wizard offers what the dialect actually supports, populated
@@ -797,6 +798,32 @@ Editing a file offers only its size limits: a file's name, path, type
 and filegroup are fixed once it exists.  Removing one runs =DBCC
 SHRINKFILE ... EMPTYFILE= first, since =REMOVE FILE= fails while the
 file still holds pages.
+
+**** Backup and restore (=K=, MSSQL)
+
+PostgreSQL cannot back itself up through SQL — =pg_dump= and
+=pg_basebackup= are external programs — so this is MSSQL only.
+
+=K= on a database lists its backup history from =msdb=.
+
+| Key | Action                     |
+|-----+----------------------------|
+| =N= | Back up now                |
+| =R= | Restore                    |
+
+Backups can be full, differential or log, optionally compressed,
+checksummed and copy-only, and either overwrite the file or append to
+it.  Paths are on the server, so the =Browse= button applies.
+
+Restoring reads the backup's own file list and generates a =MOVE= for
+every file.  Without that the restore would try to write over the paths
+recorded in the backup, which belong to whichever database was backed
+up.  Restoring over an existing database ends its sessions first and
+returns it to multi-user afterwards; restoring into a database that does
+not exist yet skips that step rather than failing on it.
+
+Turning off *Bring Online* leaves the database restoring, so further log
+backups can be applied.
 
 *** Jobs panel
 

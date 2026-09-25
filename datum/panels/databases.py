@@ -62,6 +62,17 @@ def run_action(cursor, driver, action_name, args):
             _new_database_form(cursor, driver, args)
         elif action_name == "browse-path":
             _browse_path(cursor, driver, args)
+        elif action_name == "backups":
+            _backups_panel(cursor, driver, args)
+        elif action_name == "new-backup":
+            _backup_form(cursor, driver, args)
+        elif action_name == "do-backup":
+            _do_backup(cursor, driver, args)
+        elif action_name == "restore":
+            _restore_form(cursor, driver, args)
+        elif action_name in ("do-restore", "preview-restore"):
+            _do_restore(cursor, driver, args,
+                        preview=action_name.startswith("preview"))
         elif action_name == "files":
             _files_panel(cursor, driver, args)
         elif action_name == "new-file":
@@ -176,6 +187,7 @@ def _database_list(cursor, driver):
             {"key": "N", "label": "New database", "command": "new-database"},
             {"key": "E", "label": "Edit settings", "command": "edit-database"},
             {"key": "F", "label": "Manage files", "command": "files"},
+            {"key": "K", "label": "Backups", "command": "backups"},
             {"key": "D", "label": "Drop database", "command": "drop-check"},
         ],
         "info": None,
@@ -248,6 +260,202 @@ def _new_database_form(cursor, driver, args=None):
         "info": None,
         "context": {},
     })
+
+
+# --- Backup and restore ---
+
+def _require_backup_support(driver):
+    from .. import envelope
+
+    if driver.supports_backup:
+        return True
+    envelope.error(
+        f"{driver.dialect_name} cannot back itself up through SQL: "
+        f"pg_dump and pg_basebackup are external programs, so there is "
+        f"nothing to drive over this connection")
+    return False
+
+
+def _drain(cursor):
+    """Consume the informational result sets BACKUP/RESTORE emit.
+
+    Left unread they surface as stray rows on the next query.
+    """
+    try:
+        while cursor.nextset():
+            pass
+    except Exception:
+        pass
+
+
+def _backups_panel(cursor, driver, args):
+    """List previous backups of a database."""
+    from .. import envelope
+
+    if not _require_backup_support(driver):
+        return
+    name, _ = _file_db_name(driver, args)
+    headers, rows = driver.backup_history(cursor, name)
+    envelope.admin_panel({
+        "panel": "databases",
+        "sub_panel": "backups",
+        "title": f"Backups: {name}",
+        "headers": headers,
+        "rows": rows,
+        "row_id": 4 if headers else None,  # device path
+        "actions": [
+            {"key": "N", "label": "Back up now", "command": "new-backup"},
+            {"key": "R", "label": "Restore", "command": "restore"},
+        ],
+        "info": (f"Backup history for {name}" if rows
+                 else f"No recorded backups of {name}"),
+        "parent_panel": "databases",
+        "context": {"database": name},
+    })
+
+
+def _refresh_backups(cursor, driver, database):
+    """Re-send the backup history for DATABASE."""
+    try:
+        _backups_panel(cursor, driver, [database])
+    except Exception:
+        pass
+
+
+def _backup_form(cursor, driver, args):
+    """Send the backup wizard."""
+    from .. import envelope
+
+    if not _require_backup_support(driver):
+        return
+    name, payload = _file_db_name(driver, args)
+    values = dict(payload.get("values") or {})
+    values["database"] = name
+    envelope.admin_panel({
+        "panel": "databases",
+        "sub_panel": "form",
+        "title": f"Back Up {name}",
+        "form": {
+            "fields": _clean_fields(driver.backup_options(cursor, name)),
+            "values": values,
+            "submit_action": "do-backup",
+            "submit_label": "Back Up",
+            "notes": [f"Writes to a path on the server, not this machine."],
+        },
+        "headers": [],
+        "rows": [],
+        "row_id": None,
+        "actions": [],
+        "info": None,
+        "context": {"database": name},
+    })
+
+
+def _do_backup(cursor, driver, args):
+    """Run the backup."""
+    from .. import envelope
+
+    if not _require_backup_support(driver):
+        return
+    opts = _decode_payload(args)
+    database = (opts.get("database") or "").strip()
+    if not database:
+        envelope.error("the form did not say which database to back up")
+        return
+    driver.validate_identifier(database)
+
+    specs = {f["key"]: f for f in driver.backup_options(cursor, database)}
+    for key, spec in specs.items():
+        if spec.get("required") and not str(opts.get(key) or "").strip():
+            raise ValueError(f"{spec['label']} is required")
+
+    for sql in driver.sql_backup(database, opts):
+        cursor.execute(sql)
+        _drain(cursor)
+        _commit(cursor)
+    envelope.info(f"Backed up {database}")
+    _refresh_backups(cursor, driver, database)
+
+
+def _restore_form(cursor, driver, args):
+    """Send the restore wizard."""
+    from .. import envelope
+
+    if not _require_backup_support(driver):
+        return
+    name, payload = _file_db_name(driver, args)
+    values = dict(payload.get("values") or {})
+    values["database"] = name
+    # Restoring from the row the user picked, when they picked one.
+    device = payload.get("device") or ""
+    if device and "source" not in values:
+        values["source"] = device
+    envelope.admin_panel({
+        "panel": "databases",
+        "sub_panel": "form",
+        "title": f"Restore over {name}",
+        "form": {
+            "fields": _clean_fields(driver.restore_options(cursor, name)),
+            "values": values,
+            "submit_action": "do-restore",
+            "submit_label": "Restore",
+            "preview_action": "preview-restore",
+            "notes": ["Restoring replaces the target database entirely.",
+                      "Sessions connected to it are ended first."],
+            "confirm_text": name,
+            "danger": True,
+        },
+        "headers": [],
+        "rows": [],
+        "row_id": None,
+        "actions": [],
+        "info": None,
+        "context": {"database": name},
+    })
+
+
+def _do_restore(cursor, driver, args, preview=False):
+    """Run, or show, the restore."""
+    from .. import envelope
+
+    if not _require_backup_support(driver):
+        return
+    opts = _decode_payload(args)
+    database = (opts.get("database") or "").strip()
+    target = (opts.get("target") or database).strip()
+    source = (opts.get("source") or "").strip()
+    if not (database and source):
+        envelope.error("restore requires a database and a backup file")
+        return
+    driver.validate_identifier(target)
+    try:
+        opts["position"] = int(opts.get("position") or 1)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"Backup Set must be a number (got {opts.get('position')!r})")
+
+    # The file list comes from the backup itself: every logical file has
+    # to be placed explicitly or the restore writes over the paths
+    # recorded in it, which belong to the database that was backed up.
+    file_list = driver.backup_file_list(cursor, source, opts["position"])
+    stmts = driver.sql_restore(database, opts, file_list)
+
+    if preview:
+        envelope.definition(f"RESTORE {target}", ";\n\n".join(stmts) + ";")
+        return
+
+    for index, sql in enumerate(stmts):
+        try:
+            cursor.execute(sql)
+            _drain(cursor)
+            _commit(cursor)
+        except Exception as err:
+            envelope.error(
+                f"Restore of '{target}' failed at statement {index + 1} "
+                f"of {len(stmts)} — {_db_error(err)}")
+            return
+    envelope.info(f"Restored {target} from {source}")
+    _refresh_list(cursor, driver)
 
 
 # --- File management ---

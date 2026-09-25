@@ -378,6 +378,46 @@ class BaseDriver(ABC):
         raise NotImplementedError(
             f"User mapping is not supported on {self.dialect_name}")
 
+    # --- Backup and restore ---
+    #
+    # Only meaningful where the server can back itself up through SQL.
+    # PostgreSQL's tooling (pg_dump, pg_basebackup) are external programs,
+    # so there is nothing to drive over a connection.
+
+    supports_backup = False
+
+    def backup_history(self, cursor, database):
+        """Return (headers, rows) of previous backups of DATABASE."""
+        return [], []
+
+    def backup_options(self, cursor, database):
+        """Field descriptors for backing up DATABASE."""
+        return []
+
+    def restore_options(self, cursor, database):
+        """Field descriptors for restoring over or beside DATABASE."""
+        return []
+
+    def sql_backup(self, database, opts):
+        """Return statements backing up DATABASE."""
+        raise NotImplementedError(
+            f"Backup is not supported on {self.dialect_name}")
+
+    def backup_contents(self, cursor, path):
+        """Return the backup sets held in the file at PATH."""
+        raise NotImplementedError(
+            f"Backup is not supported on {self.dialect_name}")
+
+    def backup_file_list(self, cursor, path, position=1):
+        """Return the data files recorded in a backup set."""
+        raise NotImplementedError(
+            f"Backup is not supported on {self.dialect_name}")
+
+    def sql_restore(self, database, opts, file_list):
+        """Return statements restoring DATABASE from a backup."""
+        raise NotImplementedError(
+            f"Restore is not supported on {self.dialect_name}")
+
     # --- Database file management ---
     #
     # Only meaningful where a database is made of files the administrator

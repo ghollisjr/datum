@@ -1485,8 +1485,10 @@ SQLI-BUF is the originating SQLi buffer."
     (define-key map "E" #'sql-datum-admin-edit-at-point)
     (define-key map "N" #'sql-datum-admin-new-at-point)
     (define-key map "D" #'sql-datum-admin-delete-at-point)
-    ;; Databases panel: file management
+    ;; Databases panel: file management and backups
     (define-key map "F" #'sql-datum-admin-database-files)
+    (define-key map "K" #'sql-datum-admin-database-backups)
+    (define-key map "R" #'sql-datum-admin-restore)
     ;; Security panel: database user mappings
     (define-key map "U" #'sql-datum-admin-user-mappings)
     ;; Query text (activity panel)
@@ -1816,6 +1818,7 @@ Returns a list of strings by parsing the current line against column widths."
     ("Schedules" (sql-datum-admin-new-schedule))
     (_ (pcase (cons sql-datum--admin-panel-name (sql-datum--admin-sub-panel))
          ('("databases" . "files")       (sql-datum-admin-new-file))
+         ('("databases" . "backups")     (sql-datum-admin-new-backup))
          (`("databases" . ,_)            (sql-datum-admin-new-database))
          ('("security" . "user-mappings") (sql-datum-admin-new-mapping))
          (`("security" . ,_)             (sql-datum-admin-new-principal))
@@ -1876,6 +1879,42 @@ Returns a list of strings by parsing the current line against column widths."
     (setq sql-datum--admin-display-request "databases")
     (sql-datum--admin-send-command
      (format ":admin-action databases files %s" name))))
+
+(defun sql-datum-admin-database-backups ()
+  "Show the backup history of the database at point."
+  (interactive)
+  (let ((name (sql-datum--admin-row-id-at-point)))
+    (unless name (user-error "No database at point"))
+    (setq sql-datum--admin-display-request "databases")
+    (sql-datum--admin-send-command
+     (format ":admin-action databases backups %s" name))))
+
+(defun sql-datum-admin-new-backup ()
+  "Back up the database whose backups are listed."
+  (interactive)
+  (sql-datum--admin-send-command
+   (format ":admin-action databases new-backup %s"
+           (sql-datum--admin-backup-payload))))
+
+(defun sql-datum-admin-restore ()
+  "Restore the database whose backups are listed.
+When point is on a recorded backup, its file is offered as the source."
+  (interactive)
+  (sql-datum--admin-send-command
+   (format ":admin-action databases restore %s"
+           (sql-datum--admin-backup-payload))))
+
+(defun sql-datum--admin-backup-payload ()
+  "Return a payload naming the database and the device at point."
+  (let ((database (alist-get 'database sql-datum--admin-context))
+        (device (sql-datum--admin-row-id-at-point)))
+    (unless database (user-error "No database context available"))
+    (base64-encode-string
+     (encode-coding-string
+      (json-serialize (append `((database . ,database))
+                              (when device `((device . ,device)))))
+      'utf-8)
+     t)))
 
 (defun sql-datum-admin-new-file ()
   "Add a file to the database whose files are listed."

@@ -1017,6 +1017,228 @@ class MSSQLDriver(BaseDriver):
         return [self._in_database(
             database, f"DROP USER {self.quote_ddl_identifier(login)}")]
 
+    # --- Backup and restore ---
+
+    supports_backup = True
+
+    _BACKUP_TYPES = {"D": "Full", "I": "Differential", "L": "Log",
+                     "F": "File", "G": "File Diff", "P": "Partial",
+                     "Q": "Partial Diff"}
+
+    def backup_history(self, cursor, database):
+        cursor.execute("""
+            SELECT TOP 50
+                   bs.type,
+                   CONVERT(VARCHAR(19), bs.backup_finish_date, 120),
+                   CAST(CAST(bs.backup_size / 1048576.0 AS DECIMAL(18,1))
+                        AS VARCHAR),
+                   bs.user_name,
+                   bmf.physical_device_name,
+                   CAST(bs.position AS VARCHAR)
+            FROM msdb.dbo.backupset bs
+            JOIN msdb.dbo.backupmediafamily bmf
+              ON bmf.media_set_id = bs.media_set_id
+            WHERE bs.database_name = ?
+            ORDER BY bs.backup_finish_date DESC
+        """, [database])
+        headers = ["Type", "Finished", "Size MB", "By", "Device", "Pos"]
+        rows = []
+        for row in cursor.fetchall():
+            rows.append([self._BACKUP_TYPES.get(row[0], row[0] or ""),
+                         row[1] or "", row[2] or "", row[3] or "",
+                         row[4] or "", row[5] or ""])
+        return headers, rows
+
+    def backup_options(self, cursor, database):
+        defaults = self.default_paths(cursor)
+        backup_dir = defaults.get("data", "")
+        try:
+            cursor.execute(
+                "SELECT CAST(SERVERPROPERTY('InstanceDefaultBackupPath') "
+                "AS NVARCHAR(4000))")
+            row = cursor.fetchone()
+            if row and row[0]:
+                backup_dir = row[0].rstrip("/\\")
+        except Exception:
+            pass
+        return [
+            {"key": "backup_type", "label": "Backup Type", "type": "choice",
+             "default": "FULL",
+             "choices": [["FULL", "Full"], ["DIFFERENTIAL", "Differential"],
+                         ["LOG", "Transaction log"]]},
+            {"key": "directory", "label": "Directory", "type": "path",
+             "default": backup_dir, "required": True},
+            {"key": "filename", "label": "File Name", "type": "string",
+             "default": f"{database}.bak", "required": True},
+            {"key": "overwrite", "label": "Overwrite the file", "type": "bool",
+             "default": False,
+             "help": "off appends this backup to the existing file"},
+            {"key": "compression", "label": "Compress", "type": "bool",
+             "default": True},
+            {"key": "checksum", "label": "Checksum", "type": "bool",
+             "default": True},
+            {"key": "copy_only", "label": "Copy Only", "type": "bool",
+             "default": False,
+             "help": "does not disturb the normal backup sequence"},
+            {"key": "verify", "label": "Verify Afterwards", "type": "bool",
+             "default": False},
+        ]
+
+    def sql_backup(self, database, opts):
+        db = self.quote_ddl_identifier(database)
+        directory = (opts.get("directory") or "").strip()
+        filename = (opts.get("filename") or "").strip()
+        if not (directory and filename):
+            raise ValueError("a directory and file name are required")
+        # The file name lands in a string literal, but a path separator
+        # in it would silently write somewhere else.
+        if "/" in filename or "\\" in filename:
+            raise ValueError(
+                f"the file name may not contain a path separator: {filename}")
+        target = self.join_path(directory, filename)
+        device = self.quote_ddl_literal(target)
+
+        backup_type = (opts.get("backup_type") or "FULL").upper()
+        if backup_type not in ("FULL", "DIFFERENTIAL", "LOG"):
+            raise ValueError(f"Unknown backup type: {backup_type}")
+
+        clauses = ["INIT" if opts.get("overwrite") else "NOINIT"]
+        if backup_type == "DIFFERENTIAL":
+            clauses.insert(0, "DIFFERENTIAL")
+        if opts.get("compression"):
+            clauses.append("COMPRESSION")
+        if opts.get("checksum"):
+            clauses.append("CHECKSUM")
+        if opts.get("copy_only"):
+            clauses.append("COPY_ONLY")
+
+        verb = "BACKUP LOG" if backup_type == "LOG" else "BACKUP DATABASE"
+        stmts = [f"{verb} {db} TO DISK = {device} WITH "
+                 + ", ".join(clauses)]
+        if opts.get("verify"):
+            stmts.append(f"RESTORE VERIFYONLY FROM DISK = {device}")
+        return stmts
+
+    def backup_contents(self, cursor, path):
+        """Return the backup sets in PATH, newest position last."""
+        cursor.execute(
+            f"RESTORE HEADERONLY FROM DISK = {self.quote_ddl_literal(path)}")
+        columns = {d[0]: i for i, d in enumerate(cursor.description)}
+        rows = cursor.fetchall()
+        self._drain(cursor)
+        sets = []
+        for row in rows:
+            def value(name):
+                index = columns.get(name)
+                return row[index] if index is not None else None
+            sets.append({
+                "position": int(value("Position") or 1),
+                "type": {1: "Full", 2: "Log", 5: "Differential",
+                         4: "File", 6: "File Diff",
+                         7: "Partial"}.get(value("BackupType"),
+                                           str(value("BackupType"))),
+                "database": value("DatabaseName") or "",
+                "finished": str(value("BackupFinishDate") or ""),
+            })
+        return sets
+
+    def backup_file_list(self, cursor, path, position=1):
+        cursor.execute(
+            f"RESTORE FILELISTONLY FROM DISK = "
+            f"{self.quote_ddl_literal(path)} WITH FILE = {int(position)}")
+        columns = {d[0]: i for i, d in enumerate(cursor.description)}
+        rows = cursor.fetchall()
+        self._drain(cursor)
+        files = []
+        for row in rows:
+            files.append({
+                "logical": row[columns["LogicalName"]],
+                "physical": row[columns["PhysicalName"]],
+                "type": row[columns["Type"]],
+            })
+        return files
+
+    @staticmethod
+    def _drain(cursor):
+        """Consume the informational result sets BACKUP/RESTORE emit."""
+        try:
+            while cursor.nextset():
+                pass
+        except Exception:
+            pass
+
+    def restore_options(self, cursor, database):
+        defaults = self.default_paths(cursor)
+        return [
+            {"key": "source", "label": "Backup File", "type": "path",
+             "default": "", "required": True,
+             "help": "the .bak file to restore from"},
+            {"key": "position", "label": "Backup Set", "type": "int",
+             "default": 1,
+             "help": "position within the file; 1 is the first"},
+            {"key": "target", "label": "Restore As", "type": "string",
+             "default": database, "required": True,
+             "help": "an existing database is overwritten"},
+            {"key": "data_dir", "label": "Data File Directory", "type": "path",
+             "default": defaults.get("data", ""),
+             "help": "where the restored data files are placed"},
+            {"key": "log_dir", "label": "Log File Directory", "type": "path",
+             "default": defaults.get("log", ""),
+             "help": "where the restored log files are placed"},
+            {"key": "replace", "label": "Replace Existing", "type": "bool",
+             "default": True},
+            {"key": "recovery", "label": "Bring Online", "type": "bool",
+             "default": True,
+             "help": "off leaves it restoring, for further log restores"},
+        ]
+
+    def sql_restore(self, database, opts, file_list):
+        target = self.quote_ddl_identifier(opts.get("target") or database)
+        source = (opts.get("source") or "").strip()
+        if not source:
+            raise ValueError("a backup file is required")
+        device = self.quote_ddl_literal(source)
+        name = (opts.get("target") or database).strip()
+
+        clauses = [f"FILE = {int(opts.get('position') or 1)}"]
+        # Every logical file has to be placed explicitly, or the restore
+        # tries to write over the paths recorded in the backup — which
+        # belong to whichever database was backed up.
+        data_dir = (opts.get("data_dir") or "").strip()
+        log_dir = (opts.get("log_dir") or "").strip()
+        for index, entry in enumerate(file_list or []):
+            is_log = entry.get("type") == "L"
+            directory = log_dir if is_log else data_dir
+            if not directory:
+                continue
+            suffix = "_log.ldf" if is_log else (
+                ".mdf" if index == 0 else f"_{index}.ndf")
+            moved = self.join_path(directory, f"{name}{suffix}")
+            clauses.append(
+                f"MOVE {self.quote_ddl_literal(entry['logical'])} "
+                f"TO {self.quote_ddl_literal(moved)}")
+        if opts.get("replace"):
+            clauses.append("REPLACE")
+        clauses.append("RECOVERY" if opts.get("recovery", True)
+                       else "NORECOVERY")
+
+        stmts = []
+        # A restore needs exclusive access, which an idle connection in
+        # the target is enough to deny.  Guarded on existence because the
+        # target is commonly a database being created by this restore,
+        # and ALTER DATABASE on a missing one is an error.
+        existing = self.quote_ddl_literal(name)
+        if opts.get("replace"):
+            stmts.append(f"IF DB_ID({existing}) IS NOT NULL "
+                         f"ALTER DATABASE {target} SET SINGLE_USER "
+                         f"WITH ROLLBACK IMMEDIATE")
+        stmts.append(f"RESTORE DATABASE {target} FROM DISK = {device} WITH "
+                     + ", ".join(clauses))
+        if opts.get("replace") and opts.get("recovery", True):
+            stmts.append(f"IF DB_ID({existing}) IS NOT NULL "
+                         f"ALTER DATABASE {target} SET MULTI_USER")
+        return stmts
+
     # --- Database file management ---
 
     supports_file_management = True

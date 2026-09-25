@@ -164,6 +164,7 @@ Panels: =activity=, =databases=, =jobs=, =security=, =ssis=
 | =N= | New database (wizard)        |
 | =E= | Edit settings                |
 | =F= | Manage files (MSSQL)         |
+| =K= | Backup and restore (MSSQL)   |
 | =D= | Drop database                |
 
 Files view (=F=):
@@ -174,6 +175,13 @@ Files view (=F=):
 | =E= | Change size / growth / max size   |
 | =D= | Remove file (emptied first)       |
 | =S= | Shrink file                       |
+
+Backups view (=K=, MSSQL):
+
+| Key | Action      |
+|-----+-------------|
+| =N= | Back up now |
+| =R= | Restore     |
 
 ** Jobs panel (MSSQL)
 
