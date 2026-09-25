@@ -29,6 +29,9 @@ standalone from any terminal.
   - Schemas and tables: a column builder, and altering columns of a table that exists
   - Logins, roles and database users, with passwords treated as secrets
   - SQL Agent jobs, steps, schedules and history (MSSQL)
+  - Reachable from the query buffer by key as well as from the panels:
+    =C-c t= for tables and schemas, =C-c d= for databases, =C-c g= for
+    logins and roles
 - Optional Polars backend for faster import/export (falls back to pyarrow or stdlib)
 
 * Installation
@@ -993,11 +996,11 @@ library =M-x customize= uses.
 
 | Key             | Action                              |
 |-----------------+-------------------------------------|
-| =TAB= / =S-TAB= | Next / previous field               |
+| =TAB=           | Complete the field, else next one   |
+| =S-TAB=         | Previous field                      |
 | up / down       | Next / previous field               |
 | =RET=           | Open a menu or press a button       |
 | =SPC=           | Toggle the checkbox at point        |
-| =TAB=           | Complete the field, else next one   |
 | =M-TAB=         | Complete the field (where offered)  |
 | =C-c C-f=       | Browse the server for a path        |
 | =C-c C-c=       | Submit                              |

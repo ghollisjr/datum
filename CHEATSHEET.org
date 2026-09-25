@@ -168,6 +168,9 @@ panel's header line, which stays visible as the contents scroll.
 
 Panels: =activity=, =databases=, =jobs=, =schema=, =security=, =ssis=
 
+Most wizards are also one key away from the query buffer — see =C-c t=,
+=C-c d= and =C-c g= above.
+
 ** Common to every panel
 
 | Key         | Action                     |
@@ -281,11 +284,11 @@ Database users view (=U=):
 
 | Key             | Action                             |
 |-----------------+------------------------------------|
-| =TAB= / =S-TAB= | Next / previous field              |
+| =TAB=           | Complete the field, else next one  |
+| =S-TAB=         | Previous field                     |
 | up / down       | Next / previous field              |
 | =RET=           | Open a menu, press a button        |
 | =SPC=           | Toggle the checkbox at point       |
-| =TAB=           | Complete the field, else next one  |
 | =M-TAB=         | Complete the field (where offered) |
 | =C-c C-f=       | Browse the server for a path       |
 | =C-c C-c=       | Submit                             |

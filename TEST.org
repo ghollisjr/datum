@@ -90,6 +90,21 @@ datum --sql-type oracle \
   "Driver={Oracle 23 ODBC driver};DBQ=localhost:1522/FREEPDB1;Uid=datum_test;Pwd=datum_test"
 #+END_SRC
 
+** Connecting to the Docker databases from Emacs
+
+=tests/emacs/docker-connections.el= defines =sql-connection-alist=
+entries for the containers, so the test servers can be driven by hand
+with the same keys as any other connection.  Load it after sql-datum:
+
+#+BEGIN_SRC elisp
+(load "/path/to/datum/tests/emacs/docker-connections.el")
+#+END_SRC
+
+Then =C-c C-x c= and pick a connection — =C-u C-c C-x c= opens a
+second, concurrent one to the same server.  The credentials in that
+file are the ones in =docker-compose.yml=: local fixtures, not
+secrets, which is why they are inline rather than in auth-source.
+
 * Manual database setup (without Docker)
 
 If you prefer to run databases natively, load the test SQL files manually.
@@ -172,13 +187,18 @@ datum --sql-type sqlite "Driver={SQLite3};Database=/tmp/datum_test.db"
 
 * Test suite structure
 
-The test suite has three layers, run by =tests/run-all.sh=:
+The test suite has four layers, run by =tests/run-all.sh=:
 
 | Layer             | Runner                           | What it tests                           |
 |-------------------+----------------------------------+-----------------------------------------|
-| Python unit tests | =python -m pytest tests/python/= | Driver registry, SQL type detection     |
+| Python unit tests | =python -m pytest tests/python/= | Driver registry, SQL type detection, DDL generation |
 | Integration tests | =tests/python/test_integration.sh= | Live database introspection & queries |
-| Emacs tests       | =tests/emacs/run-tests.sh=       | Envelope protocol, Emacs-side parsing   |
+| Live admin tests  | =python -m pytest tests/python/test_*_live.py= | Database, schema and security wizards against the docker servers |
+| Emacs tests       | =tests/emacs/run-tests.sh=       | Envelope protocol, panel display and refresh, wizard form keys, path browser |
+
+=tests/emacs/run-tests.sh= runs every =test-*.el= file in that
+directory and fails the run if any suite reports a failure, so a new
+suite needs no registration — dropping the file in is enough.
 
 ** Integration test backends
 

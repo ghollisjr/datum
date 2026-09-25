@@ -1,0 +1,93 @@
+#+TITLE: PostgreSQL ODBC Connection Setup for Datum
+#+DATE: 2026-09-10
+
+* ODBC Driver Installation
+
+** Arch Linux
+#+begin_src bash
+pacman -S psqlodbc
+#+end_src
+
+** Ubuntu / Debian
+#+begin_src bash
+sudo apt install odbc-postgresql
+#+end_src
+
+Verify the driver is registered:
+#+begin_src bash
+odbcinst -q -d
+#+end_src
+
+You should see =[PostgreSQL Unicode]= in the output.
+
+* Emacs Connection Setup
+
+Example =sql-connection-alist= entry with =application_name= set via =pqopt=:
+
+#+begin_src emacs-lisp
+(add-to-list 'sql-connection-alist
+             '("my-pg-connection"
+               (sql-product 'datum)
+               (sql-send-terminator ";;")
+               (sqli-options '("--param" "pqopt={application_name=my-hostname}"))
+               (sql-datum-options
+                (list (format "--conn-string=Driver={PostgreSQL Unicode};Server=10.67.6.52;Port=5432;Database=mydb;Uid=myuser;Pwd=%s"
+                              (let ((result (auth-source-search
+                                            :host "10.67.6.52"
+                                            :user "myuser"
+                                            :port "5432"
+                                            :require '(:secret))))
+                                (when result
+                                  (let ((secret (plist-get (car result) :secret)))
+                                    (if (functionp secret)
+                                        (funcall secret)
+                                      secret)))))))))
+#+end_src
+
+** Key Details
+
+- =sqli-options= must be quoted: ='("--param" ...)= or =(list "--param" ...)=.
+  An unquoted list like =("--param" ...)= is evaluated as a function call.
+- The =--conn-string= must include =Server=<host>= explicitly.
+  Omitting the =Server== keyword causes the driver to fall back to a local Unix socket.
+- =application_name= is not a native psqlODBC keyword.
+  It must be passed through =pqopt=: =pqopt={application_name=value}=.
+- Multiple libpq parameters are space-separated inside the braces:
+  =pqopt={application_name=myhost sslmode=require}=
+
+* Setting Application Name (Comparison)
+
+| Database   | Mechanism                               | Shows up in                          |
+|------------+-----------------------------------------+--------------------------------------|
+| MSSQL      | =--param WSID=MyHostname=               | =sys.dm_exec_sessions.host_name=     |
+| PostgreSQL | =--param "pqopt={application_name=X}"=  | =pg_stat_activity.application_name=  |
+
+PostgreSQL does not have a client-settable hostname field like MSSQL's =WSID=.
+=client_hostname= in =pg_stat_activity= is resolved server-side via reverse DNS
+(requires =log_hostname = on= in =postgresql.conf=).
+
+* Testing the ODBC Connection
+
+#+begin_src bash
+python -c "
+import pyodbc
+conn = pyodbc.connect('Driver={PostgreSQL Unicode};Server=10.67.6.52;Port=5432;Database=mydb;Uid=myuser;Pwd=mypassword')
+print(conn.execute('SELECT 1').fetchone())
+conn.close()
+"
+#+end_src
+
+* Troubleshooting
+
+** LDAP Authentication Failures from Linux Clients
+
+If LDAP auth works from Windows but not Linux, check =pg_hba.conf= on the
+PostgreSQL server. LDAP rules are typically scoped to specific client IP ranges:
+
+#+begin_example
+host  all  all  10.x.x.0/24  ldap  ldapserver=...
+#+end_example
+
+Verify which source IP the server sees from each client. Tunneled connections
+will show the tunnel exit point's IP, which may fall outside the LDAP rule's
+allowed range.
