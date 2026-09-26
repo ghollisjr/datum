@@ -497,11 +497,42 @@ def _job_detail(cursor, job_name):
     sched_rows = [[str(v) if v is not None else "" for v in row]
                   for row in cursor.fetchall()]
 
+    # The job's own properties, at the top of its own tree: editing a
+    # job is where its steps are, so the two should not be down
+    # different paths.
+    from . import jobdefs
+    properties = jobdefs.get_job(cursor, job_name) or {}
+    when = dict(jobdefs.WHEN)
+    job_rows = [
+        ["Name", properties.get("name", job_name)],
+        ["Enabled", "Yes" if properties.get("enabled") else "No"],
+        ["Owner", properties.get("owner", "")],
+        ["Category", properties.get("category", "")],
+        ["Description", properties.get("description", "")],
+        ["Write to the event log",
+         when.get(properties.get("notify_eventlog", "0"), "")],
+        ["Email an operator",
+         when.get(properties.get("notify_email", "0"), "")],
+        ["Operator", properties.get("operator", "")],
+        ["Delete the job", when.get(properties.get("delete_level", "0"), "")],
+    ]
+
     return {
         "panel": "jobs",
         "sub_panel": "detail",
-        "title": f"Job Detail: {job_name}",
+        "title": f"Job: {job_name}",
         "sections": [
+            {
+                "title": "Job",
+                "headers": ["Property", "Value"],
+                "rows": job_rows,
+                "row_id": None,
+                "actions": [
+                    {"key": "E", "label": "Edit these", "command": "edit-job"},
+                    {"key": "D", "label": "Delete job",
+                     "command": "drop-job-check"},
+                ],
+            },
             {
                 "title": "Steps",
                 "headers": step_headers,

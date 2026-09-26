@@ -411,17 +411,44 @@
 
 ;; The dispatchers reach them, and the section keys still win inside the
 ;; detail view where steps and schedules live.
+;; Editing a job means opening it: its properties, steps and schedules
+;; are all in the one tree, rather than down separate paths.
 (with-temp-buffer
   (setq-local sql-datum--admin-panel-name "jobs")
   (setq-local sql-datum--admin-panel-data '((sub_panel . nil)))
   (let (called)
+    (cl-letf (((symbol-function 'sql-datum-admin-detail)
+               (lambda () (setq called 'opened)))
+              ((symbol-function 'sql-datum-admin-edit-job)
+               (lambda () (setq called 'properties))))
+      (sql-datum-admin-edit-at-point)
+      (test-table-keys-assert "E in the jobs list opens the job"
+                              (eq called 'opened)))))
+
+;; And inside it, the Job section is where the properties are edited.
+(with-temp-buffer
+  (setq-local sql-datum--admin-panel-name "jobs")
+  (setq-local sql-datum--admin-panel-data '((sub_panel . "detail")))
+  (insert "Name  datum_tree\n")
+  (put-text-property (point-min) (point-max) 'sql-datum-section "Job")
+  (goto-char (point-min))
+  (let (called)
     (cl-letf (((symbol-function 'sql-datum-admin-edit-job)
-               (lambda () (setq called 'job)))
+               (lambda () (setq called 'properties)))
               ((symbol-function 'sql-datum-admin-edit-step)
                (lambda () (setq called 'step))))
       (sql-datum-admin-edit-at-point)
-      (test-table-keys-assert "E in the jobs list edits the job"
-                              (eq called 'job)))))
+      (test-table-keys-assert "E on the Job section edits its properties"
+                              (eq called 'properties))))
+  ;; D there deletes the job; N has nothing to make.
+  (let (called)
+    (cl-letf (((symbol-function 'sql-datum-admin-delete-job)
+               (lambda () (setq called 'job))))
+      (sql-datum-admin-delete-at-point)
+      (test-table-keys-assert "D on the Job section deletes the job"
+                              (eq called 'job))))
+  (test-table-keys-error "N on the Job section says where steps are added"
+                         (sql-datum-admin-new-at-point)))
 
 (with-temp-buffer
   (setq-local sql-datum--admin-panel-name "jobs")

@@ -1282,7 +1282,11 @@ without showing it against every line, the way dired shows the
 directory once at the top and bare names below.  Sorting stays
 correct because each drawn column remembers which column it really
 is."
-  (let* ((columns (cond
+  ;; A section's row_id arrives as :null when it has none, and nested
+  ;; section values are not denulled on the way in — :null is truthy in
+  ;; Lisp, so it has to be turned back into nil before it is counted.
+  (let* ((row-id (and (numberp row-id) row-id))
+         (columns (cond
                    ((null shown) (number-sequence 0 (1- (length headers))))
                    ((listp shown) (seq-filter (lambda (i)
                                                 (< i (length headers)))
@@ -1976,10 +1980,10 @@ Returns a list of strings by parsing the current line against column widths."
   (sql-datum--admin-send-command ":admin-action jobs new-job"))
 
 (defun sql-datum-admin-edit-job ()
-  "Edit the properties of the job at point.
+  "Edit the job's own properties — name, owner, category, notifications.
 
-Its steps and schedules are edited from the detail view (`d\='); these
-are the job's own properties — name, owner, category, notifications."
+Reached with `E\=' on the Job section at the top of a job's tree, where
+its steps and schedules sit below and are edited the same way."
   (interactive)
   (unless (equal sql-datum--admin-panel-name "jobs")
     (user-error "Not in the jobs panel"))
@@ -2035,15 +2039,20 @@ are the job's own properties — name, owner, category, notifications."
   (pcase (get-text-property (line-beginning-position) 'sql-datum-section)
     ("Steps"     (sql-datum-admin-edit-step))
     ("Schedules" (sql-datum-admin-edit-schedule))
+    ;; Inside a job's tree, this section is its own properties.
+    ("Job"       (sql-datum-admin-edit-job))
     (_ (pcase (cons sql-datum--admin-panel-name (sql-datum--admin-sub-panel))
          ('("databases" . "files") (sql-datum-admin-edit-file))
          (`("databases" . ,_)      (sql-datum-admin-edit-database))
          ('("security" . "user-mappings") (sql-datum-admin-edit-mapping))
          ('("schema" . "tables")   (sql-datum-admin-edit-table))
          (`("security" . ,_)       (sql-datum-admin-edit-principal))
-         ;; The job's own properties.  Its steps and schedules are
-         ;; edited from the detail view, which the sections above catch.
-         (`("jobs" . ,_)           (sql-datum-admin-edit-job))
+         ;; Editing a job means opening it: its properties, its steps
+         ;; and its schedules are all in there, the way SSMS puts them
+         ;; on pages of one dialog.  Editing just the properties is E
+         ;; again, on the Job section at the top.
+         ('("jobs" . "detail")     (sql-datum-admin-edit-job))
+         (`("jobs" . ,_)           (sql-datum-admin-detail))
          (_ (user-error "No editable item at point"))))))
 
 (defun sql-datum-admin-new-at-point ()
@@ -2052,6 +2061,9 @@ are the job's own properties — name, owner, category, notifications."
   (pcase (get-text-property (line-beginning-position) 'sql-datum-section)
     ("Steps"     (sql-datum-admin-new-step))
     ("Schedules" (sql-datum-admin-new-schedule))
+    ("Job"       (user-error
+                  "Point is on the job itself — N adds a step or a schedule, \
+from those sections"))
     (_ (pcase (cons sql-datum--admin-panel-name (sql-datum--admin-sub-panel))
          ('("databases" . "files")       (sql-datum-admin-new-file))
          ('("databases" . "backups")     (sql-datum-admin-new-backup))
@@ -2069,6 +2081,7 @@ are the job's own properties — name, owner, category, notifications."
   (pcase (get-text-property (line-beginning-position) 'sql-datum-section)
     ("Steps"     (sql-datum-admin-delete-step))
     ("Schedules" (sql-datum-admin-delete-schedule))
+    ("Job"       (sql-datum-admin-delete-job))
     (_ (pcase (cons sql-datum--admin-panel-name (sql-datum--admin-sub-panel))
          ('("databases" . "files")        (sql-datum-admin-remove-file))
          (`("databases" . ,_)             (sql-datum-admin-drop-database))

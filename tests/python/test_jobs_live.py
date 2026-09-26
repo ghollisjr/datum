@@ -56,13 +56,32 @@ def agent():
         pytest.skip(_UNREACHABLE["mssql"])
     cursor, driver = conn.cursor(), MSSQLDriver()
 
+    # Schedules live in msdb, not in the job, so deleting the job does
+    # not always take them with it -- and two schedules of one name make
+    # sp_add_schedule refuse to work by name at all.  So they go too.
+    SCHEDULES = ("nightly", "renamed", "x")
+
     def cleanup():
-        for name in (JOB, RENAMED):
+        for name in (JOB, RENAMED, "datum job pytest spaced"):
             try:
                 cursor.execute("EXEC msdb.dbo.sp_delete_job @job_name = ?",
                                [name])
             except Exception:
                 pass
+        try:
+            cursor.execute(
+                "SELECT schedule_id FROM msdb.dbo.sysschedules "
+                "WHERE name IN (?, ?, ?)", list(SCHEDULES))
+            for (schedule_id,) in cursor.fetchall():
+                try:
+                    cursor.execute(
+                        "EXEC msdb.dbo.sp_delete_schedule "
+                        "@schedule_id = ?, @force_delete = 1",
+                        [schedule_id])
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     cleanup()
     yield cursor, driver
@@ -603,3 +622,122 @@ class TestSchedulesUseTheGenericForm:
                         [_payload({"job_name": JOB, "name": "x"})])
         assert [k for k, _ in captured] == ["error"], captured
         assert "which schedule" in captured[0][1][0]
+
+
+class TestAJobIsOneTree:
+    """Editing a job is where its steps are.
+
+    The job's own properties, its steps and its schedules were down
+    separate paths -- E gave a properties form with no sign of the
+    steps, which were only reachable through d.
+    """
+
+    def _job_with_parts(self, cursor, driver):
+        from datum.panels import jobs
+        jobs.run_action(cursor, driver, "create-job", [_payload(
+            {"name": JOB, "enabled": True, "description": "nightly extract",
+             "owner": "sa", "category": "[Uncategorized (Local)]",
+             "notify_eventlog": "2", "notify_email": "0",
+             "delete_level": "0"})])
+        jobs.run_action(cursor, driver, "create-step", [_payload(
+            {"job_name": JOB, "step_name": "extract", "subsystem": "TSQL",
+             "database_name": "master", "command": "SELECT 1",
+             "retry_attempts": "0", "retry_interval": "0",
+             "on_success_action": "3", "on_success_step_id": "0",
+             "on_fail_action": "2", "on_fail_step_id": "0"})])
+        jobs.run_action(cursor, driver, "create-schedule", [_payload(
+            {"job_name": JOB, "name": "nightly", "enabled": True,
+             "freq_type": "4", "freq_interval": "1",
+             "freq_subday_type": "1", "freq_subday_interval": "0",
+             "freq_relative_interval": "0", "freq_recurrence_factor": "0",
+             "active_start_time": "23000", "active_end_time": "235959",
+             "active_start_date": "20260101",
+             "active_end_date": "99991231"})])
+
+    def test_the_job_is_the_first_section_of_its_own_tree(self, agent,
+                                                          captured):
+        from datum.panels import jobs
+
+        cursor, driver = agent
+        self._job_with_parts(cursor, driver)
+        captured.clear()
+        jobs.run_action(cursor, driver, "detail", [JOB])
+        panel = [a[0] for k, a in captured if k == "admin_panel"][0]
+        titles = [s["title"] for s in panel["sections"]]
+        # The job first, then what belongs to it.
+        assert titles == ["Job", "Steps", "Schedules"], titles
+
+    def test_the_job_section_shows_its_properties(self, agent, captured):
+        from datum.panels import jobs
+
+        cursor, driver = agent
+        self._job_with_parts(cursor, driver)
+        captured.clear()
+        jobs.run_action(cursor, driver, "detail", [JOB])
+        panel = [a[0] for k, a in captured if k == "admin_panel"][0]
+        job = next(s for s in panel["sections"] if s["title"] == "Job")
+        shown = dict(job["rows"])
+        assert shown["Name"] == JOB
+        assert shown["Enabled"] == "Yes"
+        assert shown["Owner"] == "sa"
+        assert shown["Description"] == "nightly extract"
+        # The notify levels read as words rather than as numbers.
+        assert shown["Write to the event log"] == "When it fails"
+
+    def test_the_job_section_offers_editing_and_deleting(self, agent,
+                                                         captured):
+        from datum.panels import jobs
+
+        cursor, driver = agent
+        self._job_with_parts(cursor, driver)
+        captured.clear()
+        jobs.run_action(cursor, driver, "detail", [JOB])
+        panel = [a[0] for k, a in captured if k == "admin_panel"][0]
+        job = next(s for s in panel["sections"] if s["title"] == "Job")
+        keys = {a["key"]: a["command"] for a in job["actions"]}
+        assert keys["E"] == "edit-job"
+        assert keys["D"] == "drop-job-check"
+        # Not N: a job's section has nothing to add, and its steps and
+        # schedules have their own.
+        assert "N" not in keys
+
+    def test_the_steps_are_there_in_the_same_view(self, agent, captured):
+        from datum.panels import jobs
+
+        cursor, driver = agent
+        self._job_with_parts(cursor, driver)
+        captured.clear()
+        jobs.run_action(cursor, driver, "detail", [JOB])
+        panel = [a[0] for k, a in captured if k == "admin_panel"][0]
+        steps = next(s for s in panel["sections"] if s["title"] == "Steps")
+        assert any("extract" in row for row in steps["rows"])
+        schedules = next(s for s in panel["sections"]
+                         if s["title"] == "Schedules")
+        assert any("nightly" in row for row in schedules["rows"])
+
+    def test_the_title_reads_as_the_job_rather_than_a_report(self, agent,
+                                                             captured):
+        from datum.panels import jobs
+
+        cursor, driver = agent
+        self._job_with_parts(cursor, driver)
+        captured.clear()
+        jobs.run_action(cursor, driver, "detail", [JOB])
+        panel = [a[0] for k, a in captured if k == "admin_panel"][0]
+        assert panel["title"] == f"Job: {JOB}"
+
+    def test_a_job_with_nothing_in_it_still_opens(self, agent, captured):
+        from datum.panels import jobs
+
+        cursor, driver = agent
+        jobs.run_action(cursor, driver, "create-job", [_payload(
+            {"name": JOB, "enabled": True, "description": "",
+             "owner": "sa", "category": "[Uncategorized (Local)]",
+             "notify_eventlog": "0", "notify_email": "0",
+             "delete_level": "0"})])
+        captured.clear()
+        jobs.run_action(cursor, driver, "detail", [JOB])
+        assert "error" not in [k for k, _ in captured], captured
+        panel = [a[0] for k, a in captured if k == "admin_panel"][0]
+        job = next(s for s in panel["sections"] if s["title"] == "Job")
+        assert dict(job["rows"])["Name"] == JOB

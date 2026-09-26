@@ -918,15 +918,20 @@ executing, last run result and next run time.  Executing jobs sort first.
 | =s= | Start job                             |
 | =S= | Stop job                              |
 | =N= | New job                               |
-| =E= | Edit the job's properties             |
+| =E= | Open the job: properties, steps, schedules |
 | =D= | Delete the job (confirmation)         |
 | =e= | Enable/disable toggle                 |
 
-In the detail view, =E=, =N= and =D= act on whichever section point is
-in — editing a step opens the step form, editing a schedule opens the
-schedule form.  Both are the same wizard form the other panels use, so
-they navigate the same way: arrow keys between fields, =TAB= to
-complete or move on, =C-c C-c= to submit.  In the list they act on the job itself: its name,
+=E= on a job *opens* it, which is where everything about it is: the
+job's own properties as the first section, then its steps, then its
+schedules — the way SSMS puts them on pages of one dialog rather than
+down separate paths.  =d= does the same thing.
+
+Inside, =E=, =N= and =D= act on whichever section point is in: on the
+*Job* section they edit or delete the job itself, on *Steps* and
+*Schedules* they edit, add and remove those.  Each opens the same
+wizard form the other panels use, so they navigate the same way: arrow
+keys between fields, =TAB= to complete or move on, =C-c C-c= to submit.  In the list they act on the job itself: its name,
 whether it is enabled, its description, owner and category, and what it
 writes to the event log, who it emails, and whether it deletes itself
 once it has run — the General and Notifications pages of SSMS's job
