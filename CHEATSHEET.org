@@ -233,9 +233,19 @@ leaving it shut because the restore failed would lock everybody out.
 | =H=       | Job history                    |
 | =s= / =S= | Start / stop job               |
 | =e=       | Enable/disable toggle          |
+| =N=       | New job                        |
+| =E=       | Edit the job's properties      |
+| =D=       | Delete the job (confirmation)  |
 
 In the detail view =E= / =N= / =D= act on the section point is in —
-steps or schedules.
+steps or schedules.  In the list they act on the job itself: name,
+enabled, description, owner, category, event-log and email
+notifications, and whether it deletes itself once it has run.
+
+Steps and schedules are not on that form, so a new job is made first
+and filled in after, with =d= then =N=.  A new job is given the local
+server to run on, which =sp_add_job= alone does not do.  Editing the
+name renames the job, keeping its steps and history.
 
 ** Schema panel
 

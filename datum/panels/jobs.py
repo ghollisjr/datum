@@ -63,6 +63,11 @@ def run_action(cursor, driver, action_name, args):
         _handle_step_action(cursor, action_name, args)
         return
 
+    if action_name in ("new-job", "edit-job", "create-job", "update-job",
+                       "drop-job-check", "delete-job"):
+        _handle_job_action(cursor, action_name, args)
+        return
+
     if not args:
         envelope.error(f"Job action '{action_name}' requires a job name")
         return
@@ -352,6 +357,9 @@ def _job_list(cursor):
             {"key": "e", "label": "Enable/Disable toggle", "command": "toggle-enable"},
             {"key": "d", "label": "View detail", "command": "detail"},
             {"key": "H", "label": "View history", "command": "history"},
+            {"key": "N", "label": "New job", "command": "new-job"},
+            {"key": "E", "label": "Edit job", "command": "edit-job"},
+            {"key": "D", "label": "Delete job", "command": "drop-job-check"},
         ],
         "info": None,
     }
@@ -516,3 +524,156 @@ def _job_history(cursor, job_name):
         "parent_panel": "jobs",
         "context": {"job_name": job_name},
     }
+
+
+def _decode_job_payload(args):
+    """Return the base64 JSON payload a job form submits."""
+    import base64
+
+    if not args:
+        return {}
+    return json.loads(base64.b64decode(args[0]).decode("utf-8"))
+
+
+def _job_form(cursor, current, submit, title, notes):
+    """Send the form for a job's own properties."""
+    from .. import envelope
+    from . import jobdefs
+
+    fields = [{k: v for k, v in field.items() if v is not None}
+              for field in jobdefs.job_options(cursor, current)]
+    values = dict(current or {})
+    if current:
+        # What it was called when the form opened, so an edited name
+        # reads as a rename rather than as a different job.
+        values["name_original"] = current.get("name", "")
+    envelope.admin_panel({
+        "panel": "jobs",
+        "sub_panel": "form",
+        "title": title,
+        "form": {"fields": fields,
+                 "values": values,
+                 "submit_action": submit,
+                 "submit_label": "Save Job" if current else "Create Job",
+                 "notes": notes},
+        "headers": [],
+        "rows": [],
+        "row_id": None,
+        "actions": [],
+        "info": None,
+    })
+
+
+def _handle_job_action(cursor, action_name, args):
+    """Create, edit or delete the job itself.
+
+    Its steps and schedules are edited from the detail view; these are
+    the job's own properties, which had no way to be set at all.
+    """
+    from .. import envelope
+    from . import jobdefs
+
+    try:
+        if action_name == "new-job":
+            _job_form(cursor, None, "create-job", "New Job",
+                      ["Steps and schedules are added from the job's "
+                       "detail view, with d and then N.",
+                       "The job is given the local server to run on, "
+                       "which it needs to run at all."])
+
+        elif action_name == "edit-job":
+            name = " ".join(args).strip()
+            current = jobdefs.get_job(cursor, name)
+            if not current:
+                envelope.error(f"Job not found: {name}")
+                return
+            _job_form(cursor, current, "update-job", f"Job: {name}",
+                      ["Changing the name renames the job rather than "
+                       "making another."])
+
+        elif action_name == "create-job":
+            opts = _decode_job_payload(args)
+            name = jobdefs.create_job(cursor, opts)
+            cursor.connection.commit()
+            envelope.info(f"Created job: {name}")
+            _refresh_jobs(cursor)
+
+        elif action_name == "update-job":
+            opts = _decode_job_payload(args)
+            name = jobdefs.update_job(cursor, opts)
+            cursor.connection.commit()
+            envelope.info(f"Updated job: {name}")
+            _refresh_jobs(cursor)
+
+        elif action_name == "drop-job-check":
+            name = " ".join(args).strip()
+            summary = jobdefs.job_summary(cursor, name)
+            if summary is None:
+                envelope.error(f"Job not found: {name}")
+                return
+            # The same shape the other dangerous actions use: a form
+            # that says what goes, and wants the name typed back.
+            envelope.admin_panel({
+                "panel": "jobs",
+                "sub_panel": "form",
+                "title": f"Delete Job: {name}",
+                "form": {
+                    "fields": [],
+                    "values": {"name": name},
+                    "submit_action": "delete-job",
+                    "submit_label": "Delete Job",
+                    "notes": [
+                        f"Deleting {name} takes its steps, its schedules "
+                        f"and its history with it.",
+                        "",
+                        f"Steps: {summary['steps']}",
+                        f"Schedules: {summary['schedules']}",
+                        f"History rows: {summary['history']}",
+                    ],
+                    "confirm_text": name,
+                    "danger": True,
+                },
+                "headers": [],
+                "rows": [],
+                "row_id": None,
+                "actions": [],
+                "info": None,
+                "context": {"job_name": name},
+            })
+
+        elif action_name == "delete-job":
+            # Sent as a payload when it comes from the confirmation
+            # form, and as a bare name when asked for directly.
+            opts = {}
+            try:
+                opts = _decode_job_payload(args)
+            except Exception:
+                opts = {}
+            name = jobdefs.delete_job(
+                cursor, (opts.get("name") or " ".join(args)).strip())
+            cursor.connection.commit()
+            envelope.info(f"Deleted job: {name}")
+            _refresh_jobs(cursor)
+
+    except ValueError as err:
+        envelope.error(f":admin jobs {action_name} — {err}")
+    except Exception as err:
+        envelope.error(f":admin jobs {action_name} — {_job_error(err)}")
+
+
+def _job_error(err):
+    """Return the useful part of an msdb procedure error."""
+    text = str(err)
+    if text.startswith("(") and "]" in text:
+        text = text.rsplit("]", 1)[-1]
+    return text.strip().strip("()'\" ") or "failed"
+
+
+def _refresh_jobs(cursor):
+    """Re-send the job list so the panel reflects the change."""
+    from .. import envelope
+
+    try:
+        envelope.admin_panel(_job_list(cursor))
+    except Exception:
+        pass

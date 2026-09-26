@@ -370,4 +370,78 @@
   (test-table-keys-error "G outside the permissions view says where to go"
                          (sql-datum-admin-grant)))
 
+
+(message "\n=== the jobs list can make and change a job ===")
+
+;; Steps and schedules already had editors; the job they belong to did
+;; not, so E, N and D in the list are the job's own properties.
+(let (sent)
+  (cl-letf (((symbol-function 'sql-datum--admin-send-command)
+             (lambda (c) (setq sent c))))
+    (dolist (probe '((sql-datum-admin-new-job "new-job" nil)
+                     (sql-datum-admin-edit-job "edit-job" t)
+                     (sql-datum-admin-delete-job "drop-job-check" t)))
+      (with-temp-buffer
+        (setq-local sql-datum--admin-panel-name "jobs")
+        (setq-local sql-datum--admin-panel-data '((sub_panel . nil)))
+        (setq sent nil)
+        (cl-letf (((symbol-function 'sql-datum--admin-row-id-at-point)
+                   (lambda () "nightly load")))
+          (funcall (nth 0 probe)))
+        (test-table-keys-assert
+         (format "%s asks for %s" (nth 0 probe) (nth 1 probe))
+         (string-match-p (regexp-quote (nth 1 probe)) (or sent "")))
+        (when (nth 2 probe)
+          (test-table-keys-assert
+           (format "%s names the job" (nth 0 probe))
+           (string-suffix-p "nightly load" sent)))))))
+
+;; Deleting goes through the panel that says what would go with it.
+(with-temp-buffer
+  (setq-local sql-datum--admin-panel-name "jobs")
+  (setq-local sql-datum--admin-panel-data '((sub_panel . nil)))
+  (let (sent)
+    (cl-letf (((symbol-function 'sql-datum--admin-send-command)
+               (lambda (c) (setq sent c)))
+              ((symbol-function 'sql-datum--admin-row-id-at-point)
+               (lambda () "nightly load")))
+      (sql-datum-admin-delete-job)
+      (test-table-keys-assert "D checks before deleting a job"
+                              (string-match-p "drop-job-check" sent)))))
+
+;; The dispatchers reach them, and the section keys still win inside the
+;; detail view where steps and schedules live.
+(with-temp-buffer
+  (setq-local sql-datum--admin-panel-name "jobs")
+  (setq-local sql-datum--admin-panel-data '((sub_panel . nil)))
+  (let (called)
+    (cl-letf (((symbol-function 'sql-datum-admin-edit-job)
+               (lambda () (setq called 'job)))
+              ((symbol-function 'sql-datum-admin-edit-step)
+               (lambda () (setq called 'step))))
+      (sql-datum-admin-edit-at-point)
+      (test-table-keys-assert "E in the jobs list edits the job"
+                              (eq called 'job)))))
+
+(with-temp-buffer
+  (setq-local sql-datum--admin-panel-name "jobs")
+  (setq-local sql-datum--admin-panel-data '((sub_panel . "detail")))
+  (insert "a step row\n")
+  (put-text-property (point-min) (point-max) 'sql-datum-section "Steps")
+  (goto-char (point-min))
+  (let (called)
+    (cl-letf (((symbol-function 'sql-datum-admin-edit-job)
+               (lambda () (setq called 'job)))
+              ((symbol-function 'sql-datum-admin-edit-step)
+               (lambda () (setq called 'step))))
+      (sql-datum-admin-edit-at-point)
+      (test-table-keys-assert "but a step row still edits the step"
+                              (eq called 'step)))))
+
+;; Outside the jobs panel they say so rather than doing nothing.
+(with-temp-buffer
+  (setq-local sql-datum--admin-panel-name "databases")
+  (test-table-keys-error "new-job elsewhere says where it belongs"
+                         (sql-datum-admin-new-job)))
+
 (message "\n%d passed, %d failed" test-table-keys--pass test-table-keys--fail)

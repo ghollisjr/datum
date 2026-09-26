@@ -1,0 +1,291 @@
+"""Creating, editing and deleting SQL Agent jobs against a real server.
+
+Steps and schedules already had this; the job they belong to did not.
+"""
+
+import base64
+import json
+import os
+
+import pytest
+
+pyodbc = pytest.importorskip("pyodbc")
+pyodbc.pooling = False
+
+from datum.drivers.mssql import MSSQLDriver  # noqa: E402
+
+STRICT = os.environ.get("DATUM_STRICT") == "1"
+MS_HOST = os.environ.get("DATUM_MSSQL_SERVER", "127.0.0.1")
+MS_PORT = os.environ.get("DATUM_MSSQL_PORT", "1434")
+MS_DSN = (f"Driver={{ODBC Driver 18 for SQL Server}};Server={MS_HOST},{MS_PORT};"
+          f"Database=master;Uid={os.environ.get('DATUM_MSSQL_USER','sa')};"
+          f"Pwd={os.environ.get('DATUM_MSSQL_PASS','DatumTest1!')};"
+          f"TrustServerCertificate=yes")
+
+JOB = "datum_job_pytest"
+RENAMED = "datum_job_pytest_renamed"
+_UNREACHABLE = {}
+
+
+def _payload(obj):
+    return base64.b64encode(json.dumps(obj).encode()).decode()
+
+
+@pytest.fixture
+def captured(monkeypatch):
+    from datum import envelope
+
+    events = []
+    for kind in ("info", "warn", "error", "admin_panel", "definition"):
+        monkeypatch.setattr(
+            envelope, kind,
+            (lambda k: (lambda *a, **kw: events.append((k, a))))(kind))
+    return events
+
+
+@pytest.fixture
+def agent():
+    if "mssql" in _UNREACHABLE:
+        pytest.skip(_UNREACHABLE["mssql"])
+    try:
+        conn = pyodbc.connect(MS_DSN, timeout=8, autocommit=True)
+    except Exception as err:
+        _UNREACHABLE["mssql"] = f"MSSQL not reachable: {err}"
+        if STRICT:
+            pytest.fail(_UNREACHABLE["mssql"])
+        pytest.skip(_UNREACHABLE["mssql"])
+    cursor, driver = conn.cursor(), MSSQLDriver()
+
+    def cleanup():
+        for name in (JOB, RENAMED):
+            try:
+                cursor.execute("EXEC msdb.dbo.sp_delete_job @job_name = ?",
+                               [name])
+            except Exception:
+                pass
+
+    cleanup()
+    yield cursor, driver
+    cleanup()
+    conn.close()
+
+
+def _make(cursor, driver, **extra):
+    from datum.panels import jobs
+    opts = {"name": JOB, "enabled": True, "description": "made by a test",
+            "owner": "sa", "category": "[Uncategorized (Local)]",
+            "notify_eventlog": "0", "notify_email": "0",
+            "delete_level": "0"}
+    opts.update(extra)
+    jobs.run_action(cursor, driver, "create-job", [_payload(opts)])
+    return opts
+
+
+class TestCreatingAJob:
+
+    def test_the_form_offers_the_properties_ssms_does(self, agent, captured):
+        from datum.panels import jobs
+
+        cursor, driver = agent
+        jobs.run_action(cursor, driver, "new-job", [])
+        form = [a[0] for k, a in captured if k == "admin_panel"][0]["form"]
+        keys = [f["key"] for f in form["fields"]]
+        for expected in ("name", "enabled", "description", "owner",
+                         "category", "notify_eventlog", "notify_email",
+                         "delete_level"):
+            assert expected in keys, keys
+        # Steps and schedules are lists, not properties; the detail view
+        # already edits them, and the form says so.
+        assert any("detail" in note for note in form["notes"])
+
+    def test_a_job_is_created(self, agent, captured):
+        cursor, driver = agent
+        _make(cursor, driver)
+        assert "error" not in [k for k, _ in captured], captured
+        from datum.panels import jobdefs
+        job = jobdefs.get_job(cursor, JOB)
+        assert job["name"] == JOB
+        assert job["enabled"] is True
+        assert job["description"] == "made by a test"
+
+    def test_a_new_job_is_given_somewhere_to_run(self, agent, captured):
+        cursor, driver = agent
+        _make(cursor, driver)
+        # sp_add_job alone leaves a job with no target server: it exists
+        # and never runs, which is a quiet way to lose an afternoon.
+        cursor.execute("""
+            SELECT COUNT(*) FROM msdb.dbo.sysjobservers s
+            JOIN msdb.dbo.sysjobs j ON j.job_id = s.job_id
+            WHERE j.name = ?""", [JOB])
+        assert cursor.fetchone()[0] == 1
+
+    def test_the_panel_is_refreshed_afterwards(self, agent, captured):
+        cursor, driver = agent
+        _make(cursor, driver)
+        panels = [a[0] for k, a in captured if k == "admin_panel"]
+        assert panels, captured
+        assert panels[-1]["panel"] == "jobs"
+
+    def test_a_job_with_no_name_is_refused(self, agent, captured):
+        from datum.panels import jobs
+
+        cursor, driver = agent
+        jobs.run_action(cursor, driver, "create-job",
+                        [_payload({"name": "   "})])
+        assert [k for k, _ in captured] == ["error"], captured
+
+    def test_a_nonsense_notify_level_is_refused(self, agent, captured):
+        from datum.panels import jobs
+
+        cursor, driver = agent
+        jobs.run_action(cursor, driver, "create-job", [_payload(
+            {"name": JOB, "notify_eventlog": "whenever I feel like it"})])
+        assert [k for k, _ in captured] == ["error"], captured
+
+
+class TestEditingAJob:
+
+    def test_the_form_opens_with_what_the_job_is(self, agent, captured):
+        from datum.panels import jobs
+
+        cursor, driver = agent
+        _make(cursor, driver, notify_eventlog="2")
+        captured.clear()
+        jobs.run_action(cursor, driver, "edit-job", [JOB])
+        form = [a[0] for k, a in captured if k == "admin_panel"][0]["form"]
+        assert form["values"]["name"] == JOB
+        assert form["values"]["description"] == "made by a test"
+        assert form["values"]["notify_eventlog"] == "2"
+        # What it was called when the form opened, so an edited name
+        # reads as a rename rather than as a different job.
+        assert form["values"]["name_original"] == JOB
+
+    def test_properties_are_changed(self, agent, captured):
+        from datum.panels import jobdefs, jobs
+
+        cursor, driver = agent
+        _make(cursor, driver)
+        captured.clear()
+        jobs.run_action(cursor, driver, "update-job", [_payload(
+            {"name_original": JOB, "name": JOB, "enabled": False,
+             "description": "edited", "owner": "sa",
+             "category": "[Uncategorized (Local)]",
+             "notify_eventlog": "3", "notify_email": "0",
+             "delete_level": "0"})])
+        assert "error" not in [k for k, _ in captured], captured
+        job = jobdefs.get_job(cursor, JOB)
+        assert job["enabled"] is False
+        assert job["description"] == "edited"
+        assert job["notify_eventlog"] == "3"
+
+    def test_an_edited_name_renames_rather_than_duplicating(self, agent,
+                                                            captured):
+        from datum.panels import jobdefs, jobs
+
+        cursor, driver = agent
+        _make(cursor, driver)
+        captured.clear()
+        jobs.run_action(cursor, driver, "update-job", [_payload(
+            {"name_original": JOB, "name": RENAMED, "enabled": True,
+             "description": "x", "owner": "sa",
+             "category": "[Uncategorized (Local)]",
+             "notify_eventlog": "0", "notify_email": "0",
+             "delete_level": "0"})])
+        assert "error" not in [k for k, _ in captured], captured
+        assert jobdefs.get_job(cursor, RENAMED)
+        assert jobdefs.get_job(cursor, JOB) is None
+
+    def test_editing_a_job_that_is_not_there(self, agent, captured):
+        from datum.panels import jobs
+
+        cursor, driver = agent
+        jobs.run_action(cursor, driver, "edit-job", ["no_such_job_at_all"])
+        assert [k for k, _ in captured] == ["error"], captured
+
+    def test_the_steps_survive_an_edit(self, agent, captured):
+        from datum.panels import jobs
+
+        cursor, driver = agent
+        _make(cursor, driver)
+        cursor.execute(
+            "EXEC msdb.dbo.sp_add_jobstep @job_name=?, @step_name=?, "
+            "@subsystem=N'TSQL', @command=N'SELECT 1', @database_name=N'master'",
+            [JOB, "the only step"])
+        captured.clear()
+        jobs.run_action(cursor, driver, "update-job", [_payload(
+            {"name_original": JOB, "name": RENAMED, "enabled": True,
+             "description": "x", "owner": "sa",
+             "category": "[Uncategorized (Local)]",
+             "notify_eventlog": "0", "notify_email": "0",
+             "delete_level": "0"})])
+        cursor.execute("""
+            SELECT COUNT(*) FROM msdb.dbo.sysjobsteps s
+            JOIN msdb.dbo.sysjobs j ON j.job_id = s.job_id
+            WHERE j.name = ?""", [RENAMED])
+        assert cursor.fetchone()[0] == 1
+
+
+class TestDeletingAJob:
+
+    def test_the_confirmation_says_what_goes_with_it(self, agent, captured):
+        from datum.panels import jobs
+
+        cursor, driver = agent
+        _make(cursor, driver)
+        cursor.execute(
+            "EXEC msdb.dbo.sp_add_jobstep @job_name=?, @step_name=?, "
+            "@subsystem=N'TSQL', @command=N'SELECT 1', @database_name=N'master'",
+            [JOB, "s1"])
+        captured.clear()
+        jobs.run_action(cursor, driver, "drop-job-check", [JOB])
+        form = [a[0] for k, a in captured if k == "admin_panel"][0]["form"]
+        # The same shape the other dangerous actions use: the name has
+        # to be typed back.
+        assert form["confirm_text"] == JOB
+        assert form["danger"] is True
+        assert form["submit_action"] == "delete-job"
+        assert any("Steps: 1" in note for note in form["notes"]), form["notes"]
+        # And nothing has been deleted by asking.
+        from datum.panels import jobdefs
+        assert jobdefs.get_job(cursor, JOB)
+
+    def test_a_job_is_deleted(self, agent, captured):
+        from datum.panels import jobdefs, jobs
+
+        cursor, driver = agent
+        _make(cursor, driver)
+        captured.clear()
+        # As the confirmation form submits it.
+        jobs.run_action(cursor, driver, "delete-job",
+                        [_payload({"name": JOB})])
+        assert "error" not in [k for k, _ in captured], captured
+        assert jobdefs.get_job(cursor, JOB) is None
+
+    def test_a_bare_name_still_works(self, agent, captured):
+        from datum.panels import jobdefs, jobs
+
+        cursor, driver = agent
+        _make(cursor, driver)
+        captured.clear()
+        jobs.run_action(cursor, driver, "delete-job", [JOB])
+        assert "error" not in [k for k, _ in captured], captured
+        assert jobdefs.get_job(cursor, JOB) is None
+
+    def test_deleting_one_that_is_not_there(self, agent, captured):
+        from datum.panels import jobs
+
+        cursor, driver = agent
+        jobs.run_action(cursor, driver, "drop-job-check", ["no_such_job"])
+        assert [k for k, _ in captured] == ["error"], captured
+
+
+class TestOtherDialects:
+
+    def test_jobs_are_mssql_only(self, captured):
+        from datum.drivers.postgres import PostgreSQLDriver
+        from datum.panels import jobs
+
+        driver = PostgreSQLDriver.__new__(PostgreSQLDriver)
+        jobs.run_action(None, driver, "new-job", [])
+        assert [k for k, _ in captured] == ["error"], captured
+        assert "MSSQL" in captured[0][1][0]

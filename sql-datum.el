@@ -1933,6 +1933,39 @@ Returns a list of strings by parsing the current line against column widths."
       (sql-datum-admin-open-path))
      (t (message "No detail view for this panel")))))
 
+(defun sql-datum-admin-new-job ()
+  "Create a SQL Agent job."
+  (interactive)
+  (unless (equal sql-datum--admin-panel-name "jobs")
+    (user-error "Not in the jobs panel"))
+  (sql-datum--admin-send-command ":admin-action jobs new-job"))
+
+(defun sql-datum-admin-edit-job ()
+  "Edit the properties of the job at point.
+
+Its steps and schedules are edited from the detail view (`d\='); these
+are the job's own properties — name, owner, category, notifications."
+  (interactive)
+  (unless (equal sql-datum--admin-panel-name "jobs")
+    (user-error "Not in the jobs panel"))
+  (let ((name (or (sql-datum--admin-row-id-at-point)
+                  (alist-get 'job_name sql-datum--admin-context))))
+    (unless name (user-error "No job at point"))
+    (sql-datum--admin-send-command
+     (format ":admin-action jobs edit-job %s" name))))
+
+(defun sql-datum-admin-delete-job ()
+  "Delete the job at point, by way of the panel that says what goes."
+  (interactive)
+  (unless (equal sql-datum--admin-panel-name "jobs")
+    (user-error "Not in the jobs panel"))
+  (let ((name (or (sql-datum--admin-row-id-at-point)
+                  (alist-get 'job_name sql-datum--admin-context))))
+    (unless name (user-error "No job at point"))
+    (setq sql-datum--admin-display-request "jobs")
+    (sql-datum--admin-send-command
+     (format ":admin-action jobs drop-job-check %s" name))))
+
 (defun sql-datum-admin-job-history ()
   "Show execution history for the SQL Agent job at point."
   (interactive)
@@ -1973,6 +2006,9 @@ Returns a list of strings by parsing the current line against column widths."
          ('("security" . "user-mappings") (sql-datum-admin-edit-mapping))
          ('("schema" . "tables")   (sql-datum-admin-edit-table))
          (`("security" . ,_)       (sql-datum-admin-edit-principal))
+         ;; The job's own properties.  Its steps and schedules are
+         ;; edited from the detail view, which the sections above catch.
+         (`("jobs" . ,_)           (sql-datum-admin-edit-job))
          (_ (user-error "No editable item at point"))))))
 
 (defun sql-datum-admin-new-at-point ()
@@ -1989,6 +2025,7 @@ Returns a list of strings by parsing the current line against column widths."
          (`("databases" . ,_)            (sql-datum-admin-new-database))
          ('("security" . "user-mappings") (sql-datum-admin-new-mapping))
          (`("security" . ,_)             (sql-datum-admin-new-principal))
+         (`("jobs" . ,_)                 (sql-datum-admin-new-job))
          (_ (user-error "No section at point for creating items"))))))
 
 (defun sql-datum-admin-delete-at-point ()
@@ -2004,6 +2041,7 @@ Returns a list of strings by parsing the current line against column widths."
          (`("schema" . ,_)                (sql-datum-admin-drop-schema))
          ('("security" . "user-mappings") (sql-datum-admin-remove-mapping))
          (`("security" . ,_)              (sql-datum-admin-drop-principal))
+         (`("jobs" . ,_)                  (sql-datum-admin-delete-job))
          (_ (user-error "No deletable item at point"))))))
 
 ;; --- Database wizard commands ---

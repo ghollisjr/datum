@@ -30,7 +30,8 @@ standalone from any terminal.
   - Logins, roles and database users, with passwords treated as secrets
   - Object-level permissions: grant, deny and revoke down to a column
   - A read-only browser for the server's own filesystem
-  - SQL Agent jobs, steps, schedules and history (MSSQL)
+  - SQL Agent jobs, steps, schedules and history (MSSQL) — creating and
+    editing jobs as well as their parts
   - Reachable from the query buffer by key as well as from the panels:
     =C-c t= for tables and schemas, =C-c d= for databases, =C-c g= for
     logins and roles
@@ -906,11 +907,32 @@ executing, last run result and next run time.  Executing jobs sort first.
 | =H= | Job history                           |
 | =s= | Start job                             |
 | =S= | Stop job                              |
+| =N= | New job                               |
+| =E= | Edit the job's properties             |
+| =D= | Delete the job (confirmation)         |
 | =e= | Enable/disable toggle                 |
 
 In the detail view, =E=, =N= and =D= act on whichever section point is
 in — editing a step opens the step editor, editing a schedule opens the
-schedule editor.
+schedule editor.  In the list they act on the job itself: its name,
+whether it is enabled, its description, owner and category, and what it
+writes to the event log, who it emails, and whether it deletes itself
+once it has run — the General and Notifications pages of SSMS's job
+dialog.
+
+Steps and schedules are not on that form: they are lists rather than
+properties, and the detail view already edits them.  So a new job is
+made first and filled in after, with =d= and then =N=.
+
+A new job is also given the local server to run on.  =sp_add_job= alone
+leaves a job with no target server, which SQL Server accepts and then
+never runs — SSMS adds it for you, and so does this.
+
+Renaming is done by editing the name: the form remembers what the job
+was called when it opened, so an edited name renames the job rather than
+making a second one, and its steps, schedules and history come along.
+Deleting asks first, saying how many steps, schedules and history rows
+would go with it, and wants the name typed back.
 
 *** Schema panel
 

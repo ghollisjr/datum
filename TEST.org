@@ -193,7 +193,7 @@ The test suite has four layers, run by =tests/run-all.sh=:
 |-------------------+----------------------------------+-----------------------------------------|
 | Python unit tests | =python -m pytest tests/python/= | Driver registry, SQL type detection, DDL generation |
 | Integration tests | =tests/python/test_integration.sh= | Live database introspection & queries |
-| Live admin tests  | =python -m pytest tests/python/test_*_live.py= | Database, schema, security and filesystem panels against the docker servers |
+| Live admin tests  | =python -m pytest tests/python/test_*_live.py= | Database, schema, security, jobs and filesystem panels against the docker servers |
 | Emacs tests       | =tests/emacs/run-tests.sh=       | Envelope protocol, panel display and refresh, wizard form keys, path browser |
 
 =tests/emacs/run-tests.sh= runs every =test-*.el= file in that
