@@ -622,14 +622,11 @@
                                                   :value-get)
                                     "INT IDENTITY(1,1)")))))
 
-;; The editors that predate the generic renderer answer to SPC too.
-(test-form-keys-assert "the older widget editors toggle with SPC"
-                       (with-temp-buffer
-                         (use-local-map (sql-datum--widget-keymap))
-                         (and (eq (key-binding (kbd "SPC"))
-                                  'sql-datum-form-toggle)
-                              (eq (key-binding (kbd "RET"))
-                                  'widget-button-press))))
+;; The two editors that predated the generic renderer -- for job steps
+;; and schedules -- have been converted to it, so there is no longer a
+;; second keymap to keep in step with this one.
+(test-form-keys-assert "there is only one form keymap now"
+                       (not (fboundp 'sql-datum--widget-keymap)))
 
 ;; Off a checkbox SPC keeps its usual meaning.
 (with-current-buffer (test-form-keys--form test-form-keys--one-path)

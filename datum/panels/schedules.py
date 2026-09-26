@@ -55,12 +55,17 @@ def update_schedule(cursor, schedule_data):
     """Update an existing schedule.
 
     schedule_data is a dict with schedule_id and fields to update.
+
+    The schedule is identified by its id and renamed with @new_name.
+    sp_update_schedule's @name is the identity, not the new value, so
+    passing a changed name there looked for a schedule that did not
+    exist yet -- which is why renaming one never worked.
     """
     sid = schedule_data["schedule_id"]
     sql = """
         EXEC msdb.dbo.sp_update_schedule
             @schedule_id = ?,
-            @name = ?,
+            @new_name = ?,
             @enabled = ?,
             @freq_type = ?,
             @freq_interval = ?,
@@ -163,3 +168,82 @@ SUBDAY_TYPES = {
     4: "Minutes",
     8: "Hours",
 }
+
+
+def schedule_options(cursor, current=None):
+    """Field descriptors for a job schedule.
+
+    The same shape every other wizard uses, so the schedule editor gets
+    the field navigation and the rest of it rather than needing a
+    renderer of its own.
+
+    Which fields matter depends on the frequency — a weekly schedule
+    reads Interval as days of the week, a monthly one as a day of the
+    month — so the help says so rather than the form trying to hide and
+    show fields as the frequency changes.
+    """
+    current = current or {}
+
+    def value(key, fallback):
+        got = current.get(key)
+        return fallback if got in (None, "") else got
+
+    return [
+        {"key": "name", "label": "Schedule Name", "type": "string",
+         "size": 40, "default": value("name", ""),
+         "required": True},
+        {"key": "enabled", "label": "Enabled", "type": "bool",
+         "default": bool(value("enabled", 1))},
+        {"key": "freq_type", "label": "Frequency", "type": "choice",
+         "default": str(value("freq_type", 4)),
+         "choices": [[str(k), v] for k, v in FREQ_TYPES.items()]},
+        {"key": "freq_interval", "label": "Interval", "type": "int",
+         "default": value("freq_interval", 1),
+         "help": "days for Daily, a day of the month for Monthly, "
+                 "a bitmask of weekdays for Weekly"},
+        {"key": "freq_subday_type", "label": "Repeats Within the Day",
+         "type": "choice", "default": str(value("freq_subday_type", 1)),
+         "choices": [[str(k), v] for k, v in SUBDAY_TYPES.items()]},
+        {"key": "freq_subday_interval", "label": "Repeat Every",
+         "type": "int", "default": value("freq_subday_interval", 0),
+         "help": "in the units chosen above"},
+        {"key": "freq_relative_interval", "label": "Relative Interval",
+         "type": "int", "default": value("freq_relative_interval", 0),
+         "help": "for Monthly Relative: 1 first, 2 second, 4 third, "
+                 "8 fourth, 16 last"},
+        {"key": "freq_recurrence_factor", "label": "Every N Weeks/Months",
+         "type": "int", "default": value("freq_recurrence_factor", 0),
+         "help": "for Weekly and Monthly"},
+        {"key": "active_start_time", "label": "Start Time", "type": "int",
+         "default": value("active_start_time", 0), "help": "HHMMSS"},
+        {"key": "active_end_time", "label": "End Time", "type": "int",
+         "default": value("active_end_time", 235959), "help": "HHMMSS"},
+        {"key": "active_start_date", "label": "Start Date", "type": "int",
+         "default": value("active_start_date", 0), "help": "YYYYMMDD"},
+        {"key": "active_end_date", "label": "End Date", "type": "int",
+         "default": value("active_end_date", 99991231), "help": "YYYYMMDD"},
+    ]
+
+
+_NUMERIC = ("freq_type", "freq_interval", "freq_subday_type",
+            "freq_subday_interval", "freq_relative_interval",
+            "freq_recurrence_factor", "active_start_time",
+            "active_end_time", "active_start_date", "active_end_date",
+            "schedule_id")
+
+
+def coerce_schedule(opts):
+    """Return OPTS with the numbers as numbers, whatever the form sent."""
+    out = dict(opts)
+    for key in _NUMERIC:
+        if key in out and out[key] not in (None, ""):
+            try:
+                out[key] = int(str(out[key]).strip())
+            except (TypeError, ValueError):
+                raise ValueError(f"{key} must be a number "
+                                 f"(got {out[key]!r})")
+    if not str(out.get("name") or "").strip():
+        raise ValueError("a schedule needs a name")
+    # The procedures take the name under this key.
+    out["schedule_name"] = out["name"]
+    return out

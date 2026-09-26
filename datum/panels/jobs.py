@@ -53,7 +53,7 @@ def run_action(cursor, driver, action_name, args):
         envelope.admin_panel(result)
         return
 
-    if action_name in ("edit-schedule", "update-schedule",
+    if action_name in ("edit-schedule", "update-schedule", "create-schedule",
                         "new-schedule", "delete-schedule"):
         _handle_schedule_action(cursor, action_name, args)
         return
@@ -107,68 +107,101 @@ def run_action(cursor, driver, action_name, args):
 def _handle_schedule_action(cursor, action_name, args):
     """Handle schedule-related actions."""
     from .. import envelope
+
+    try:
+        _schedule_action(cursor, action_name, args)
+    except ValueError as err:
+        envelope.error(f":admin jobs {action_name} — {err}")
+    except Exception as err:
+        envelope.error(f":admin jobs {action_name} — {_job_error(err)}")
+
+
+def _schedule_action(cursor, action_name, args):
+    """Do the work, with errors reported by the caller."""
+    from .. import envelope
     from . import schedules
 
-    if action_name == "edit-schedule":
-        # args: [schedule_name, job_name]
-        if len(args) < 2:
-            envelope.error("edit-schedule requires schedule_name and job_name")
+    if action_name in ("edit-schedule", "new-schedule"):
+        # The generic form, as the step editor now uses: a renderer of
+        # its own meant doing without the field navigation the other
+        # wizards have.
+        editing = action_name == "edit-schedule"
+        if editing:
+            if len(args) < 2:
+                envelope.error(
+                    "edit-schedule requires schedule_name and job_name")
+                return
+            schedule_name = args[0]
+            job_name = " ".join(args[1:])
+            current = schedules.get_schedule(cursor, schedule_name, job_name)
+            if not current:
+                envelope.error(f"Schedule not found: {schedule_name}")
+                return
+        else:
+            job_name = " ".join(args)
+            current = None
+        if not job_name:
+            envelope.error(f"{action_name} requires a job name")
             return
-        schedule_name = args[0]
-        job_name = " ".join(args[1:])
-        sched = schedules.get_schedule(cursor, schedule_name, job_name)
-        if not sched:
-            envelope.error(f"Schedule not found: {schedule_name}")
-            return
-        # Send schedule data for the Emacs form editor
+
+        values = dict(current or {})
+        values["job_name"] = job_name
+        if editing:
+            values["schedule_id"] = current.get("schedule_id")
+            # get_schedule reports the name under "name", which
+            # dict(current) has already carried across.
+            values["name"] = current.get("name", "")
         envelope.admin_panel({
             "panel": "jobs",
-            "sub_panel": "schedule-edit",
-            "title": f"Edit Schedule: {schedule_name}",
-            "schedule": sched,
-            "freq_types": schedules.FREQ_TYPES,
-            "subday_types": schedules.SUBDAY_TYPES,
+            "sub_panel": "form",
+            "title": (f"Schedule: {values['name']}" if editing
+                      else f"New Schedule for {job_name}"),
+            "form": {
+                "fields": [{k: v for k, v in field.items() if v is not None}
+                           for field in schedules.schedule_options(
+                               cursor, current)],
+                "values": values,
+                "submit_action": ("update-schedule" if editing
+                                  else "create-schedule"),
+                "submit_label": ("Save Schedule" if editing
+                                 else "Create Schedule"),
+                "notes": [f"Schedule of job {job_name}.",
+                          "Which fields matter depends on the frequency; "
+                          "the help under each says which."],
+            },
             "headers": [],
             "rows": [],
             "row_id": None,
             "actions": [],
             "info": None,
-            "context": {"job_name": job_name, "schedule_name": schedule_name},
+            "context": {"job_name": job_name},
         })
 
-    elif action_name == "update-schedule":
-        # args: [json-encoded schedule data]
-        if not args:
-            envelope.error("update-schedule requires schedule data")
-            return
-        try:
-            schedule_data = json.loads(args[0])
-        except json.JSONDecodeError as e:
-            envelope.error(f"Invalid schedule JSON: {e}")
-            return
-        schedules.update_schedule(cursor, schedule_data)
-        envelope.info(f"Updated schedule: {schedule_data.get('name', '?')}")
-
-    elif action_name == "new-schedule":
-        # args: [job_name, json-encoded schedule data]
-        if len(args) < 2:
-            envelope.error("new-schedule requires job_name and schedule data")
-            return
-        job_name = args[0]
-        try:
-            schedule_data = json.loads(args[1])
-        except json.JSONDecodeError as e:
-            envelope.error(f"Invalid schedule JSON: {e}")
-            return
-        schedules.create_schedule(cursor, job_name, schedule_data)
-        envelope.info(f"Created schedule: {schedule_data.get('name', '?')}")
+    elif action_name in ("update-schedule", "create-schedule"):
+        opts = schedules.coerce_schedule(_decode_job_payload(args))
+        job_name = (opts.get("job_name") or "").strip()
+        if action_name == "update-schedule":
+            if not opts.get("schedule_id"):
+                envelope.error("update-schedule did not say which schedule")
+                return
+            schedules.update_schedule(cursor, opts)
+            envelope.info(f"Updated schedule: {opts.get('name', '?')}")
+        else:
+            if not job_name:
+                envelope.error("create-schedule did not say which job")
+                return
+            schedules.create_schedule(cursor, job_name, opts)
+            envelope.info(f"Created schedule: {opts.get('name', '?')}")
+        cursor.connection.commit()
+        if job_name:
+            _refresh_detail(cursor, job_name)
 
     elif action_name == "delete-schedule":
-        # args: [schedule_name]
         if not args:
             envelope.error("delete-schedule requires a schedule name")
             return
         schedules.delete_schedule(cursor, args[0])
+        cursor.connection.commit()
         envelope.info(f"Deleted schedule: {args[0]}")
 
 

@@ -463,3 +463,143 @@ class TestStepsUseTheGenericForm:
                                [spaced])
             except Exception:
                 pass
+
+
+class TestSchedulesUseTheGenericForm:
+    """The schedule editor was the other bespoke renderer."""
+
+    def _job(self, cursor, driver):
+        from datum.panels import jobs
+        jobs.run_action(cursor, driver, "create-job", [_payload(
+            {"name": JOB, "enabled": True, "description": "",
+             "owner": "sa", "category": "[Uncategorized (Local)]",
+             "notify_eventlog": "0", "notify_email": "0",
+             "delete_level": "0"})])
+
+    def _schedule(self, cursor, driver, name="nightly", **extra):
+        from datum.panels import jobs
+        opts = {"job_name": JOB, "name": name, "enabled": True,
+                "freq_type": "4", "freq_interval": "1",
+                "freq_subday_type": "1", "freq_subday_interval": "0",
+                "freq_relative_interval": "0", "freq_recurrence_factor": "0",
+                "active_start_time": "23000", "active_end_time": "235959",
+                "active_start_date": "20260101",
+                "active_end_date": "99991231"}
+        opts.update(extra)
+        jobs.run_action(cursor, driver, "create-schedule", [_payload(opts)])
+
+    def test_the_new_schedule_form_comes_from_the_server(self, agent,
+                                                        captured):
+        from datum.panels import jobs
+
+        cursor, driver = agent
+        self._job(cursor, driver)
+        captured.clear()
+        jobs.run_action(cursor, driver, "new-schedule", [JOB])
+        panel = [a[0] for k, a in captured if k == "admin_panel"][0]
+        assert panel["sub_panel"] == "form"
+        assert panel["form"]["submit_action"] == "create-schedule"
+        keys = [f["key"] for f in panel["form"]["fields"]]
+        assert "freq_type" in keys and "active_start_time" in keys
+
+    def test_a_schedule_is_created(self, agent, captured):
+        from datum.panels import schedules
+
+        cursor, driver = agent
+        self._job(cursor, driver)
+        captured.clear()
+        self._schedule(cursor, driver)
+        assert "error" not in [k for k, _ in captured], captured
+        got = schedules.get_schedule(cursor, "nightly", JOB)
+        assert got and got["freq_type"] == 4
+
+    def test_the_edit_form_opens_with_the_schedule(self, agent, captured):
+        from datum.panels import jobs
+
+        cursor, driver = agent
+        self._job(cursor, driver)
+        self._schedule(cursor, driver)
+        captured.clear()
+        jobs.run_action(cursor, driver, "edit-schedule", ["nightly", JOB])
+        form = [a[0] for k, a in captured if k == "admin_panel"][0]["form"]
+        # get_schedule reports the name under "name"; reading it from
+        # the wrong key left the field blank.
+        assert form["values"]["name"] == "nightly"
+        assert form["values"]["schedule_id"]
+        assert form["values"]["job_name"] == JOB
+
+    def test_a_schedule_can_be_renamed(self, agent, captured):
+        from datum.panels import jobs, schedules
+
+        cursor, driver = agent
+        self._job(cursor, driver)
+        self._schedule(cursor, driver)
+        current = schedules.get_schedule(cursor, "nightly", JOB)
+        captured.clear()
+        # sp_update_schedule's @name identifies the schedule and
+        # @new_name renames it; passing the new name as @name looked for
+        # one that did not exist, so renaming never worked.
+        jobs.run_action(cursor, driver, "update-schedule", [_payload(
+            {"job_name": JOB, "schedule_id": current["schedule_id"],
+             "name": "renamed", "enabled": False, "freq_type": "8",
+             "freq_interval": "2", "freq_subday_type": "1",
+             "freq_subday_interval": "0", "freq_relative_interval": "0",
+             "freq_recurrence_factor": "1", "active_start_time": "10000",
+             "active_end_time": "235959", "active_start_date": "20260101",
+             "active_end_date": "99991231"})])
+        assert "error" not in [k for k, _ in captured], captured
+        assert schedules.get_schedule(cursor, "renamed", JOB)
+        assert schedules.get_schedule(cursor, "nightly", JOB) is None
+
+    def test_other_properties_change_too(self, agent, captured):
+        from datum.panels import jobs, schedules
+
+        cursor, driver = agent
+        self._job(cursor, driver)
+        self._schedule(cursor, driver)
+        current = schedules.get_schedule(cursor, "nightly", JOB)
+        captured.clear()
+        jobs.run_action(cursor, driver, "update-schedule", [_payload(
+            {"job_name": JOB, "schedule_id": current["schedule_id"],
+             "name": "nightly", "enabled": False, "freq_type": "8",
+             "freq_interval": "2", "freq_subday_type": "1",
+             "freq_subday_interval": "0", "freq_relative_interval": "0",
+             "freq_recurrence_factor": "1", "active_start_time": "10000",
+             "active_end_time": "235959", "active_start_date": "20260101",
+             "active_end_date": "99991231"})])
+        got = schedules.get_schedule(cursor, "nightly", JOB)
+        assert got["enabled"] == 0
+        assert got["freq_type"] == 8
+        assert got["active_start_time"] == 10000
+
+    def test_a_bad_number_is_refused(self, agent, captured):
+        from datum.panels import jobs
+
+        cursor, driver = agent
+        self._job(cursor, driver)
+        captured.clear()
+        jobs.run_action(cursor, driver, "create-schedule", [_payload(
+            {"job_name": JOB, "name": "x", "freq_type": "weekly-ish"})])
+        assert [k for k, _ in captured] == ["error"], captured
+        assert "must be a number" in captured[0][1][0]
+
+    def test_a_schedule_needs_a_name(self, agent, captured):
+        from datum.panels import jobs
+
+        cursor, driver = agent
+        self._job(cursor, driver)
+        captured.clear()
+        jobs.run_action(cursor, driver, "create-schedule",
+                        [_payload({"job_name": JOB, "name": "  "})])
+        assert [k for k, _ in captured] == ["error"], captured
+
+    def test_updating_without_an_id_says_so(self, agent, captured):
+        from datum.panels import jobs
+
+        cursor, driver = agent
+        self._job(cursor, driver)
+        captured.clear()
+        jobs.run_action(cursor, driver, "update-schedule",
+                        [_payload({"job_name": JOB, "name": "x"})])
+        assert [k for k, _ in captured] == ["error"], captured
+        assert "which schedule" in captured[0][1][0]

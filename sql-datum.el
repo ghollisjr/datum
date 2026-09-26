@@ -1037,10 +1037,6 @@ worse than confusing."
              (sub-panel (alist-get 'sub_panel data))
              (sqli-buf (current-buffer)))
         (cond
-         ;; Schedule edit form
-         ((equal sub-panel "schedule-edit")
-          (run-at-time 0 nil #'sql-datum--admin-show-schedule-editor
-                       data sqli-buf))
          ;; Generic wizard form (databases, security, backup, schema)
          ((equal sub-panel "form")
           (run-at-time 0 nil #'sql-datum--admin-show-form
@@ -2828,35 +2824,15 @@ blank one here meant doing without that."
              sched-name job-name))))
 
 (defun sql-datum-admin-new-schedule ()
-  "Create a new schedule for the current job."
+  "Create a schedule for the job this detail view is about.
+
+The form comes from the server, as the edit one does, rather than a
+blank one being assembled here."
   (interactive)
   (let ((job-name (alist-get 'job_name sql-datum--admin-context)))
     (unless job-name (user-error "No job context available"))
-    ;; Open a blank schedule editor
-    (sql-datum--admin-show-schedule-editor
-     `((panel . "jobs")
-       (sub_panel . "schedule-edit")
-       (title . ,(format "New Schedule for: %s" job-name))
-       (schedule . ((schedule_id . nil)
-                    (name . "")
-                    (enabled . 1)
-                    (freq_type . 4)
-                    (freq_interval . 1)
-                    (freq_subday_type . 1)
-                    (freq_subday_interval . 0)
-                    (freq_relative_interval . 0)
-                    (freq_recurrence_factor . 0)
-                    (active_start_date . 20000101)
-                    (active_end_date . 99991231)
-                    (active_start_time . 0)
-                    (active_end_time . 235959)))
-       (freq_types . ((1 . "Once") (4 . "Daily") (8 . "Weekly")
-                      (16 . "Monthly") (32 . "Monthly Relative")
-                      (64 . "On Agent Start") (128 . "On Idle")))
-       (subday_types . ((1 . "At specified time") (2 . "Seconds")
-                        (4 . "Minutes") (8 . "Hours")))
-       (context . ((job_name . ,job-name))))
-     sql-datum--admin-sqli-buf)))
+    (sql-datum--admin-send-command
+     (format ":admin-action jobs new-schedule %s" job-name))))
 
 (defun sql-datum-admin-delete-schedule ()
   "Delete the schedule at point."
@@ -2869,187 +2845,8 @@ blank one here meant doing without that."
 
 ;; --- Schedule editor (widget-based form) ---
 
-(defun sql-datum--admin-show-schedule-editor (data sqli-buf)
-  "Show a widget-based schedule editor from DATA.
-SQLI-BUF is the originating SQLi buffer."
-  (require 'widget)
-  (require 'wid-edit)
-  (let* ((schedule (alist-get 'schedule data))
-         (freq-types (alist-get 'freq_types data))
-         (subday-types (alist-get 'subday_types data))
-         (context (alist-get 'context data))
-         (job-name (alist-get 'job_name context))
-         (title (or (alist-get 'title data) "Schedule Editor"))
-         (is-new (null (alist-get 'schedule_id schedule)))
-         (buf (get-buffer-create "*datum-admin:schedule-edit*")))
-    (with-current-buffer buf
-      (kill-all-local-variables)
-      (let ((inhibit-read-only t))
-        (erase-buffer))
-      (remove-overlays)
-      (widget-insert (propertize title 'face 'bold))
-      (widget-insert "\n\n")
-      ;; Store widgets for later retrieval
-      (let (widgets)
-        ;; Name
-        (widget-insert "Schedule Name: ")
-        (push (cons 'name (widget-create 'editable-field
-                                         :size 40
-                                         :value (or (alist-get 'name schedule) "")))
-              widgets)
-        (widget-insert "\n")
-        ;; Enabled
-        (widget-insert "Enabled:       ")
-        (push (cons 'enabled (widget-create 'checkbox
-                                            :value (eq (alist-get 'enabled schedule) 1)))
-              widgets)
-        (widget-insert "\n\n")
-        ;; Frequency type
-        (widget-insert "Frequency:     ")
-        (let* ((freq-val (or (alist-get 'freq_type schedule) 4))
-               (freq-choices (or (mapcar (lambda (ft)
-                                           (list 'item
-                                                 :tag (cdr ft)
-                                                 :value (car ft)))
-                                         (if (listp freq-types)
-                                             freq-types
-                                           '((4 . "Daily"))))
-                                 '((item :tag "Daily" :value 4)))))
-          (push (cons 'freq_type
-                      (apply #'widget-create 'menu-choice
-                             :value freq-val
-                             freq-choices))
-                widgets))
-        (widget-insert "\n")
-        ;; Frequency interval
-        (widget-insert "Interval:      ")
-        (push (cons 'freq_interval
-                    (widget-create 'editable-field
-                                   :size 10
-                                   :value (format "%s" (or (alist-get 'freq_interval schedule) 1))))
-              widgets)
-        (widget-insert "\n")
-        ;; Subday type
-        (widget-insert "Subday Type:   ")
-        (let* ((subday-val (or (alist-get 'freq_subday_type schedule) 1))
-               (subday-choices (or (mapcar (lambda (st)
-                                             (list 'item
-                                                   :tag (cdr st)
-                                                   :value (car st)))
-                                           (if (listp subday-types)
-                                               subday-types
-                                             '((1 . "At specified time"))))
-                                   '((item :tag "At specified time" :value 1)))))
-          (push (cons 'freq_subday_type
-                      (apply #'widget-create 'menu-choice
-                             :value subday-val
-                             subday-choices))
-                widgets))
-        (widget-insert "\n")
-        ;; Subday interval
-        (widget-insert "Subday Int.:   ")
-        (push (cons 'freq_subday_interval
-                    (widget-create 'editable-field
-                                   :size 10
-                                   :value (format "%s" (or (alist-get 'freq_subday_interval schedule) 0))))
-              widgets)
-        (widget-insert "\n\n")
-        ;; Active times
-        (widget-insert "Start Time:    ")
-        (push (cons 'active_start_time
-                    (widget-create 'editable-field
-                                   :size 10
-                                   :value (sql-datum--admin-format-time
-                                           (or (alist-get 'active_start_time schedule) 0))))
-              widgets)
-        (widget-insert "  (HHMMSS)\n")
-        (widget-insert "End Time:      ")
-        (push (cons 'active_end_time
-                    (widget-create 'editable-field
-                                   :size 10
-                                   :value (sql-datum--admin-format-time
-                                           (or (alist-get 'active_end_time schedule) 235959))))
-              widgets)
-        (widget-insert "  (HHMMSS)\n")
-        ;; Active dates
-        (widget-insert "Start Date:    ")
-        (push (cons 'active_start_date
-                    (widget-create 'editable-field
-                                   :size 10
-                                   :value (format "%s" (or (alist-get 'active_start_date schedule) 20000101))))
-              widgets)
-        (widget-insert "  (YYYYMMDD)\n")
-        (widget-insert "End Date:      ")
-        (push (cons 'active_end_date
-                    (widget-create 'editable-field
-                                   :size 10
-                                   :value (format "%s" (or (alist-get 'active_end_date schedule) 99991231))))
-              widgets)
-        (widget-insert "  (YYYYMMDD)\n\n")
-        ;; Buttons
-        (widget-create 'push-button
-                       :notify (lambda (&rest _)
-                                 (sql-datum--admin-schedule-submit
-                                  widgets schedule sqli-buf job-name is-new))
-                       (if is-new "Create Schedule" "Update Schedule"))
-        (widget-insert "  ")
-        (widget-create 'push-button
-                       :notify (lambda (&rest _) (quit-window t))
-                       "Cancel")
-        (widget-insert "\n")
-        ;; Store widgets for submit handler
-        (setq-local sql-datum--schedule-widgets widgets)
-        (setq-local sql-datum--admin-sqli-buf sqli-buf))
-      (use-local-map (sql-datum--widget-keymap))
-      (widget-setup)
-      (goto-char (point-min)))
-    (switch-to-buffer buf)))
 
-(defun sql-datum--admin-format-time (time-int)
-  "Format TIME-INT (integer HHMMSS) as a string."
-  (format "%06d" (if (numberp time-int) time-int 0)))
 
-(defun sql-datum--admin-schedule-submit (widgets schedule sqli-buf job-name is-new)
-  "Submit the schedule form with WIDGETS data.
-SCHEDULE is the original schedule data, SQLI-BUF the connection buffer,
-JOB-NAME the parent job, IS-NEW non-nil for creating a new schedule."
-  (let* ((get-val (lambda (key)
-                    (let ((w (alist-get key widgets)))
-                      (when w (widget-value w)))))
-         (data `((name . ,(string-trim (funcall get-val 'name)))
-                 (enabled . ,(if (funcall get-val 'enabled) 1 0))
-                 (freq_type . ,(funcall get-val 'freq_type))
-                 (freq_interval . ,(string-to-number
-                                    (funcall get-val 'freq_interval)))
-                 (freq_subday_type . ,(funcall get-val 'freq_subday_type))
-                 (freq_subday_interval . ,(string-to-number
-                                           (funcall get-val 'freq_subday_interval)))
-                 (freq_relative_interval . ,(or (alist-get 'freq_relative_interval schedule) 0))
-                 (freq_recurrence_factor . ,(or (alist-get 'freq_recurrence_factor schedule) 0))
-                 (active_start_date . ,(string-to-number
-                                        (funcall get-val 'active_start_date)))
-                 (active_end_date . ,(string-to-number
-                                      (funcall get-val 'active_end_date)))
-                 (active_start_time . ,(string-to-number
-                                        (funcall get-val 'active_start_time)))
-                 (active_end_time . ,(string-to-number
-                                      (funcall get-val 'active_end_time))))))
-    ;; Validate
-    (when (string-empty-p (alist-get 'name data))
-      (user-error "Schedule name cannot be empty"))
-    (let ((json-str (json-serialize data)))
-      (if is-new
-          (sql-datum--admin-send-command-to
-           sqli-buf
-           (format ":admin-action jobs new-schedule %s %s" job-name json-str))
-        ;; Include schedule_id for update
-        (push (cons 'schedule_id (alist-get 'schedule_id schedule)) data)
-        (let ((json-str-with-id (json-serialize data)))
-          (sql-datum--admin-send-command-to
-           sqli-buf
-           (format ":admin-action jobs update-schedule %s" json-str-with-id)))))
-    (quit-window t)
-    (message "datum admin: schedule %s" (if is-new "created" "updated"))))
 
 ;; --- Step editor (widget-based form) ---
 
@@ -3228,20 +3025,7 @@ widget order."
   (interactive)
   (sql-datum--form-line-move -1))
 
-(defvar sql-datum--widget-keymap nil
-  "`widget-keymap' with SPC toggling a checkbox.")
 
-(defun sql-datum--widget-keymap ()
-  "Return `widget-keymap' with SPC toggling a checkbox.
-The schedule and step editors predate the generic form renderer, but
-their Enabled boxes should answer to the same key as its boxes do."
-  (require 'wid-edit)
-  (or sql-datum--widget-keymap
-      (setq sql-datum--widget-keymap
-            (let ((map (make-sparse-keymap)))
-              (set-keymap-parent map widget-keymap)
-              (define-key map (kbd "SPC") #'sql-datum-form-toggle)
-              map))))
 
 (defun sql-datum--form-make-keymap (parent)
   "Return a keymap with the wizard form bindings layered over PARENT."

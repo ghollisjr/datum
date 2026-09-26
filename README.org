@@ -923,8 +923,10 @@ executing, last run result and next run time.  Executing jobs sort first.
 | =e= | Enable/disable toggle                 |
 
 In the detail view, =E=, =N= and =D= act on whichever section point is
-in — editing a step opens the step editor, editing a schedule opens the
-schedule editor.  In the list they act on the job itself: its name,
+in — editing a step opens the step form, editing a schedule opens the
+schedule form.  Both are the same wizard form the other panels use, so
+they navigate the same way: arrow keys between fields, =TAB= to
+complete or move on, =C-c C-c= to submit.  In the list they act on the job itself: its name,
 whether it is enabled, its description, owner and category, and what it
 writes to the event log, who it emails, and whether it deletes itself
 once it has run — the General and Notifications pages of SSMS's job
