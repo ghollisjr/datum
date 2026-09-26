@@ -177,8 +177,12 @@ def step_options(cursor, current=None):
          "default": current.get("retry_attempts", 0)},
         {"key": "retry_interval", "label": "Retry Interval (minutes)",
          "type": "int", "default": current.get("retry_interval", 0)},
+        # A new step is appended, so it is the last one, and "go to the
+        # next step" would point at nothing -- which the server accepts
+        # and then fails on at run time.  So a new step quits, and a
+        # chain is made by saying so on the step before it.
         {"key": "on_success_action", "label": "On Success", "type": "choice",
-         "default": str(current.get("on_success_action", 3)),
+         "default": str(current.get("on_success_action", 1)),
          "choices": [[str(k), v] for k, v in STEP_ACTIONS.items()]},
         {"key": "on_success_step_id", "label": "On Success, Go To Step",
          "type": "int", "default": current.get("on_success_step_id", 0),
@@ -207,3 +211,103 @@ def coerce_step(opts):
     if not str(out.get("step_name") or "").strip():
         raise ValueError("a step needs a name")
     return out
+
+
+# Step actions that send the job somewhere else: 3 is the next step, 4
+# is a named one.  Both can point at a step that is not there.
+_GO_TO_NEXT = 3
+_GO_TO_STEP = 4
+
+
+def _existing_step_ids(cursor, job_name):
+    cursor.execute("""
+        SELECT s.step_id FROM msdb.dbo.sysjobsteps s
+        JOIN msdb.dbo.sysjobs j ON j.job_id = s.job_id
+        WHERE j.name = ? ORDER BY s.step_id
+    """, [job_name])
+    return [int(row[0]) for row in cursor.fetchall()]
+
+
+def validate_flow(cursor, job_name, opts, creating):
+    """Refuse a step whose flow points at a step that is not there.
+
+    A last step told to go to the next one has nowhere to go, and the
+    job fails at run time with nothing to say about why -- the server
+    accepts the step happily and only complains when it runs.  Going to
+    a step by number has the same problem when the number is not there.
+    """
+    ids = _existing_step_ids(cursor, job_name)
+    if creating:
+        # Appended, so it becomes the last step.
+        step_id = (max(ids) + 1) if ids else 1
+        ids = ids + [step_id]
+    else:
+        try:
+            step_id = int(opts.get("step_id"))
+        except (TypeError, ValueError):
+            raise ValueError("the form did not say which step to change")
+    last = max(ids) if ids else step_id
+
+    for key, target_key, when in (
+            ("on_success_action", "on_success_step_id", "succeeds"),
+            ("on_fail_action", "on_fail_step_id", "fails")):
+        action = opts.get(key)
+        if action is None:
+            continue
+        action = int(action)
+        if action == _GO_TO_NEXT and step_id >= last:
+            raise ValueError(
+                f"Step {step_id} is the last step, so \"go to the next "
+                f"step\" when it {when} has nowhere to go — the job would "
+                f"fail at run time. Use \"quit with success\" or \"quit "
+                f"with failure\" instead, or add the step it should go to "
+                f"first.")
+        if action == _GO_TO_STEP:
+            try:
+                target = int(opts.get(target_key) or 0)
+            except (TypeError, ValueError):
+                raise ValueError(f"{target_key} must be a number")
+            if target not in ids:
+                known = ", ".join(str(i) for i in ids) or "none"
+                raise ValueError(
+                    f"Step {step_id} is told to go to step {target} when it "
+                    f"{when}, and there is no such step. This job has: "
+                    f"{known}.")
+
+
+def flow_problems(cursor, job_name):
+    """Return what is wrong with a job's step flow, in plain words.
+
+    Says it for a job that already has the fault, which the server will
+    not mention until the job runs and fails.
+    """
+    cursor.execute("""
+        SELECT s.step_id, CAST(s.step_name AS NVARCHAR(128)),
+               s.on_success_action, s.on_success_step_id,
+               s.on_fail_action, s.on_fail_step_id
+        FROM msdb.dbo.sysjobsteps s
+        JOIN msdb.dbo.sysjobs j ON j.job_id = s.job_id
+        WHERE j.name = ? ORDER BY s.step_id
+    """, [job_name])
+    rows = cursor.fetchall()
+    if not rows:
+        return []
+    ids = [int(r[0]) for r in rows]
+    last = max(ids)
+    problems = []
+    for step_id, name, ok_action, ok_step, fail_action, fail_step in rows:
+        step_id = int(step_id)
+        for action, target, when in ((int(ok_action or 0), int(ok_step or 0),
+                                      "succeeds"),
+                                     (int(fail_action or 0), int(fail_step or 0),
+                                      "fails")):
+            if action == _GO_TO_NEXT and step_id >= last:
+                problems.append(
+                    f"Step {step_id} ({name}) goes to the next step when it "
+                    f"{when}, but it is the last step — the job will fail "
+                    f"there.")
+            elif action == _GO_TO_STEP and target not in ids:
+                problems.append(
+                    f"Step {step_id} ({name}) goes to step {target} when it "
+                    f"{when}, and there is no such step.")
+    return problems

@@ -249,6 +249,12 @@ A new job is given the local server to run on, which =sp_add_job= alone
 does not do.  Editing the name renames the job, keeping its steps and
 history.
 
+A step's flow is checked before saving: the last step cannot *go to the
+next step*, because there is none and the job would fail when it runs.
+So a new step defaults to *quit with success*; make a chain by setting
+*go to the next step* on the earlier ones.  A job that already has the
+fault says so under its title.
+
 ** Schema panel
 
 | Key | Action                |

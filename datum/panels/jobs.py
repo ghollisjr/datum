@@ -278,6 +278,9 @@ def _step_action(cursor, action_name, args):
         if not job_name:
             envelope.error(f"{action_name} did not say which job")
             return
+        # Checked here rather than left to fail when the job runs.
+        steps.validate_flow(cursor, job_name, opts,
+                            creating=action_name == "create-step")
         if action_name == "update-step":
             steps.update_step(cursor, job_name, opts)
             envelope.info(f"Updated step: {opts.get('step_name', '?')}")
@@ -501,6 +504,8 @@ def _job_detail(cursor, job_name):
     # job is where its steps are, so the two should not be down
     # different paths.
     from . import jobdefs
+    from . import steps as steps_module
+    flow = steps_module.flow_problems(cursor, job_name)
     properties = jobdefs.get_job(cursor, job_name) or {}
     when = dict(jobdefs.WHEN)
     job_rows = [
@@ -560,7 +565,9 @@ def _job_detail(cursor, job_name):
         "rows": step_rows,
         "row_id": None,
         "actions": [],
-        "info": f"Job: {job_name}",
+        # A flow that points nowhere is only reported by the server when
+        # the job runs, so it is said here instead.
+        "info": "  ".join([f"Job: {job_name}"] + flow),
         "parent_panel": "jobs",
         "context": {"job_name": job_name},
     }

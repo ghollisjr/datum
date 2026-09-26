@@ -404,7 +404,10 @@ class TestStepsUseTheGenericForm:
             {"job_name": JOB, "step_id": "1", "step_name": "renamed",
              "subsystem": "TSQL", "database_name": "master",
              "command": "SELECT 2", "retry_attempts": "7",
-             "retry_interval": "1", "on_success_action": "3",
+             "retry_interval": "1",
+             # Quits, because it is the only step: "go to the next step"
+             # here is what this panel now refuses.
+             "on_success_action": "1",
              "on_success_step_id": "0", "on_fail_action": "2",
              "on_fail_step_id": "0"})])
         assert "error" not in [k for k, _ in captured], captured
@@ -643,7 +646,7 @@ class TestAJobIsOneTree:
             {"job_name": JOB, "step_name": "extract", "subsystem": "TSQL",
              "database_name": "master", "command": "SELECT 1",
              "retry_attempts": "0", "retry_interval": "0",
-             "on_success_action": "3", "on_success_step_id": "0",
+             "on_success_action": "1", "on_success_step_id": "0",
              "on_fail_action": "2", "on_fail_step_id": "0"})])
         jobs.run_action(cursor, driver, "create-schedule", [_payload(
             {"job_name": JOB, "name": "nightly", "enabled": True,
@@ -741,3 +744,157 @@ class TestAJobIsOneTree:
         panel = [a[0] for k, a in captured if k == "admin_panel"][0]
         job = next(s for s in panel["sections"] if s["title"] == "Job")
         assert dict(job["rows"])["Name"] == JOB
+
+
+class TestStepFlowIsChecked:
+    """A step whose flow points nowhere fails when the job runs, and the
+    server says nothing about it when the step is saved."""
+
+    BASE = {"subsystem": "TSQL", "database_name": "master",
+            "command": "SELECT 1", "retry_attempts": "0",
+            "retry_interval": "0", "on_success_step_id": "0",
+            "on_fail_action": "2", "on_fail_step_id": "0"}
+
+    def _job(self, cursor, driver):
+        from datum.panels import jobs
+        jobs.run_action(cursor, driver, "create-job", [_payload(
+            {"name": JOB, "enabled": True, "description": "",
+             "owner": "sa", "category": "[Uncategorized (Local)]",
+             "notify_eventlog": "0", "notify_email": "0",
+             "delete_level": "0"})])
+
+    def _step(self, cursor, driver, name, **extra):
+        from datum.panels import jobs
+        opts = dict(self.BASE, job_name=JOB, step_name=name,
+                    on_success_action="1")
+        opts.update(extra)
+        jobs.run_action(cursor, driver, "create-step", [_payload(opts)])
+
+    def test_a_new_step_does_not_default_to_going_nowhere(self, agent):
+        from datum.panels import steps
+
+        cursor, _driver = agent
+        # A new step is appended, so it is the last one -- and "go to the
+        # next step" on the last step is what made a one-step job fail.
+        field = next(f for f in steps.step_options(cursor)
+                     if f["key"] == "on_success_action")
+        assert field["default"] == "1", "a new step should quit, not continue"
+
+    def test_the_first_step_cannot_continue_into_nothing(self, agent,
+                                                         captured):
+        cursor, driver = agent
+        self._job(cursor, driver)
+        captured.clear()
+        self._step(cursor, driver, "only", on_success_action="3")
+        assert [k for k, _ in captured] == ["error"], captured
+        said = captured[0][1][0]
+        assert "last step" in said
+        # And says what to do instead.
+        assert "quit with success" in said
+
+    def test_the_same_on_failure(self, agent, captured):
+        cursor, driver = agent
+        self._job(cursor, driver)
+        captured.clear()
+        self._step(cursor, driver, "only", on_fail_action="3")
+        assert [k for k, _ in captured] == ["error"], captured
+        assert "fails" in captured[0][1][0]
+
+    def test_a_chain_can_still_be_built_in_the_natural_order(self, agent,
+                                                             captured):
+        from datum.panels import jobs, steps
+
+        cursor, driver = agent
+        self._job(cursor, driver)
+        self._step(cursor, driver, "a")
+        self._step(cursor, driver, "b")
+        captured.clear()
+        # Step 1 may continue now that there is something after it.
+        jobs.run_action(cursor, driver, "update-step", [_payload(
+            dict(self.BASE, job_name=JOB, step_id="1", step_name="a",
+                 on_success_action="3"))])
+        assert "error" not in [k for k, _ in captured], captured
+        assert steps.get_step(cursor, JOB, 1)["on_success_action"] == 3
+
+    def test_the_last_step_of_a_chain_still_cannot(self, agent, captured):
+        from datum.panels import jobs
+
+        cursor, driver = agent
+        self._job(cursor, driver)
+        self._step(cursor, driver, "a")
+        self._step(cursor, driver, "b")
+        captured.clear()
+        jobs.run_action(cursor, driver, "update-step", [_payload(
+            dict(self.BASE, job_name=JOB, step_id="2", step_name="b",
+                 on_success_action="3"))])
+        assert [k for k, _ in captured] == ["error"], captured
+
+    def test_going_to_a_step_that_is_not_there(self, agent, captured):
+        from datum.panels import jobs
+
+        cursor, driver = agent
+        self._job(cursor, driver)
+        self._step(cursor, driver, "a")
+        captured.clear()
+        jobs.run_action(cursor, driver, "update-step", [_payload(
+            dict(self.BASE, job_name=JOB, step_id="1", step_name="a",
+                 on_success_action="4", on_success_step_id="9"))])
+        assert [k for k, _ in captured] == ["error"], captured
+        said = captured[0][1][0]
+        assert "no such step" in said
+        # And says which ones there are.
+        assert "This job has: 1" in said
+
+    def test_going_to_a_step_that_is_there(self, agent, captured):
+        from datum.panels import jobs
+
+        cursor, driver = agent
+        self._job(cursor, driver)
+        self._step(cursor, driver, "a")
+        self._step(cursor, driver, "b")
+        captured.clear()
+        jobs.run_action(cursor, driver, "update-step", [_payload(
+            dict(self.BASE, job_name=JOB, step_id="1", step_name="a",
+                 on_success_action="4", on_success_step_id="2"))])
+        assert "error" not in [k for k, _ in captured], captured
+
+    def test_quitting_is_always_allowed(self, agent, captured):
+        cursor, driver = agent
+        self._job(cursor, driver)
+        for action in ("1", "2"):
+            captured.clear()
+            self._step(cursor, driver, f"step{action}",
+                       on_success_action=action)
+            assert "error" not in [k for k, _ in captured], captured
+
+    def test_a_job_that_already_has_the_fault_is_told_about_it(self, agent,
+                                                              captured):
+        from datum.panels import jobs
+
+        cursor, driver = agent
+        self._job(cursor, driver)
+        # Made behind our own back, as SSMS or a script would.
+        cursor.execute(
+            "EXEC msdb.dbo.sp_add_jobstep @job_name = ?, @step_name = ?, "
+            "@subsystem = N'TSQL', @command = N'SELECT 1', "
+            "@database_name = N'master', @on_success_action = 3, "
+            "@on_fail_action = 2", [JOB, "only step"])
+        captured.clear()
+        jobs.run_action(cursor, driver, "detail", [JOB])
+        panel = [a[0] for k, a in captured if k == "admin_panel"][0]
+        assert "last step" in panel["info"], panel["info"]
+
+    def test_a_sound_job_is_not_nagged(self, agent, captured):
+        from datum.panels import jobs
+
+        cursor, driver = agent
+        self._job(cursor, driver)
+        self._step(cursor, driver, "a")
+        self._step(cursor, driver, "b")
+        jobs.run_action(cursor, driver, "update-step", [_payload(
+            dict(self.BASE, job_name=JOB, step_id="1", step_name="a",
+                 on_success_action="3"))])
+        captured.clear()
+        jobs.run_action(cursor, driver, "detail", [JOB])
+        panel = [a[0] for k, a in captured if k == "admin_panel"][0]
+        assert panel["info"] == f"Job: {JOB}", panel["info"]

@@ -941,6 +941,22 @@ Steps and schedules are not on that form: they are lists rather than
 properties, and the detail view already edits them.  So a new job is
 made first and filled in after, with =d= and then =N=.
 
+Where a step's flow points is checked before it is saved.  A step told
+to go to the next step when it is the last step has nowhere to go, and
+SQL Server accepts that happily and then fails the job when it runs,
+saying nothing about the cause — so this refuses it and says what to
+use instead.  Going to a step by number is checked the same way, and the
+message lists the steps the job actually has.
+
+For the same reason a new step defaults to *quit with success* rather
+than *go to the next step*: a new step is appended, so it is the last
+one, and the other default would be wrong every time.  A chain is made
+by adding the steps and then saying *go to the next step* on the ones
+before the last.
+
+A job that already has the fault — made by SSMS, or a script — says so
+in the line under its title, rather than waiting until it next runs.
+
 A new job is also given the local server to run on.  =sp_add_job= alone
 leaves a job with no target server, which SQL Server accepts and then
 never runs — SSMS adds it for you, and so does this.
