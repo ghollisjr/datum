@@ -58,7 +58,7 @@ def run_action(cursor, driver, action_name, args):
         _handle_schedule_action(cursor, action_name, args)
         return
 
-    if action_name in ("edit-step", "update-step",
+    if action_name in ("edit-step", "update-step", "create-step",
                         "new-step", "delete-step"):
         _handle_step_action(cursor, action_name, args)
         return
@@ -177,24 +177,60 @@ def _handle_step_action(cursor, action_name, args):
     from .. import envelope
     from . import steps
 
-    if action_name == "edit-step":
-        # args: [step_id, job_name...]
-        if len(args) < 2:
-            envelope.error("edit-step requires step_id and job_name")
+    try:
+        _step_action(cursor, action_name, args)
+    except ValueError as err:
+        envelope.error(f":admin jobs {action_name} — {err}")
+    except Exception as err:
+        envelope.error(f":admin jobs {action_name} — {_job_error(err)}")
+
+
+def _step_action(cursor, action_name, args):
+    """Do the work, with errors reported by the caller."""
+    from .. import envelope
+    from . import steps
+
+    if action_name in ("edit-step", "new-step"):
+        # The generic form, rather than a renderer of its own: that is
+        # where the field navigation, the completion and the payload
+        # chunking live.  A step's command is long enough that sending
+        # it on the command line was losing the end of it.
+        editing = action_name == "edit-step"
+        if editing:
+            if len(args) < 2:
+                envelope.error("edit-step requires step_id and job_name")
+                return
+            step_id = args[0]
+            job_name = " ".join(args[1:])
+            current = steps.get_step(cursor, job_name, step_id)
+            if not current:
+                envelope.error(f"Step not found: {step_id}")
+                return
+        else:
+            job_name = " ".join(args)
+            step_id = None
+            current = None
+        if not job_name:
+            envelope.error(f"{action_name} requires a job name")
             return
-        step_id = args[0]
-        job_name = " ".join(args[1:])
-        step = steps.get_step(cursor, job_name, step_id)
-        if not step:
-            envelope.error(f"Step not found: {step_id}")
-            return
+
+        values = dict(current or {})
+        values["job_name"] = job_name
+        if editing:
+            values["step_id"] = current.get("step_id")
         envelope.admin_panel({
             "panel": "jobs",
-            "sub_panel": "step-edit",
-            "title": f"Edit Step: {step['step_name']}",
-            "step": step,
-            "subsystems": steps.SUBSYSTEMS,
-            "step_actions": steps.STEP_ACTIONS,
+            "sub_panel": "form",
+            "title": (f"Step: {current['step_name']}" if editing
+                      else f"New Step in {job_name}"),
+            "form": {
+                "fields": [{k: v for k, v in field.items() if v is not None}
+                           for field in steps.step_options(cursor, current)],
+                "values": values,
+                "submit_action": "update-step" if editing else "create-step",
+                "submit_label": "Save Step" if editing else "Create Step",
+                "notes": [f"Step of job {job_name}."],
+            },
             "headers": [],
             "rows": [],
             "row_id": None,
@@ -203,33 +239,20 @@ def _handle_step_action(cursor, action_name, args):
             "context": {"job_name": job_name},
         })
 
-    elif action_name == "update-step":
-        # args: [json-encoded step data]
-        if len(args) < 2:
-            envelope.error("update-step requires job_name and step data")
+    elif action_name in ("update-step", "create-step"):
+        opts = steps.coerce_step(_decode_job_payload(args))
+        job_name = (opts.get("job_name") or "").strip()
+        if not job_name:
+            envelope.error(f"{action_name} did not say which job")
             return
-        job_name = args[0]
-        try:
-            step_data = json.loads(args[1])
-        except json.JSONDecodeError as e:
-            envelope.error(f"Invalid step JSON: {e}")
-            return
-        steps.update_step(cursor, job_name, step_data)
-        envelope.info(f"Updated step: {step_data.get('step_name', '?')}")
-
-    elif action_name == "new-step":
-        # args: [job_name, json-encoded step data]
-        if len(args) < 2:
-            envelope.error("new-step requires job_name and step data")
-            return
-        job_name = args[0]
-        try:
-            step_data = json.loads(args[1])
-        except json.JSONDecodeError as e:
-            envelope.error(f"Invalid step JSON: {e}")
-            return
-        steps.create_step(cursor, job_name, step_data)
-        envelope.info(f"Created step: {step_data.get('step_name', '?')}")
+        if action_name == "update-step":
+            steps.update_step(cursor, job_name, opts)
+            envelope.info(f"Updated step: {opts.get('step_name', '?')}")
+        else:
+            steps.create_step(cursor, job_name, opts)
+            envelope.info(f"Created step: {opts.get('step_name', '?')}")
+        cursor.connection.commit()
+        _refresh_detail(cursor, job_name)
 
     elif action_name == "delete-step":
         # args: [step_id, job_name...]
@@ -675,5 +698,15 @@ def _refresh_jobs(cursor):
 
     try:
         envelope.admin_panel(_job_list(cursor))
+    except Exception:
+        pass
+
+
+def _refresh_detail(cursor, job_name):
+    """Re-send the job detail so the steps shown reflect the change."""
+    from .. import envelope
+
+    try:
+        envelope.admin_panel(_job_detail(cursor, job_name))
     except Exception:
         pass

@@ -289,3 +289,177 @@ class TestOtherDialects:
         jobs.run_action(None, driver, "new-job", [])
         assert [k for k, _ in captured] == ["error"], captured
         assert "MSSQL" in captured[0][1][0]
+
+
+class TestStepsUseTheGenericForm:
+    """The step editor had a renderer of its own, which meant it had
+    none of the navigation the other wizards had grown, sent the step
+    on the command line where a long command was truncated, and built
+    its blank form in the client where the databases were not known."""
+
+    def _job(self, cursor, driver):
+        from datum.panels import jobs
+        jobs.run_action(cursor, driver, "create-job", [_payload(
+            {"name": JOB, "enabled": True, "description": "",
+             "owner": "sa", "category": "[Uncategorized (Local)]",
+             "notify_eventlog": "0", "notify_email": "0",
+             "delete_level": "0"})])
+
+    def test_the_new_step_form_comes_from_the_server(self, agent, captured):
+        from datum.panels import jobs
+
+        cursor, driver = agent
+        self._job(cursor, driver)
+        captured.clear()
+        jobs.run_action(cursor, driver, "new-step", [JOB])
+        panel = [a[0] for k, a in captured if k == "admin_panel"][0]
+        # The generic form, so it inherits the navigation rather than
+        # needing a renderer of its own.
+        assert panel["sub_panel"] == "form"
+        assert panel["form"]["submit_action"] == "create-step"
+        keys = [f["key"] for f in panel["form"]["fields"]]
+        for expected in ("step_name", "subsystem", "database_name",
+                         "command", "retry_attempts", "on_success_action"):
+            assert expected in keys, keys
+        # And the databases come from the server, which the client had
+        # no way to know when it built this form itself.
+        database = next(f for f in panel["form"]["fields"]
+                        if f["key"] == "database_name")
+        assert database["type"] == "completing"
+        assert "master" in database["completions"]
+
+    def test_a_long_command_survives(self, agent, captured):
+        from datum.panels import jobs, steps
+
+        cursor, driver = agent
+        self._job(cursor, driver)
+        # Sent on the command line, this was cut off by the pty at 4095
+        # bytes -- and a step's command is the one field that is long.
+        command = "-- a realistic body\n" + ("SELECT 1;\n" * 900)
+        assert len(command) > 8000
+        captured.clear()
+        jobs.run_action(cursor, driver, "create-step", [_payload(
+            {"job_name": JOB, "step_name": "big", "subsystem": "TSQL",
+             "database_name": "master", "command": command,
+             "retry_attempts": "0", "retry_interval": "0",
+             "on_success_action": "1", "on_success_step_id": "0",
+             "on_fail_action": "2", "on_fail_step_id": "0"})])
+        assert "error" not in [k for k, _ in captured], captured
+        stored = steps.get_step(cursor, JOB, 1)
+        assert len(stored["command"]) == len(command)
+
+    def test_the_edit_form_opens_with_the_step(self, agent, captured):
+        from datum.panels import jobs
+
+        cursor, driver = agent
+        self._job(cursor, driver)
+        jobs.run_action(cursor, driver, "create-step", [_payload(
+            {"job_name": JOB, "step_name": "first", "subsystem": "TSQL",
+             "database_name": "master", "command": "SELECT 1",
+             "retry_attempts": "3", "retry_interval": "0",
+             "on_success_action": "1", "on_success_step_id": "0",
+             "on_fail_action": "2", "on_fail_step_id": "0"})])
+        captured.clear()
+        jobs.run_action(cursor, driver, "edit-step", ["1", JOB])
+        form = [a[0] for k, a in captured if k == "admin_panel"][0]["form"]
+        assert form["submit_action"] == "update-step"
+        assert form["values"]["step_name"] == "first"
+        assert form["values"]["retry_attempts"] == 3
+        # Which job and which step, so the submit knows what to change.
+        assert form["values"]["job_name"] == JOB
+        assert form["values"]["step_id"] == 1
+
+    def test_a_step_is_changed(self, agent, captured):
+        from datum.panels import jobs, steps
+
+        cursor, driver = agent
+        self._job(cursor, driver)
+        jobs.run_action(cursor, driver, "create-step", [_payload(
+            {"job_name": JOB, "step_name": "first", "subsystem": "TSQL",
+             "database_name": "master", "command": "SELECT 1",
+             "retry_attempts": "0", "retry_interval": "0",
+             "on_success_action": "1", "on_success_step_id": "0",
+             "on_fail_action": "2", "on_fail_step_id": "0"})])
+        captured.clear()
+        jobs.run_action(cursor, driver, "update-step", [_payload(
+            {"job_name": JOB, "step_id": "1", "step_name": "renamed",
+             "subsystem": "TSQL", "database_name": "master",
+             "command": "SELECT 2", "retry_attempts": "7",
+             "retry_interval": "1", "on_success_action": "3",
+             "on_success_step_id": "0", "on_fail_action": "2",
+             "on_fail_step_id": "0"})])
+        assert "error" not in [k for k, _ in captured], captured
+        step = steps.get_step(cursor, JOB, 1)
+        assert step["step_name"] == "renamed"
+        assert step["command"] == "SELECT 2"
+        assert step["retry_attempts"] == 7
+
+    def test_the_detail_view_is_refreshed(self, agent, captured):
+        from datum.panels import jobs
+
+        cursor, driver = agent
+        self._job(cursor, driver)
+        captured.clear()
+        jobs.run_action(cursor, driver, "create-step", [_payload(
+            {"job_name": JOB, "step_name": "s", "subsystem": "TSQL",
+             "database_name": "master", "command": "SELECT 1",
+             "retry_attempts": "0", "retry_interval": "0",
+             "on_success_action": "1", "on_success_step_id": "0",
+             "on_fail_action": "2", "on_fail_step_id": "0"})])
+        panels = [a[0] for k, a in captured if k == "admin_panel"]
+        assert panels and panels[-1].get("sub_panel") == "detail"
+
+    def test_a_number_that_is_not_one_is_refused(self, agent, captured):
+        from datum.panels import jobs
+
+        cursor, driver = agent
+        self._job(cursor, driver)
+        captured.clear()
+        jobs.run_action(cursor, driver, "create-step", [_payload(
+            {"job_name": JOB, "step_name": "x", "retry_attempts": "soon"})])
+        assert [k for k, _ in captured] == ["error"], captured
+        assert "must be a number" in captured[0][1][0]
+
+    def test_a_step_needs_a_name(self, agent, captured):
+        from datum.panels import jobs
+
+        cursor, driver = agent
+        self._job(cursor, driver)
+        captured.clear()
+        jobs.run_action(cursor, driver, "create-step",
+                        [_payload({"job_name": JOB, "step_name": "   "})])
+        assert [k for k, _ in captured] == ["error"], captured
+
+    def test_a_job_name_with_a_space_still_works(self, agent, captured):
+        from datum.panels import jobs, steps
+
+        cursor, driver = agent
+        spaced = "datum job pytest spaced"
+        try:
+            cursor.execute("EXEC msdb.dbo.sp_delete_job @job_name = ?",
+                           [spaced])
+        except Exception:
+            pass
+        jobs.run_action(cursor, driver, "create-job", [_payload(
+            {"name": spaced, "enabled": True, "description": "",
+             "owner": "sa", "category": "[Uncategorized (Local)]",
+             "notify_eventlog": "0", "notify_email": "0",
+             "delete_level": "0"})])
+        captured.clear()
+        try:
+            # The job name used to be interpolated into the command line,
+            # where the first word was taken as the whole name.
+            jobs.run_action(cursor, driver, "create-step", [_payload(
+                {"job_name": spaced, "step_name": "s", "subsystem": "TSQL",
+                 "database_name": "master", "command": "SELECT 1",
+                 "retry_attempts": "0", "retry_interval": "0",
+                 "on_success_action": "1", "on_success_step_id": "0",
+                 "on_fail_action": "2", "on_fail_step_id": "0"})])
+            assert "error" not in [k for k, _ in captured], captured
+            assert steps.get_step(cursor, spaced, 1)["step_name"] == "s"
+        finally:
+            try:
+                cursor.execute("EXEC msdb.dbo.sp_delete_job @job_name = ?",
+                               [spaced])
+            except Exception:
+                pass

@@ -142,3 +142,68 @@ def delete_step(cursor, job_name, step_id):
         [job_name, int(step_id)]
     )
     cursor.connection.commit()
+
+
+def step_options(cursor, current=None):
+    """Field descriptors for a job step.
+
+    The same shape every other wizard uses, so the step editor gets the
+    navigation, the completion and the payload chunking the generic form
+    already has, instead of a bespoke renderer of its own.
+    """
+    current = current or {}
+    try:
+        cursor.execute("SELECT name FROM sys.databases WHERE state = 0 "
+                       "ORDER BY name")
+        databases = [row[0] for row in cursor.fetchall()]
+    except Exception:
+        databases = []
+    return [
+        {"key": "step_name", "label": "Step Name", "type": "string",
+         "size": 40, "default": current.get("step_name", ""),
+         "required": True},
+        {"key": "subsystem", "label": "Type", "type": "choice",
+         "default": current.get("subsystem", "TSQL"),
+         "choices": [[k, v] for k, v in SUBSYSTEMS.items()]},
+        {"key": "database_name", "label": "Database",
+         "type": "completing" if databases else "string",
+         "default": current.get("database_name") or "master",
+         "completions": databases or None,
+         "help": "for a T-SQL step"},
+        {"key": "command", "label": "Command", "type": "text",
+         "default": current.get("command", ""),
+         "help": "the script this step runs"},
+        {"key": "retry_attempts", "label": "Retry Attempts", "type": "int",
+         "default": current.get("retry_attempts", 0)},
+        {"key": "retry_interval", "label": "Retry Interval (minutes)",
+         "type": "int", "default": current.get("retry_interval", 0)},
+        {"key": "on_success_action", "label": "On Success", "type": "choice",
+         "default": str(current.get("on_success_action", 3)),
+         "choices": [[str(k), v] for k, v in STEP_ACTIONS.items()]},
+        {"key": "on_success_step_id", "label": "On Success, Go To Step",
+         "type": "int", "default": current.get("on_success_step_id", 0),
+         "help": "only for \"Go to step...\""},
+        {"key": "on_fail_action", "label": "On Failure", "type": "choice",
+         "default": str(current.get("on_fail_action", 2)),
+         "choices": [[str(k), v] for k, v in STEP_ACTIONS.items()]},
+        {"key": "on_fail_step_id", "label": "On Failure, Go To Step",
+         "type": "int", "default": current.get("on_fail_step_id", 0),
+         "help": "only for \"Go to step...\""},
+    ]
+
+
+def coerce_step(opts):
+    """Return OPTS with the numbers as numbers, whatever the form sent."""
+    out = dict(opts)
+    for key in ("retry_attempts", "retry_interval", "on_success_action",
+                "on_success_step_id", "on_fail_action", "on_fail_step_id",
+                "step_id"):
+        if key in out and out[key] not in (None, ""):
+            try:
+                out[key] = int(str(out[key]).strip())
+            except (TypeError, ValueError):
+                raise ValueError(f"{key} must be a number "
+                                 f"(got {out[key]!r})")
+    if not str(out.get("step_name") or "").strip():
+        raise ValueError("a step needs a name")
+    return out
