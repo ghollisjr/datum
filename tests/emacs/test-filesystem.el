@@ -233,6 +233,114 @@
                            (equal names (sort (copy-sequence names)
                                               #'string<))))))
 
+
+(message "\n=== it looks like dired ===")
+
+(require 'dired)
+
+(with-current-buffer (test-fs--panel)
+  (test-fs-assert "the directory line wears dired's header face"
+                  (progn (goto-char (point-min))
+                         (eq (get-text-property (point) 'face)
+                             'dired-header)))
+  ;; The cue people read a listing by is the face on the name, and it
+  ;; should be the face dired uses rather than one invented here.
+  (test-fs-assert "a directory name wears dired-directory"
+                  (progn (test-fs--goto "..")
+                         (eq (get-text-property
+                              (+ (line-beginning-position)
+                                 (alist-get 1 sql-datum--admin-col-positions))
+                              'face)
+                             'dired-directory)))
+  (test-fs-assert "a file name is left unfaced, as in dired"
+                  (progn (test-fs--goto "errorlog")
+                         (null (get-text-property
+                                (+ (line-beginning-position)
+                                   (alist-get 1
+                                              sql-datum--admin-col-positions))
+                                'face))))
+  ;; A listing is read by its own conventions: "No" is a plausible file
+  ;; name, not a disabled job.
+  (test-fs-assert "status-keyword colouring does not apply here"
+                  (progn (test-fs--goto "errorlog")
+                         (null (get-text-property (line-beginning-position)
+                                                  'face)))))
+
+(with-current-buffer (test-fs--panel)
+  ;; It invites being taken for dired, which it is not: read-only, on
+  ;; another machine, and without dired's editing keys.
+  (test-fs-assert "the mode line says it is not dired"
+                  (equal mode-name "datum-fs"))
+  (test-fs-assert "and the buffer is not a dired buffer"
+                  (not (derived-mode-p 'dired-mode))))
+
+(message "\n=== dired's keys ===")
+
+(dolist (spec '(("f" sql-datum-admin-open-path)
+                ("(" sql-datum-admin-toggle-details)
+                ("s" sql-datum-admin-start-or-sort)))
+  (test-fs-assert (format "%s is bound as dired binds it" (nth 0 spec))
+                  (eq (lookup-key sql-datum--admin-mode-map (nth 0 spec))
+                      (nth 1 spec))))
+
+(with-current-buffer (test-fs--panel)
+  ;; ( leaves names only, the way dired-hide-details-mode does.
+  (test-fs-assert "details are shown to begin with"
+                  (null sql-datum--admin-hide-details))
+  (sql-datum-admin-toggle-details)
+  (test-fs-assert "( hides them"
+                  (and sql-datum--admin-hide-details
+                       (not (string-match-p
+                             "Size" (buffer-substring-no-properties
+                                     (point-min) (point-max))))))
+  (test-fs-assert "a name is still shown"
+                  (string-match-p "errorlog" (buffer-string)))
+  ;; Hiding must not lose the path navigation runs on.
+  (test-fs-assert "and the path is still there to navigate with"
+                  (progn (test-fs--goto "errorlog")
+                         (equal (sql-datum--admin-fs-row)
+                                '("file" "/var/opt/mssql/log/errorlog"))))
+  (sql-datum-admin-toggle-details)
+  (test-fs-assert "( shows them again"
+                  (and (null sql-datum--admin-hide-details)
+                       (string-match-p "Size" (buffer-string)))))
+
+(with-current-buffer (test-fs--panel)
+  ;; s cycles name -> size -> date -> name.
+  (setq sql-datum--admin-sort-column nil)
+  (sql-datum-admin-cycle-sort)
+  (test-fs-assert "s sorts by name first"
+                  (eql sql-datum--admin-sort-column 1))
+  (sql-datum-admin-cycle-sort)
+  (test-fs-assert "then by size"
+                  (eql sql-datum--admin-sort-column 2))
+  (sql-datum-admin-cycle-sort)
+  (test-fs-assert "then by date"
+                  (eql sql-datum--admin-sort-column 3))
+  (sql-datum-admin-cycle-sort)
+  (test-fs-assert "and back round to name"
+                  (eql sql-datum--admin-sort-column 1))
+  (setq sql-datum--admin-sort-column nil))
+
+;; s keeps starting jobs where that is what it means.
+(with-temp-buffer
+  (setq-local sql-datum--admin-panel-name "jobs")
+  (let (called)
+    (cl-letf (((symbol-function 'sql-datum-admin-start-job)
+               (lambda () (setq called t)))
+              ((symbol-function 'sql-datum-admin-cycle-sort)
+               (lambda () (setq called 'sorted))))
+      (sql-datum-admin-start-or-sort)
+      (test-fs-assert "s still starts a job in the jobs panel"
+                      (eq called t)))))
+
+;; Clicking a header must still sort that column when some are hidden.
+(with-current-buffer (test-fs--panel)
+  (sql-datum-admin-toggle-details)
+  (test-fs-assert "a hidden-details listing still knows its real columns"
+                  (equal (mapcar #'car sql-datum--admin-col-positions) '(1)))
+  (sql-datum-admin-toggle-details))
+
 (message "\n=== Windows drives ===")
 
 ;; A drive root's ".." leads to the drive list, which is the only top

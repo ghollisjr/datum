@@ -925,6 +925,10 @@ Set to nil to disable auto-refresh."
 (defvar-local sql-datum--admin-timer nil
   "Auto-refresh timer for this admin buffer.")
 
+(defvar-local sql-datum--admin-hide-details nil
+  "Non-nil to draw only names in a filesystem listing.
+`(\=' toggles it, as `dired-hide-details-mode\=' does in dired.")
+
 (defvar sql-datum--admin-display-request nil
   "Panel name the user has explicitly asked to see, or nil.
 
@@ -1050,6 +1054,10 @@ SQLI-BUF is the originating SQLi buffer."
          (initial (not (buffer-local-value 'sql-datum--admin-panel-name buf))))
     (when (and (equal panel "security") (null sub-panel) (eql row-id 0))
       (sql-datum--cache-principals rows sqli-buf))
+    ;; The listing borrows dired's faces, which only exist once dired
+    ;; has been loaded.
+    (when (equal panel "filesystem")
+      (require 'dired nil t))
     (with-current-buffer buf
       ;; Save cursor state before redraw.  Use the window's point if
       ;; the buffer is visible (works even when the user is in a
@@ -1072,6 +1080,15 @@ SQLI-BUF is the originating SQLi buffer."
         ;; the timer on every refresh cycle.
         (when initial
           (sql-datum--admin-mode))
+        ;; Known before anything is drawn: the rendering depends on
+        ;; which panel this is, and `initial' was settled above from
+        ;; whether it had been set at all.
+        (setq sql-datum--admin-panel-name panel)
+        ;; A directory listing invites being mistaken for dired, which
+        ;; it is not: it is read-only, it is on another machine, and
+        ;; dired's editing keys are not here.  The mode line says so.
+        (when (equal panel "filesystem")
+          (setq mode-name "datum-fs"))
         ;; Decided before the header is drawn, so the line describing
         ;; auto-refresh can report what is actually running rather than
         ;; what the setting would allow.  A panel may opt out: a
@@ -1089,7 +1106,11 @@ SQLI-BUF is the originating SQLi buffer."
               (header-lines 0))
           (erase-buffer)
           ;; Header
-          (insert (propertize title 'face 'bold) "\n")
+          (insert (propertize title 'face
+                              (if (equal panel "filesystem")
+                                  'dired-header
+                                'bold))
+                  "\n")
           (cl-incf header-lines)
           (insert (format "Last refresh: %s" (format-time-string "%H:%M:%S")))
           (if sql-datum--admin-timer
@@ -1110,7 +1131,12 @@ SQLI-BUF is the originating SQLi buffer."
           ;; Table
           (when (and headers (> (length headers) 0))
             (sql-datum--admin-insert-table
-             headers rows row-id (alist-get 'display_columns data))
+             headers rows row-id
+             (if sql-datum--admin-hide-details
+                 ;; Names only, as dired leaves when details are hidden;
+                 ;; a directory is still told apart by its face.
+                 '(1)
+               (alist-get 'display_columns data)))
             ;; +2 for header row and separator
             (cl-incf header-lines 2))
           (setq sql-datum--admin-header-line-count header-lines)
@@ -1118,8 +1144,7 @@ SQLI-BUF is the originating SQLi buffer."
           (insert "\n")
           (sql-datum--admin-insert-help-line actions))
         ;; Set buffer-local state after mode init
-        (setq sql-datum--admin-panel-name panel
-              sql-datum--admin-panel-data data
+        (setq sql-datum--admin-panel-data data
               sql-datum--admin-sqli-buf sqli-buf
               sql-datum--admin-context (alist-get 'context data))
         ;; Re-set on every redraw: the keys change with the panel.
@@ -1184,22 +1209,30 @@ _ROWS is accepted for interface consistency."
   "Insert a formatted table with HEADERS and ROWS.
 ROW-ID is the column index used as row identifier.
 
-SHOWN, when given, is how many of the leading columns to display.  The
-rest are still carried on each row — as the row id, and for `i' — but
-are not drawn.  The filesystem panel uses this to keep each entry's
-full path without showing it against every line, the way dired shows
-the directory once at the top and bare names below.  Only trailing
-columns can be dropped, so the indices of the drawn ones are unchanged
-and sorting still lines up."
-  (let* ((ncols (min (length headers) (or shown (length headers))))
-         (headers (seq-take headers ncols))
+SHOWN, when given, says which columns to draw: a count keeps that many
+leading ones, and a list of indices keeps exactly those.  The rest are
+still carried on each row — as the row id, and for `i' — but are not
+drawn.  The filesystem panel keeps each entry's full path this way
+without showing it against every line, the way dired shows the
+directory once at the top and bare names below.  Sorting stays
+correct because each drawn column remembers which column it really
+is."
+  (let* ((columns (cond
+                   ((null shown) (number-sequence 0 (1- (length headers))))
+                   ((listp shown) (seq-filter (lambda (i)
+                                                (< i (length headers)))
+                                              shown))
+                   (t (number-sequence 0 (1- (min shown (length headers)))))))
+         (ncols (length columns))
+         (all-headers headers)
+         (headers (mapcar (lambda (i) (nth i all-headers)) columns))
          ;; Calculate column widths
          (widths (make-vector ncols 0))
          (_ (dotimes (i ncols)
               (aset widths i (length (nth i headers)))))
          (_ (dolist (row rows)
-              (dotimes (i (min ncols (length row)))
-                (let ((w (length (nth i row))))
+              (dotimes (i ncols)
+                (let ((w (length (or (nth (nth i columns) row) ""))))
                   (when (> w (aref widths i))
                     (aset widths i (min w 80)))))))  ; Cap at 80
          (fmt (mapconcat (lambda (w) (format "%%-%ds" w))
@@ -1209,7 +1242,10 @@ and sorting still lines up."
          ;; Compute column start positions for click detection
          (col-starts (let ((pos 0) starts)
                        (dotimes (i ncols)
-                         (push (cons i pos) starts)
+                         ;; Keyed by the column's real index, so
+                         ;; clicking a header sorts that column even
+                         ;; when the ones before it are not drawn.
+                         (push (cons (nth i columns) pos) starts)
                          (setq pos (+ pos (aref widths i) 2)))
                        (nreverse starts))))
     ;; Store column positions as buffer-local for cell navigation
@@ -1218,7 +1254,7 @@ and sorting still lines up."
     (let ((header-start (point)))
       (insert (apply #'format fmt
                      (cl-loop for h in headers
-                              for i from 0
+                              for i in columns
                               collect (let ((indicator
                                             (cond
                                              ((not (eql i sql-datum--admin-sort-column)) "")
@@ -1237,16 +1273,16 @@ and sorting still lines up."
       (let ((row-index 0))
         (dolist (row rows)
           ;; Pad row if needed
-          (let ((padded (append row
-                                (make-list
-                                 (max 0 (- (max ncols (1+ (or row-id 0)))
-                                           (length row)))
-                                 ""))))
+          (let* ((needed (1+ (apply #'max (or row-id 0) columns)))
+                 (padded (append row
+                                 (make-list (max 0 (- needed (length row)))
+                                            ""))))
             ;; Truncate cells to their column width
             (let ((display-row
-                   (cl-loop for cell in (seq-take padded ncols)
+                   (cl-loop for column in columns
                             for i from 0
-                            collect (let ((w (aref widths i)))
+                            collect (let ((cell (or (nth column padded) ""))
+                                          (w (aref widths i)))
                                       (if (> (length cell) w)
                                           (concat (substring cell 0 (max 0 (- w 3))) "...")
                                         cell)))))
@@ -1258,10 +1294,30 @@ and sorting still lines up."
                   (put-text-property line-start (point) 'sql-datum-row-id id-val))
                 (put-text-property line-start (point) 'sql-datum-row-index row-index)
                 (put-text-property line-start (point) 'sql-datum-row-data padded)
-                ;; Color-code status columns
-                (sql-datum--admin-colorize-row line-start (point) padded)
+                ;; Color-code status columns.  A directory listing is
+                ;; read by its own conventions, so it is faced the way
+                ;; dired faces one rather than by status keyword — "No"
+                ;; is a plausible file name, not a disabled job.
+                (if (equal sql-datum--admin-panel-name "filesystem")
+                    (sql-datum--admin-colorize-fs-row
+                     line-start (point) padded)
+                  (sql-datum--admin-colorize-row line-start (point) padded))
                 (insert "\n"))))
           (cl-incf row-index))))))
+
+(defun sql-datum--admin-colorize-fs-row (start _end cells)
+  "Face the name in a filesystem row the way dired faces it.
+
+Dired puts `dired-directory' on a directory's name, and that is the
+cue people read a listing by, so this listing uses the same face
+rather than inventing a colour of its own."
+  (let ((name-col (alist-get 1 sql-datum--admin-col-positions)))
+    (when (and name-col (equal (nth 0 cells) "dir"))
+      (let* ((from (+ start name-col))
+             (to (min (+ from (length (nth 1 cells)))
+                      (line-end-position))))
+        (when (< from to)
+          (put-text-property from to 'face 'dired-directory))))))
 
 (defun sql-datum--admin-colorize-row (start end cells)
   "Apply color to the row from START to END based on CELLS content."
@@ -1524,7 +1580,8 @@ SQLI-BUF is the originating SQLi buffer."
     ;; Activity monitor
     (define-key map "k" #'sql-datum-admin-kill-session)
     ;; Jobs panel
-    (define-key map "s" #'sql-datum-admin-start-job)
+    ;; s starts a job, but cycles the sort in a directory listing.
+    (define-key map "s" #'sql-datum-admin-start-or-sort)
     ;; S stops a job, but shrinks a file in the database files view.
     (define-key map "S" #'sql-datum-admin-stop-or-shrink)
     ;; e toggles a job, but opens the entry at point in the filesystem
@@ -1549,7 +1606,11 @@ SQLI-BUF is the originating SQLi buffer."
     (define-key map "U" #'sql-datum-admin-user-mappings)
     (define-key map "P" #'sql-datum-admin-permissions)
     (define-key map "G" #'sql-datum-admin-grant)
-    ;; Filesystem panel
+    ;; Filesystem panel.  f, s and ( are dired's keys for the same
+    ;; jobs; s and ( are free, so only s needs sharing with the jobs
+    ;; panel, where it starts a job.
+    (define-key map "f" #'sql-datum-admin-open-path)
+    (define-key map "(" #'sql-datum-admin-toggle-details)
     (define-key map "^" #'sql-datum-admin-parent-directory)
     (define-key map "v" #'sql-datum-admin-view-file)
     (define-key map "w" #'sql-datum-admin-copy-path)
@@ -2232,6 +2293,46 @@ enabling or disabling a job."
   (if (equal sql-datum--admin-panel-name "filesystem")
       (sql-datum-admin-open-path)
     (sql-datum-admin-toggle-enable)))
+
+(defun sql-datum-admin-toggle-details ()
+  "Show only names in the listing, or show the details again.
+`(\=' is dired's key for this."
+  (interactive)
+  (unless (equal sql-datum--admin-panel-name "filesystem")
+    (user-error "Not in the server filesystem panel"))
+  (setq sql-datum--admin-hide-details (not sql-datum--admin-hide-details))
+  (sql-datum--admin-show-panel sql-datum--admin-panel-data
+                               sql-datum--admin-sqli-buf)
+  (message "datum: %s"
+           (if sql-datum--admin-hide-details "names only" "details shown")))
+
+(defconst sql-datum--admin-fs-sort-cycle '(1 2 3)
+  "Columns `s\=' cycles through in a filesystem listing: name, size, date.")
+
+(defun sql-datum-admin-cycle-sort ()
+  "Sort the listing by the next column in turn.
+`s\=' cycles the sort in dired too, between name and date; here it also
+takes in size, which this listing has a column for."
+  (interactive)
+  (let* ((cycle sql-datum--admin-fs-sort-cycle)
+         (current sql-datum--admin-sort-column)
+         (next (if (member current cycle)
+                   (or (nth (1+ (cl-position current cycle)) cycle)
+                       (car cycle))
+                 (car cycle)))
+         (headers (alist-get 'headers sql-datum--admin-panel-data)))
+    (setq sql-datum--admin-sort-column next
+          sql-datum--admin-sort-ascending t)
+    (sql-datum--admin-show-panel sql-datum--admin-panel-data
+                                 sql-datum--admin-sqli-buf)
+    (message "datum: sorted by %s" (or (nth next headers) next))))
+
+(defun sql-datum-admin-start-or-sort ()
+  "Cycle the sort in a directory listing, or start the job at point."
+  (interactive)
+  (if (equal sql-datum--admin-panel-name "filesystem")
+      (sql-datum-admin-cycle-sort)
+    (sql-datum-admin-start-job)))
 
 (defun sql-datum-admin-restore-or-revoke ()
   "Revoke the permission at point, or restore the backup at point.

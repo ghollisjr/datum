@@ -344,3 +344,249 @@ class TestWindowsDrives:
         panel = filesystem.get_data(cursor, driver, [driver.DRIVES_PATH])
         assert panel["title"] == "Server drives"
         assert panel["context"]["path"] == driver.DRIVES_PATH
+
+
+# --- Hostile listings ---------------------------------------------------
+#
+# The Windows bugs this panel shipped with were all reproducible here;
+# what was missing was fixtures with anything awkward in them.  Every
+# tree below is built through the server, not through docker, so these
+# run against any reachable server — a Windows one included.
+
+MS_NASTY = "datum_nasty"
+PG_NASTY = "datum_nasty"
+
+
+def _mssql_data_dir(driver, cursor):
+    path = (driver.default_paths(cursor) or {}).get("data")
+    if not path:
+        pytest.skip("server did not report a data directory")
+    return path
+
+
+@pytest.fixture
+def nasty_mssql(mssql_env):
+    """A tree with a space in a directory name and a level to not recurse into.
+
+    Built with xp_create_subdir and BACKUP, the only writes a client can
+    make through SQL Server.  Idempotent, so re-runs overwrite rather
+        than pile up, and nothing needs removing afterwards.
+    """
+    cursor, driver = mssql_env
+    root = driver.join_path(_mssql_data_dir(driver, cursor), MS_NASTY)
+    spaced = driver.join_path(root, "with space")
+    # Backups are not cheap, and the tree outlives the run, so only
+    # build it when it is not already there.
+    try:
+        existing = {e["name"] for e in driver.browse_path(cursor, root)}
+        if {"with space", "top.bak"} <= existing:
+            return root, spaced
+    except Exception:
+        pass
+    try:
+        for directory in (root, spaced, driver.join_path(spaced, "deeper")):
+            cursor.execute("EXEC master.dbo.xp_create_subdir ?", [directory])
+        for target in (driver.join_path(root, "top.bak"),
+                       driver.join_path(spaced, "a file.bak"),
+                       driver.join_path(driver.join_path(spaced, "deeper"),
+                                        "buried.bak")):
+            cursor.execute(
+                f"BACKUP DATABASE model TO DISK = "
+                f"{driver.quote_ddl_literal(target)} WITH INIT, FORMAT")
+            while cursor.nextset():
+                pass
+    except Exception as err:
+        pytest.skip(f"cannot build the probe tree: {err}")
+    return root, spaced
+
+
+class TestAwkwardNames:
+    """A space in a name, and a level below that must stay unlisted."""
+
+    def test_the_listing_stops_at_one_level(self, mssql_env, nasty_mssql):
+        cursor, driver = mssql_env
+        root, _spaced = nasty_mssql
+        names = {e["name"] for e in driver.browse_path(cursor, root)}
+        assert names == {"with space", "top.bak"}, names
+        # Nothing from below it, however deep the tree goes.
+        assert "a file.bak" not in names
+        assert "buried.bak" not in names
+        assert "deeper" not in names
+
+    def test_a_directory_name_with_a_space_can_be_descended(self, mssql_env,
+                                                           nasty_mssql):
+        cursor, driver = mssql_env
+        root, spaced = nasty_mssql
+        entry = next(e for e in driver.browse_path(cursor, root)
+                     if e["name"] == "with space")
+        assert entry["is_dir"]
+        # The path the server reported is what navigation uses, so it has
+        # to work as given rather than needing quoting here.
+        names = {e["name"] for e in driver.browse_path(cursor, entry["path"])}
+        assert names == {"deeper", "a file.bak"}, names
+
+    def test_a_file_name_with_a_space_is_listed_with_its_size(self, mssql_env,
+                                                             nasty_mssql):
+        cursor, driver = mssql_env
+        _root, spaced = nasty_mssql
+        entry = next(e for e in driver.browse_path(cursor, spaced)
+                     if e["name"] == "a file.bak")
+        assert not entry["is_dir"]
+        assert entry["size"] and entry["size"] > 0
+
+    def test_walking_back_up_from_a_spaced_directory(self, mssql_env,
+                                                     nasty_mssql):
+        _cursor, driver = mssql_env
+        root, spaced = nasty_mssql
+        assert driver.parent_path(spaced) == root.rstrip("/\\")
+
+    def test_a_binary_file_is_named_rather_than_dumped(self, mssql_env,
+                                                       nasty_mssql, captured):
+        from datum.panels import filesystem
+
+        cursor, driver = mssql_env
+        _root, spaced = nasty_mssql
+        # A backup sits in the same directory as the logs worth reading,
+        # and decodes to almost nothing but control characters.
+        raw = driver.read_file(cursor, driver.join_path(spaced, "a file.bak"),
+                               2048)
+        assert driver.looks_binary(raw)
+
+        filesystem.run_action(cursor, driver, "view", [_payload(
+            {"path": driver.join_path(spaced, "a file.bak")})])
+        panel = [a[0] for k, a in captured if k == "admin_panel"][0]
+        assert "binary" in panel["info"]
+        # What reaches the buffer is a sentence, not the bytes.
+        assert "not shown" in panel["content"]
+        assert "\x00" not in panel["content"]
+        assert len(panel["content"]) < 500
+
+    def test_the_panel_lists_the_awkward_tree_too(self, mssql_env,
+                                                  nasty_mssql):
+        from datum.panels import filesystem
+
+        cursor, driver = mssql_env
+        root, _spaced = nasty_mssql
+        panel = filesystem.get_data(cursor, driver, [root])
+        rows = {r[1]: r for r in panel["rows"]}
+        assert ".." in rows
+        assert rows["with space"][0] == "dir"
+        assert rows["top.bak"][0] == "file"
+        # The path column carries the space unmangled.
+        assert rows["with space"][4].endswith("with space")
+
+
+@pytest.fixture
+def nasty_pg(pg_env):
+    """Files in the encodings and names that actually caused trouble.
+
+    PostgreSQL can run a program as its own account, which is the only
+    way to put arbitrary bytes on the server through SQL.  Superuser
+    only, so this skips where it is not allowed.
+    """
+    cursor, driver = pg_env
+    cursor.execute("SHOW data_directory")
+    root = cursor.fetchone()[0].rstrip("/") + "/" + PG_NASTY
+    spaced = root + "/with space"
+
+    def run(command):
+        # COPY feeds the program's stdin, which these ignore; a single
+        # quote is doubled for the SQL literal.
+        literal = command.replace("'", "''")
+        cursor.execute(f"COPY (SELECT 1) TO PROGRAM '{literal}'")
+
+    body = "<root>hello</root>"
+    try:
+        run(f'mkdir -p "{spaced}/deeper"')
+        run(f'printf "{body}\\n" > "{root}/utf8.txt"')
+        run(f'printf "{body}\\n" | iconv -f UTF-8 -t UTF-16LE '
+            f'> "{root}/utf16le.xml"')
+        run(f'printf "{body}\\n" | iconv -f UTF-8 -t UTF-16 '
+            f'> "{root}/utf16bom.xml"')
+        run(f'printf "\\357\\273\\277{body}\\n" > "{root}/utf8bom.txt"')
+        run(f'printf "{body}\\n" > "{root}/a file.txt"')
+        run(f'printf "{body}\\n" > "{root}/uni\\303\\247ode.txt"')
+        run(f'head -c 2048 /dev/urandom > "{root}/random.bin"')
+        run(f'printf "buried\\n" > "{spaced}/deeper/buried.txt"')
+    except Exception as err:
+        pytest.skip(f"cannot write probe files: {err}")
+
+    yield root, spaced, body
+
+    try:
+        run(f'rm -rf "{root}"')
+    except Exception:
+        pass
+
+
+class TestEncodingsEndToEnd:
+    """Every encoding that broke the viewer, read back off a real server."""
+
+    def _read(self, driver, cursor, path):
+        return driver.read_file(cursor, path, 8192)
+
+    def test_plain_utf8(self, pg_env, nasty_pg):
+        cursor, driver = pg_env
+        root, _spaced, body = nasty_pg
+        assert self._read(driver, cursor, f"{root}/utf8.txt").strip() == body
+
+    def test_utf16_without_a_byte_order_mark(self, pg_env, nasty_pg):
+        cursor, driver = pg_env
+        root, _spaced, body = nasty_pg
+        # The case that rendered as double-spaced text, and the one SQL
+        # Server's SINGLE_NCLOB refuses outright.
+        text = self._read(driver, cursor, f"{root}/utf16le.xml")
+        assert "\x00" not in text
+        assert text.strip() == body
+
+    def test_utf16_with_a_byte_order_mark(self, pg_env, nasty_pg):
+        cursor, driver = pg_env
+        root, _spaced, body = nasty_pg
+        text = self._read(driver, cursor, f"{root}/utf16bom.xml")
+        assert "\x00" not in text
+        assert text.strip() == body
+
+    def test_utf8_with_a_byte_order_mark(self, pg_env, nasty_pg):
+        cursor, driver = pg_env
+        root, _spaced, body = nasty_pg
+        # The mark is the file's business and should not show up.
+        text = self._read(driver, cursor, f"{root}/utf8bom.txt")
+        assert text.strip() == body
+        assert not text.startswith("﻿")
+
+    def test_random_bytes_are_named_not_dumped(self, pg_env, nasty_pg,
+                                               captured):
+        from datum.panels import filesystem
+
+        cursor, driver = pg_env
+        root, _spaced, _body = nasty_pg
+        filesystem.run_action(cursor, driver, "view",
+                              [_payload({"path": f"{root}/random.bin"})])
+        panel = [a[0] for k, a in captured if k == "admin_panel"][0]
+        assert "binary" in panel["info"]
+        assert len(panel["content"]) < 500
+
+    def test_a_name_with_a_space_lists_and_reads(self, pg_env, nasty_pg):
+        cursor, driver = pg_env
+        root, _spaced, body = nasty_pg
+        entry = next(e for e in driver.browse_path(cursor, root)
+                     if e["name"] == "a file.txt")
+        # The path the server gave back is what gets used, unquoted.
+        assert self._read(driver, cursor, entry["path"]).strip() == body
+
+    def test_a_non_ascii_name_survives_the_round_trip(self, pg_env, nasty_pg):
+        cursor, driver = pg_env
+        root, _spaced, body = nasty_pg
+        entry = next((e for e in driver.browse_path(cursor, root)
+                      if e["name"].endswith("ode.txt")
+                      and e["name"] != "utf8.txt"), None)
+        assert entry, "the non-ascii name did not come back"
+        assert self._read(driver, cursor, entry["path"]).strip() == body
+
+    def test_postgres_also_lists_one_level_only(self, pg_env, nasty_pg):
+        cursor, driver = pg_env
+        root, _spaced, _body = nasty_pg
+        names = {e["name"] for e in driver.browse_path(cursor, root)}
+        assert "with space" in names
+        assert "buried.txt" not in names
+        assert "deeper" not in names

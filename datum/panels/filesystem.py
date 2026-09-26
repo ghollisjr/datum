@@ -226,6 +226,26 @@ def _view_file(cursor, driver, args):
         envelope.error(f"Cannot read {path}: {_db_error(err)}")
         return
 
+    if driver.looks_binary(text):
+        # Better to say what it is than to fill a buffer with it.
+        size = f"{len(text)} bytes read" if text else "empty"
+        envelope.admin_panel({
+            "panel": "filesystem",
+            "sub_panel": "file",
+            "title": f"Server file: {path}",
+            "headers": [],
+            "rows": [],
+            "row_id": None,
+            "actions": [],
+            "info": f"{path} looks like a binary file — not shown",
+            "content": (f"{path}\n\n"
+                        f"This does not decode as text ({size}), so it is "
+                        f"not shown.\n"),
+            "parent_panel": "filesystem",
+            "context": {"path": path},
+        })
+        return
+
     truncated = len(text) >= _READ_LIMIT
     envelope.admin_panel({
         "panel": "filesystem",

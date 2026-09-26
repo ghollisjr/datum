@@ -933,6 +933,24 @@ class BaseDriver(ABC):
             f"Reading server files is not supported on {self.dialect_name}")
 
     @staticmethod
+    def looks_binary(text):
+        """Return True if TEXT is not worth showing as text.
+
+        A NUL that survived decoding says no encoding accounted for it,
+        and a page made mostly of control characters is not something
+        anyone wants in a buffer — a database backup, say, which sits in
+        the same directory as the logs worth reading.
+        """
+        if not text:
+            return False
+        head = text[:4096]
+        if "\x00" in head:
+            return True
+        control = sum(1 for ch in head
+                      if ord(ch) < 32 and ch not in "\n\r\t")
+        return control > len(head) * 0.3
+
+    @staticmethod
     def decode_file_bytes(raw):
         """Decode RAW file bytes to text, guessing the encoding.
 

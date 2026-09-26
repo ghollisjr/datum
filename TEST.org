@@ -200,6 +200,24 @@ The test suite has four layers, run by =tests/run-all.sh=:
 directory and fails the run if any suite reports a failure, so a new
 suite needs no registration — dropping the file in is enough.
 
+** Hostile filesystem fixtures
+
+The Windows bugs the server-filesystem panel shipped with were all
+reproducible against the Linux containers; what was missing was
+fixtures with anything awkward in them.  =test_filesystem_live.py= now
+builds its own probe trees — a directory name with a space, a level
+below the one being listed, and files in UTF-8, UTF-16 with and without
+a byte-order mark, UTF-8 with one, a name with a space, a non-ASCII
+name, and random bytes.
+
+Both trees are built *through the server* rather than through docker:
+=xp_create_subdir= and =BACKUP= on MSSQL, =COPY TO PROGRAM= on
+PostgreSQL.  So the same tests run against any reachable server,
+including a Windows one — which is where they are most worth running.
+
+The MSSQL tree is left in place and reused, since a backup is not cheap
+and the tree is idempotent.  The PostgreSQL one is removed afterwards.
+
 ** Integration test backends
 
 The integration test script auto-detects available ODBC drivers and skips

@@ -305,18 +305,26 @@ A read-only listing of the server's own disk — where the data files,
 logs and backups actually live.  Read-only in full: nothing here
 writes, renames or deletes.
 
-| Key         | Action                                  |
-|-------------+-----------------------------------------|
-| =RET= / =e= | Open the directory, or view the file    |
-| =^=   | Parent directory                        |
-| =v=   | View the file at point                  |
-| =w=   | Copy the path at point to the kill ring |
+| Key               | Action                                  |
+|-------------------+-----------------------------------------|
+| =RET= / =e= / =f= | Open the directory, or view the file    |
+| =^=               | Parent directory                        |
+| =v=               | View the file at point                  |
+| =w=               | Copy the path at point to the kill ring |
+| =s=               | Cycle the sort: name, size, date        |
+| =(=               | Show names only, or the details again   |
+
+Dired's keys where dired has one, and dired's faces for directories —
+but not a dired buffer: the mode line reads =datum-fs=, it is
+read-only, and it is on another machine.
 
 One directory at a time, with bare names and the directory in the
-title, as dired does it — and =e= opens, as it does there.  It does not auto-refresh — =g= reloads it,
+title, as dired does it.  It does not auto-refresh — =g= reloads it,
 =a= turns polling on if you want it.  Sizes are in bytes so the column sorts with
 =o=.  Viewing reads the first 256KB into a read-only buffer, where =w=
-copies the path and =B= goes back to the listing.
+copies the path and =B= goes back to the listing.  Encodings are worked
+out on this side, so a UTF-16 file reads properly; a file that is not
+text at all is named rather than dumped.
 
 The server reads as *its own* account, not yours: it reaches the files
 it owns — its error log, its config — and is refused elsewhere.  On

@@ -1980,6 +1980,26 @@ class TestServerFilesystem:
         raw = "<root/>".encode("utf-16-le")
         assert mssql.decode_file_bytes(raw) == postgres.decode_file_bytes(raw)
 
+    # --- what is worth putting in a buffer ---
+
+    def test_text_is_not_taken_for_binary(self, mssql):
+        assert not mssql.looks_binary("<root>hello</root>\n")
+        assert not mssql.looks_binary("a\tb\r\nc\n")
+        assert not mssql.looks_binary("")
+        assert not mssql.looks_binary(None)
+
+    def test_a_surviving_nul_means_binary(self, mssql):
+        # Nothing accounted for it, so it is not text in any encoding
+        # that was tried.
+        assert mssql.looks_binary("TAPE\x00\x00\x03")
+
+    def test_mostly_control_characters_means_binary(self, mssql):
+        assert mssql.looks_binary("a" + "\x01\x02\x03\x04" * 50)
+
+    def test_a_few_control_characters_are_tolerated(self, mssql):
+        # A log with the odd form feed in it is still a log.
+        assert not mssql.looks_binary("a normal line\n" * 50 + "\x0c")
+
     def test_the_epoch_placeholder_is_not_shown_as_a_date(self):
         # The DMV reports 1601-01-01 for a time the filesystem does not
         # keep, which on Linux is every creation and access time.
