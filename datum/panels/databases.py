@@ -354,6 +354,7 @@ def _backup_form(cursor, driver, args):
 def _do_backup(cursor, driver, args):
     """Run the backup."""
     from .. import envelope
+    from .. import background
 
     if not _require_backup_support(driver):
         return
@@ -369,12 +370,28 @@ def _do_backup(cursor, driver, args):
         if spec.get("required") and not str(opts.get(key) or "").strip():
             raise ValueError(f"{spec['label']} is required")
 
-    for sql in driver.sql_backup(database, opts):
-        cursor.execute(sql)
-        _drain(cursor)
-        _commit(cursor)
-    envelope.info(f"Backed up {database}")
-    _refresh_backups(cursor, driver, database)
+    # Built and checked on this connection, where the user is waiting,
+    # so a mistake in the form is answered at once.
+    stmts = driver.sql_backup(database, opts)
+
+    def run(cur):
+        for sql in stmts:
+            try:
+                cur.execute(sql)
+                _drain(cur)
+                _commit(cur)
+            except Exception as err:
+                envelope.error(f"Backup of '{database}' failed — "
+                               f"{_db_error(err)}")
+                return
+        envelope.info(f"Backed up {database}")
+        _refresh_backups(cur, driver, database)
+
+    # A backup holds its connection for as long as it runs, and the
+    # session's connection is the one the REPL answers on.
+    if background.run_with_cursor(f"backup {database}", run, cursor):
+        envelope.info(f"Backing up {database} in the background — "
+                      f"the session stays usable")
 
 
 def _restore_form(cursor, driver, args):
@@ -417,6 +434,7 @@ def _restore_form(cursor, driver, args):
 def _do_restore(cursor, driver, args, preview=False):
     """Run, or show, the restore."""
     from .. import envelope
+    from .. import background
 
     if not _require_backup_support(driver):
         return
@@ -439,23 +457,59 @@ def _do_restore(cursor, driver, args, preview=False):
     # recorded in it, which belong to the database that was backed up.
     file_list = driver.backup_file_list(cursor, source, opts["position"])
     stmts = driver.sql_restore(database, opts, file_list)
+    # Letting users back in has to happen whether the restore works or
+    # not: a restore takes the database to SINGLE_USER to get exclusive
+    # access, and stopping there because it failed shuts everybody out.
+    cleanup = driver.sql_restore_cleanup(database, opts)
 
     if preview:
-        envelope.definition(f"RESTORE {target}", ";\n\n".join(stmts) + ";")
+        envelope.definition(f"RESTORE {target}",
+                            ";\n\n".join(stmts + cleanup) + ";")
         return
 
-    for index, sql in enumerate(stmts):
-        try:
-            cursor.execute(sql)
-            _drain(cursor)
-            _commit(cursor)
-        except Exception as err:
-            envelope.error(
-                f"Restore of '{target}' failed at statement {index + 1} "
-                f"of {len(stmts)} — {_db_error(err)}")
-            return
-    envelope.info(f"Restored {target} from {source}")
-    _refresh_list(cursor, driver)
+    def run(cur):
+        failure = None
+        for index, sql in enumerate(stmts):
+            try:
+                cur.execute(sql)
+                _drain(cur)
+                _commit(cur)
+            except Exception as err:
+                failure = (f"Restore of '{target}' failed at statement "
+                           f"{index + 1} of {len(stmts)} — {_db_error(err)}")
+                break
+
+        # Whatever happened above, the database has to be reopened.  It
+        # runs on the same connection as the rest, which is what lets
+        # SINGLE_USER and MULTI_USER belong to one session.
+        unfinished = []
+        for sql in cleanup:
+            try:
+                cur.execute(sql)
+                _drain(cur)
+                _commit(cur)
+            except Exception as err:
+                unfinished.append(f"{sql} — {_db_error(err)}")
+
+        if failure:
+            if unfinished:
+                # Worth saying plainly: the database is still shut, and
+                # this is the statement that opens it.
+                failure += ("\n\nThe database was left closed to other "
+                            "connections and could not be reopened. Run "
+                            "this when whatever is holding it has gone:\n  "
+                            + "\n  ".join(unfinished))
+            envelope.error(failure)
+        elif unfinished:
+            envelope.warn(f"Restored {target}, but it is still closed to "
+                          f"other connections: " + "; ".join(unfinished))
+        else:
+            envelope.info(f"Restored {target} from {source}")
+        _refresh_list(cur, driver)
+
+    if background.run_with_cursor(f"restore {target}", run, cursor):
+        envelope.info(f"Restoring {target} in the background — "
+                      f"the session stays usable")
 
 
 # --- File management ---

@@ -685,46 +685,50 @@ class TestFileMutationsRefreshThePanel:
         assert not any(r[0] == TESTDB for r in panel["rows"])
 
 
+@pytest.fixture
+def backup_db():
+    """A small database to back up, and a name to restore it under."""
+    conn = _connect(MS_DSN, "MSSQL")
+    cursor, driver = conn.cursor(), MSSQLDriver()
+    name, target = "datum_bk_src", "datum_bk_dst"
+
+    def cleanup():
+        for db in (name, target):
+            try:
+                for stmt in driver.sql_drop_database(db, force=True):
+                    cursor.execute(stmt)
+            except Exception:
+                pass
+
+    cleanup()
+    cursor.execute(f"CREATE DATABASE [{name}]")
+    cursor.execute(
+        f"EXEC [{name}]..sp_executesql "
+        f"N'CREATE TABLE dbo.payload(id int); INSERT dbo.payload VALUES (42)'")
+    yield name, target, cursor, driver
+    cleanup()
+    conn.close()
+
+
+def _run_backup(cursor, driver, name, **extra):
+    """Back NAME up through the panel, returning where it landed."""
+    from datum.panels import databases
+    opts = {"database": name, "backup_type": "FULL",
+            "directory": "/var/opt/mssql/data",
+            "filename": f"{name}.bak", "overwrite": True,
+            "compression": True, "checksum": True}
+    opts.update(extra)
+    databases.run_action(cursor, driver, "do-backup", [_payload(opts)])
+    return f"/var/opt/mssql/data/{opts['filename']}"
+
+
 class TestBackupRestoreLive:
     """Backup and restore against a real SQL Server."""
-
-    @pytest.fixture
-    def backup_db(self):
-        conn = _connect(MS_DSN, "MSSQL")
-        cursor, driver = conn.cursor(), MSSQLDriver()
-        name, target = "datum_bk_src", "datum_bk_dst"
-
-        def cleanup():
-            for db in (name, target):
-                try:
-                    for stmt in driver.sql_drop_database(db, force=True):
-                        cursor.execute(stmt)
-                except Exception:
-                    pass
-
-        cleanup()
-        cursor.execute(f"CREATE DATABASE [{name}]")
-        cursor.execute(
-            f"EXEC [{name}]..sp_executesql "
-            f"N'CREATE TABLE dbo.payload(id int); INSERT dbo.payload VALUES (42)'")
-        yield name, target, cursor, driver
-        cleanup()
-        conn.close()
-
-    def _backup(self, cursor, driver, name, **extra):
-        from datum.panels import databases
-        opts = {"database": name, "backup_type": "FULL",
-                "directory": "/var/opt/mssql/data",
-                "filename": f"{name}.bak", "overwrite": True,
-                "compression": True, "checksum": True}
-        opts.update(extra)
-        databases.run_action(cursor, driver, "do-backup", [_payload(opts)])
-        return f"/var/opt/mssql/data/{opts['filename']}"
 
     def test_backup_then_history(self, backup_db, captured):
         from datum.panels import databases
         name, _target, cursor, driver = backup_db
-        self._backup(cursor, driver, name)
+        _run_backup(cursor, driver, name)
         _assert_ok(captured, refreshes="backups")
 
         captured.clear()
@@ -735,9 +739,9 @@ class TestBackupRestoreLive:
 
     def test_differential_appends_to_the_file(self, backup_db, captured):
         name, _target, cursor, driver = backup_db
-        self._backup(cursor, driver, name)
+        _run_backup(cursor, driver, name)
         captured.clear()
-        self._backup(cursor, driver, name, backup_type="DIFFERENTIAL",
+        _run_backup(cursor, driver, name, backup_type="DIFFERENTIAL",
                      overwrite=False)
         _assert_ok(captured, refreshes="backups")
         panel = [a[0] for k, a in captured if k == "admin_panel"][-1]
@@ -747,7 +751,7 @@ class TestBackupRestoreLive:
     def test_restore_into_a_new_database(self, backup_db, captured):
         from datum.panels import databases
         name, target, cursor, driver = backup_db
-        source = self._backup(cursor, driver, name)
+        source = _run_backup(cursor, driver, name)
         captured.clear()
 
         # The target does not exist yet, so the exclusive-access step has
@@ -775,7 +779,7 @@ class TestBackupRestoreLive:
                                                        captured):
         from datum.panels import databases
         name, target, cursor, driver = backup_db
-        source = self._backup(cursor, driver, name)
+        source = _run_backup(cursor, driver, name)
         databases.run_action(cursor, driver, "do-restore", [_payload({
             "database": name, "target": target, "source": source,
             "data_dir": "/var/opt/mssql/data",
@@ -812,7 +816,7 @@ class TestBackupRestoreLive:
     def test_preview_does_not_restore(self, backup_db, captured):
         from datum.panels import databases
         name, target, cursor, driver = backup_db
-        source = self._backup(cursor, driver, name)
+        source = _run_backup(cursor, driver, name)
         captured.clear()
 
         databases.run_action(cursor, driver, "preview-restore", [_payload({
@@ -848,3 +852,182 @@ class TestBackupUnsupported:
             assert "pg_dump" in captured[0][1][0]
         finally:
             conn.close()
+
+
+class TestARestoreAlwaysReopensTheDatabase:
+    """A restore takes the database to SINGLE_USER to get exclusive
+    access.  Stopping there because the restore failed locks everybody
+    out, which is worse than the failure."""
+
+    def _access(self, cursor, name):
+        cursor.execute("SELECT user_access_desc FROM sys.databases "
+                       "WHERE name = ?", [name])
+        row = cursor.fetchone()
+        return row[0] if row else None
+
+    def test_a_failed_restore_leaves_the_database_usable(self, backup_db,
+                                                        captured):
+        from datum.panels import databases
+
+        name, _target, cursor, driver = backup_db
+        _run_backup(cursor, driver, name)
+        captured.clear()
+        # Past SINGLE_USER, then fails: the files are sent somewhere
+        # that cannot be written.
+        databases.run_action(cursor, driver, "do-restore", [_payload(
+            {"database": name, "target": name,
+             "source": f"/var/opt/mssql/data/{name}.bak",
+             "position": 1, "replace": True, "recovery": True,
+             "data_dir": "/proc/nowhere", "log_dir": "/proc/nowhere"})])
+        assert "error" in _kinds(captured), captured
+        assert self._access(cursor, name) == "MULTI_USER"
+
+    def test_a_restore_that_works_reopens_it_too(self, backup_db, captured):
+        from datum.panels import databases
+
+        name, _target, cursor, driver = backup_db
+        _run_backup(cursor, driver, name)
+        captured.clear()
+        databases.run_action(cursor, driver, "do-restore", [_payload(
+            {"database": name, "target": name,
+             "source": f"/var/opt/mssql/data/{name}.bak",
+             "position": 1, "replace": True, "recovery": True,
+             "data_dir": "/var/opt/mssql/data",
+             "log_dir": "/var/opt/mssql/data"})])
+        assert "error" not in _kinds(captured), captured
+        assert self._access(cursor, name) == "MULTI_USER"
+
+    def test_the_reopen_is_shown_in_the_preview(self, backup_db, captured):
+        from datum.panels import databases
+
+        name, _target, cursor, driver = backup_db
+        _run_backup(cursor, driver, name)
+        captured.clear()
+        databases.run_action(cursor, driver, "preview-restore", [_payload(
+            {"database": name, "target": name,
+             "source": f"/var/opt/mssql/data/{name}.bak",
+             "position": 1, "replace": True, "recovery": True,
+             "data_dir": "/var/opt/mssql/data",
+             "log_dir": "/var/opt/mssql/data"})])
+        sql = [a for k, a in captured if k == "definition"][0][1]
+        # What runs is what is shown, reopening included.
+        assert "SINGLE_USER" in sql
+        assert "RESTORE DATABASE" in sql
+        assert "MULTI_USER" in sql
+
+    def test_nothing_is_reopened_that_was_never_closed(self, backup_db):
+        _name, _target, _cursor, driver = backup_db
+        # Without REPLACE the restore never takes exclusive access.
+        assert driver.sql_restore_cleanup("db", {"replace": False}) == []
+        # With NORECOVERY the database is left restoring, where ALTER
+        # DATABASE has nothing to say.
+        assert driver.sql_restore_cleanup(
+            "db", {"replace": True, "recovery": False}) == []
+        assert driver.sql_restore_cleanup(
+            "db", {"replace": True, "recovery": True})
+
+    def test_a_dialect_with_no_restore_has_nothing_to_reopen(self):
+        assert PostgreSQLDriver.__new__(
+            PostgreSQLDriver).sql_restore_cleanup("db", {"replace": True}) == []
+
+
+class TestBackupAndRestoreLeaveTheSessionUsable:
+    """Both hold their connection for as long as they run, and the
+    session's connection is the one the REPL answers on."""
+
+    def test_a_backup_is_handed_off(self, backup_db, captured, monkeypatch):
+        from datum import background
+        from datum.panels import databases
+
+        name, _target, cursor, driver = backup_db
+        handed = []
+        monkeypatch.setattr(background, "is_running", lambda: True)
+        monkeypatch.setattr(background, "submit",
+                            lambda label, handler, args=(): handed.append(
+                                (label, handler)))
+        captured.clear()
+        _run_backup(cursor, driver, name)
+        assert handed, "the backup should have been handed off"
+        assert name in handed[0][0]
+        said = " ".join(str(a[0]) for k, a in captured if k == "info")
+        assert "background" in said, said
+
+    def test_the_form_is_still_checked_before_the_hand_off(self, backup_db,
+                                                          captured,
+                                                          monkeypatch):
+        from datum import background
+        from datum.panels import databases
+
+        name, _target, cursor, driver = backup_db
+        handed = []
+        monkeypatch.setattr(background, "is_running", lambda: True)
+        monkeypatch.setattr(background, "submit",
+                            lambda *a, **k: handed.append(a))
+        captured.clear()
+        # A required field left empty: the user is waiting, so this is
+        # answered here rather than arriving later from the worker.
+        databases.run_action(cursor, driver, "do-backup", [_payload(
+            {"database": name, "directory": "", "filename": ""})])
+        assert "error" in _kinds(captured), captured
+        assert not handed
+
+    def test_a_restore_is_handed_off(self, backup_db, captured, monkeypatch):
+        from datum import background
+        from datum.panels import databases
+
+        name, _target, cursor, driver = backup_db
+        _run_backup(cursor, driver, name)
+        handed = []
+        monkeypatch.setattr(background, "is_running", lambda: True)
+        monkeypatch.setattr(background, "submit",
+                            lambda label, handler, args=(): handed.append(
+                                (label, handler)))
+        captured.clear()
+        databases.run_action(cursor, driver, "do-restore", [_payload(
+            {"database": name, "target": name,
+             "source": f"/var/opt/mssql/data/{name}.bak",
+             "position": 1, "replace": True, "recovery": True,
+             "data_dir": "/var/opt/mssql/data",
+             "log_dir": "/var/opt/mssql/data"})])
+        assert handed, "the restore should have been handed off"
+
+        # And the work still does the right thing when the worker runs it.
+        class Connection:
+            def __init__(self, cur): self._cur = cur
+            def cursor(self): return self._cur
+
+        handed[0][1](conn=Connection(cursor))
+        assert "error" not in _kinds(captured), captured
+
+    def test_a_preview_is_never_handed_off(self, backup_db, captured,
+                                          monkeypatch):
+        from datum import background
+        from datum.panels import databases
+
+        name, _target, cursor, driver = backup_db
+        _run_backup(cursor, driver, name)
+        handed = []
+        monkeypatch.setattr(background, "is_running", lambda: True)
+        monkeypatch.setattr(background, "submit",
+                            lambda *a, **k: handed.append(a))
+        captured.clear()
+        databases.run_action(cursor, driver, "preview-restore", [_payload(
+            {"database": name, "target": name,
+             "source": f"/var/opt/mssql/data/{name}.bak",
+             "position": 1, "replace": True, "recovery": True,
+             "data_dir": "/var/opt/mssql/data",
+             "log_dir": "/var/opt/mssql/data"})])
+        # Nothing runs, and the SQL is what the user is waiting to read.
+        assert not handed
+        assert [a for k, a in captured if k == "definition"]
+
+    def test_without_a_worker_both_still_run(self, backup_db, captured,
+                                             monkeypatch):
+        from datum import background
+
+        name, _target, cursor, driver = backup_db
+        monkeypatch.setattr(background, "is_running", lambda: False)
+        captured.clear()
+        _run_backup(cursor, driver, name)
+        # Same behaviour, only blocking, which beats not working.
+        assert "error" not in _kinds(captured), captured

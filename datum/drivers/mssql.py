@@ -1847,10 +1847,28 @@ class MSSQLDriver(BaseDriver):
                          f"WITH ROLLBACK IMMEDIATE")
         stmts.append(f"RESTORE DATABASE {target} FROM DISK = {device} WITH "
                      + ", ".join(clauses))
-        if opts.get("replace") and opts.get("recovery", True):
-            stmts.append(f"IF DB_ID({existing}) IS NOT NULL "
-                         f"ALTER DATABASE {target} SET MULTI_USER")
+        # Letting users back in is not part of the restore: it has to
+        # happen whether the restore worked or not, or a failure leaves
+        # the database shut to everyone.  See `sql_restore_cleanup'.
         return stmts
+
+    def sql_restore_cleanup(self, database, opts):
+        """Return the statements that must run however the restore ends.
+
+        Taking a database to SINGLE_USER is how a restore gets exclusive
+        access; leaving it there because the restore failed locks
+        everybody out, which is worse than the failure.
+        """
+        if not (opts.get("replace") and opts.get("recovery", True)):
+            # Without REPLACE nothing was taken to SINGLE_USER, and with
+            # NORECOVERY the database is left restoring, where ALTER
+            # DATABASE has nothing to say.
+            return []
+        name = (opts.get("target") or database).strip()
+        self.validate_identifier(name)
+        return [f"IF DB_ID({self.quote_ddl_literal(name)}) IS NOT NULL "
+                f"ALTER DATABASE {self.quote_ddl_identifier(name)} "
+                f"SET MULTI_USER"]
 
     # --- Database file management ---
 

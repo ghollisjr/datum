@@ -1160,16 +1160,34 @@ class TestBackupRestore:
         assert "REPLACE" in sql and "RECOVERY" in sql
 
     def test_restore_guards_the_exclusive_access_step(self, mssql):
-        stmts = mssql.sql_restore("Foo", {
-            "target": "Bar", "source": "D:\\B\\Foo.bak",
-            "data_dir": "D:\\Data", "log_dir": "D:\\Data",
-            "replace": True, "recovery": True}, self._files())
+        opts = {"target": "Bar", "source": "D:\\B\\Foo.bak",
+                "data_dir": "D:\\Data", "log_dir": "D:\\Data",
+                "replace": True, "recovery": True}
+        stmts = mssql.sql_restore("Foo", opts, self._files())
         # The target is commonly created by the restore itself, and
         # ALTER DATABASE on a database that does not exist is an error.
         assert stmts[0].startswith("IF DB_ID('Bar') IS NOT NULL")
         assert "SINGLE_USER" in stmts[0]
-        assert stmts[-1].startswith("IF DB_ID('Bar') IS NOT NULL")
-        assert "MULTI_USER" in stmts[-1]
+        # Letting users back in is no longer the last of these: it has
+        # to run whether the restore worked or not, so it is its own
+        # step and the caller always runs it.
+        assert not any("MULTI_USER" in sql for sql in stmts)
+        cleanup = mssql.sql_restore_cleanup("Foo", opts)
+        assert cleanup and "MULTI_USER" in cleanup[-1]
+        assert cleanup[-1].startswith("IF DB_ID('Bar') IS NOT NULL")
+
+    def test_nothing_is_reopened_that_was_never_closed(self, mssql):
+        # Without REPLACE the restore never takes exclusive access, and
+        # with NORECOVERY the database is left restoring, where ALTER
+        # DATABASE has nothing to say.
+        assert mssql.sql_restore_cleanup("Foo", {"replace": False}) == []
+        assert mssql.sql_restore_cleanup(
+            "Foo", {"replace": True, "recovery": False}) == []
+
+    def test_the_reopened_name_is_escaped(self, mssql):
+        cleanup = mssql.sql_restore_cleanup(
+            "Foo", {"target": "Ba]r", "replace": True, "recovery": True})
+        assert "[Ba]]r]" in cleanup[0]
 
     def test_restore_without_replace_takes_no_lock(self, mssql):
         stmts = mssql.sql_restore("Foo", {

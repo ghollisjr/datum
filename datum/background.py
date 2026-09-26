@@ -136,6 +136,28 @@ def submit(task_name, handler, args=()):
         _queue.put((task_name, handler, args))
 
 
+def run_with_cursor(label, work, cursor=None):
+    """Run WORK on the worker's own connection, or inline when there is none.
+
+    WORK is called with a cursor.  Anything that holds its connection
+    for a long time — reading a large file, backing a database up —
+    must not run on the connection the interactive session uses: the
+    process reads the next command on that same thread, so the session
+    would answer nothing until the work finished.
+
+    Returns True when the work was handed off, False when it ran here.
+    """
+    if not is_running():
+        work(cursor)
+        return False
+
+    def task(conn=None):
+        work(conn.cursor())
+
+    submit(label, task)
+    return True
+
+
 def switch_database(db):
     """Tell the background thread to switch to a different database.
 

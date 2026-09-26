@@ -874,8 +874,26 @@ up.  Restoring over an existing database ends its sessions first and
 returns it to multi-user afterwards; restoring into a database that does
 not exist yet skips that step rather than failing on it.
 
+Returning the database to multi-user is not part of the restore: it
+happens whether the restore worked or not.  Ending the sessions is how a
+restore gets exclusive access, and leaving the database shut because the
+restore failed locks everybody out — worse than the failure itself, and
+not obviously connected to it.  Where the reopening cannot be done
+either, the error says so and gives the statement to run once whatever
+is holding the database has gone.
+
 Turning off *Bring Online* leaves the database restoring, so further log
-backups can be applied.
+backups can be applied; there is nothing to reopen in that case, since
+=ALTER DATABASE= has nothing to say to a database that is still
+restoring.
+
+Both run on the background connection rather than the session's own.  A
+backup holds its connection for as long as it takes, and the process
+reads the next command on that same thread, so running it on the session
+would leave the session answering nothing until the backup finished.
+The form is still checked before the hand-off, so a missing field is
+answered while you are still looking at the form, and a preview never
+leaves the session at all — the SQL is what you are waiting to read.
 
 *** Jobs panel
 

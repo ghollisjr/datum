@@ -219,6 +219,12 @@ Backups view (=K=, MSSQL):
 | =N= | Back up now |
 | =R= | Restore     |
 
+Both run in the background, so the session stays usable while they do —
+though the form is checked before that, and a preview never leaves the
+session.  A restore returns the database to multi-user whether it
+worked or not: ending the sessions is how it gets exclusive access, and
+leaving it shut because the restore failed would lock everybody out.
+
 ** Jobs panel (MSSQL)
 
 | Key       | Action                         |

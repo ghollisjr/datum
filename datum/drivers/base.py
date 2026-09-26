@@ -753,6 +753,15 @@ class BaseDriver(ABC):
         raise NotImplementedError(
             f"Backup is not supported on {self.dialect_name}")
 
+    def sql_restore_cleanup(self, database, opts):
+        """Return statements that must run however the restore ends.
+
+        A restore may need exclusive access to the database, and letting
+        everybody back in afterwards cannot be conditional on the
+        restore having worked.
+        """
+        return []
+
     def sql_restore(self, database, opts, file_list):
         """Return statements restoring DATABASE from a backup."""
         raise NotImplementedError(
