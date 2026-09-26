@@ -1883,6 +1883,29 @@ class TestServerFilesystem:
 
     # --- Windows has no single root, so a drive root is a top ---
 
+    def test_the_name_comes_from_the_server_not_from_the_path(self, mssql):
+        """The DMV reports the name; parsing the path is only a fallback.
+
+        Whoever knows where a name starts in a path, it is the server:
+        the separator is its OS's business, not ours.
+        """
+        class Cursor:
+            description = True
+            def execute(self, sql, *_a):
+                assert "file_or_directory_name" in sql
+                return self
+            def fetchall(self):
+                return [(r"C:\\Data\\master.mdf", "master.mdf", 0, 12, None),
+                        (r"C:\\Data\\sub", "sub", 1, None, None),
+                        # No name reported: fall back to the path.
+                        (r"C:\\Data\\other.ldf", None, 0, 34, None)]
+
+        entries = mssql.browse_path(Cursor(), r"C:\\Data")
+        names = [e["name"] for e in entries]
+        assert names == ["master.mdf", "sub", "other.ldf"], names
+        # Extensions are part of the name and must survive.
+        assert all("." in n for n in names if n != "sub")
+
     def test_a_drive_root_is_recognised(self, mssql):
         for path in ("C:", "C:\\", "c:/", "Z:\\"):
             assert mssql.is_drive_root(path), path

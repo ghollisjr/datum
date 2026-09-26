@@ -2309,29 +2309,42 @@ enabling or disabling a job."
 (defconst sql-datum--admin-fs-sort-cycle '(1 2 3)
   "Columns `s\=' cycles through in a filesystem listing: name, size, date.")
 
-(defun sql-datum-admin-cycle-sort ()
+(defun sql-datum-admin-cycle-sort (&optional reverse)
   "Sort the listing by the next column in turn.
+
 `s\=' cycles the sort in dired too, between name and date; here it also
-takes in size, which this listing has a column for."
-  (interactive)
+takes in size, which this listing has a column for.  With a prefix
+argument, REVERSE turns the current sort around instead of moving on,
+so each of the three can be read either way."
+  (interactive "P")
   (let* ((cycle sql-datum--admin-fs-sort-cycle)
          (current sql-datum--admin-sort-column)
-         (next (if (member current cycle)
+         (headers (alist-get 'headers sql-datum--admin-panel-data))
+         (column (cond
+                  ;; Reversing an unsorted listing has to sort it first.
+                  ((and reverse (member current cycle)) current)
+                  ((member current cycle)
                    (or (nth (1+ (cl-position current cycle)) cycle)
-                       (car cycle))
-                 (car cycle)))
-         (headers (alist-get 'headers sql-datum--admin-panel-data)))
-    (setq sql-datum--admin-sort-column next
-          sql-datum--admin-sort-ascending t)
+                       (car cycle)))
+                  (t (car cycle)))))
+    (setq sql-datum--admin-sort-ascending
+          (if (and reverse (eql column current))
+              (not sql-datum--admin-sort-ascending)
+            t)
+          sql-datum--admin-sort-column column)
     (sql-datum--admin-show-panel sql-datum--admin-panel-data
                                  sql-datum--admin-sqli-buf)
-    (message "datum: sorted by %s" (or (nth next headers) next))))
+    (message "datum: sorted by %s, %s"
+             (or (nth column headers) column)
+             (if sql-datum--admin-sort-ascending "ascending" "descending"))))
 
-(defun sql-datum-admin-start-or-sort ()
-  "Cycle the sort in a directory listing, or start the job at point."
-  (interactive)
+(defun sql-datum-admin-start-or-sort (&optional reverse)
+  "Cycle the sort in a directory listing, or start the job at point.
+In a listing, a prefix argument REVERSEs the current sort rather than
+moving to the next column."
+  (interactive "P")
   (if (equal sql-datum--admin-panel-name "filesystem")
-      (sql-datum-admin-cycle-sort)
+      (sql-datum-admin-cycle-sort reverse)
     (sql-datum-admin-start-job)))
 
 (defun sql-datum-admin-restore-or-revoke ()

@@ -312,6 +312,7 @@ writes, renames or deletes.
 | =v=               | View the file at point                  |
 | =w=               | Copy the path at point to the kill ring |
 | =s=               | Cycle the sort: name, size, date        |
+| =C-u s=           | Reverse the current sort                |
 | =(=               | Show names only, or the details again   |
 
 Dired's keys where dired has one, and dired's faces for directories —

@@ -563,8 +563,8 @@ class MSSQLDriver(BaseDriver):
         # Documented and permission-light, but SQL Server 2017+ only.
         try:
             cursor.execute(
-                "SELECT full_filesystem_path, is_directory, size_in_bytes, "
-                "       last_write_time "
+                "SELECT full_filesystem_path, file_or_directory_name, "
+                "       is_directory, size_in_bytes, last_write_time "
                 "FROM sys.dm_os_enumerate_filesystem(?, N'*') "
                 # The DMV walks the whole subtree, reporting the depth of
                 # each entry.  Only the directory itself was asked for.
@@ -572,12 +572,17 @@ class MSSQLDriver(BaseDriver):
                 "ORDER BY is_directory DESC, full_filesystem_path", [path])
             rows = cursor.fetchall()
             entries = []
-            for full, is_dir, size, written in rows:
+            for full, name, is_dir, size, written in rows:
                 if not full:
                     continue
-                name = full.rstrip("/\\")
-                index = max(name.rfind("/"), name.rfind("\\"))
-                entries.append({"name": name[index + 1:] if index >= 0 else name,
+                # The name the server reports, rather than one cut out of
+                # the path here: the separator is the server's business,
+                # and it already knows where the name starts.
+                if not name:
+                    trimmed = full.rstrip("/\\")
+                    index = max(trimmed.rfind("/"), trimmed.rfind("\\"))
+                    name = trimmed[index + 1:] if index >= 0 else trimmed
+                entries.append({"name": name,
                                 "path": full,
                                 "is_dir": self.coerce_bool(is_dir),
                                 "size": None if size is None else int(size),

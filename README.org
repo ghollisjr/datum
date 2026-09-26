@@ -1048,12 +1048,16 @@ deletes.
 | =v=               | View the file at point                  |
 | =w=               | Copy the path at point to the kill ring |
 | =s=               | Cycle the sort: name, size, date        |
+| =C-u s=           | Reverse the current sort                |
 | =(=               | Show names only, or the details again   |
 | =g=               | Reload                                  |
 
 The keys are dired's where dired has one for the job, since that is
 what the hands expect: =e= and =f= open, =w= copies the name, =s=
-cycles the sort, =(= hides the details, =^= goes up.  Two of those are
+cycles the sort, =(= hides the details, =^= goes up.  =C-u s= turns the
+current sort around rather than moving on, so each of the three can be
+read either way; =RET= on a column header does the same for that
+column, and the state is shown in the line under the title.  Two of those are
 shared with other panels and change meaning with the panel — =e=
 enables or disables a job elsewhere, and =s= starts one.
 

@@ -31,7 +31,11 @@
    "[\"dir\",\"archive\",\"\",\"2026-09-25 12:00:00\","
    "\"/var/opt/mssql/log/archive\"],"
    "[\"file\",\"errorlog\",\"1327517\",\"2026-09-25 12:39:48\","
-   "\"/var/opt/mssql/log/errorlog\"]],"
+   "\"/var/opt/mssql/log/errorlog\"],"
+   "[\"file\",\"errorlog.1\",\"20716\",\"2026-08-05 19:04:53\","
+   "\"/var/opt/mssql/log/errorlog.1\"],"
+   "[\"file\",\"system_health.xel\",\"77824\",\"2026-03-21 13:17:18\","
+   "\"/var/opt/mssql/log/system_health.xel\"]],"
    "\"row_id\":4,\"display_columns\":4,\"auto_refresh\":false,"
    "\"actions\":[{\"key\":\"RET\",\"label\":\"Open directory\"},"
    "{\"key\":\"^\",\"label\":\"Parent directory\"},"
@@ -320,6 +324,30 @@
   (sql-datum-admin-cycle-sort)
   (test-fs-assert "and back round to name"
                   (eql sql-datum--admin-sort-column 1))
+  ;; Each of the three has to be readable either way round.
+  (test-fs-assert "cycling sorts ascending"
+                  sql-datum--admin-sort-ascending)
+  (sql-datum-admin-cycle-sort t)
+  (test-fs-assert "a prefix argument turns it around"
+                  (and (eql sql-datum--admin-sort-column 1)
+                       (not sql-datum--admin-sort-ascending)))
+  (sql-datum-admin-cycle-sort t)
+  (test-fs-assert "and turns it back"
+                  (and (eql sql-datum--admin-sort-column 1)
+                       sql-datum--admin-sort-ascending))
+  (sql-datum-admin-cycle-sort)
+  (test-fs-assert "plain s still moves on to the next column"
+                  (eql sql-datum--admin-sort-column 2))
+  (sql-datum-admin-cycle-sort t)
+  (test-fs-assert "which reverses on its own terms"
+                  (and (eql sql-datum--admin-sort-column 2)
+                       (not sql-datum--admin-sort-ascending)))
+  ;; Reversing before anything is sorted has to sort it first.
+  (setq sql-datum--admin-sort-column nil
+        sql-datum--admin-sort-ascending t)
+  (sql-datum-admin-cycle-sort t)
+  (test-fs-assert "reversing an unsorted listing sorts it by name"
+                  (eql sql-datum--admin-sort-column 1))
   (setq sql-datum--admin-sort-column nil))
 
 ;; s keeps starting jobs where that is what it means.
@@ -340,6 +368,16 @@
   (test-fs-assert "a hidden-details listing still knows its real columns"
                   (equal (mapcar #'car sql-datum--admin-col-positions) '(1)))
   (sql-datum-admin-toggle-details))
+
+(message "\n=== names keep their extensions ===")
+
+(with-current-buffer (test-fs--panel)
+  (test-fs-assert "a name with an extension is shown whole"
+                  (string-match-p "errorlog\\.1\\b" (buffer-string)))
+  (test-fs-assert "and is what the row reports"
+                  (progn (test-fs--goto "errorlog")
+                         (equal (nth 1 (sql-datum--admin-row-cells-at-point))
+                                "errorlog"))))
 
 (message "\n=== Windows drives ===")
 
