@@ -340,7 +340,9 @@ PostgreSQL, listing needs superuser or =pg_read_server_files=.
 capped prefix as text.  =C= copies what is marked into a directory you
 pick, a directory with everything under it.  A file fetched with =o= is
 reused by =C= rather than pulled twice, while its size and timestamp
-still match the listing.  Nothing here writes to the server.
+still match the listing.  Copies run on the background connection, so
+the session stays usable while a large one arrives.  Nothing here
+writes to the server.
 
 On Windows there is no single root, so going up from =C:\= (or a UNC
 share) lands on a list of the server's drives; =RET= descends into one.

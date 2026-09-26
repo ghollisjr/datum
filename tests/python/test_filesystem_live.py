@@ -762,3 +762,113 @@ class TestWalking:
         _c2, postgres = pg_env
         assert not mssql.seeks_when_reading
         assert postgres.seeks_when_reading
+
+
+class TestCopyingDoesNotBlockTheSession:
+    """A copy holds its connection for as long as the file takes.
+
+    The main connection is the interactive session, and the process
+    reads the next command on the same thread, so copying there leaves
+    the session unable to answer anything until the file is done.
+    """
+
+    def test_a_copy_goes_to_the_background_worker(self, mssql_env,
+                                                 nasty_mssql, tmp_path,
+                                                 captured, monkeypatch):
+        from datum import background
+        from datum.panels import filesystem
+
+        cursor, driver = mssql_env
+        root, _spaced = nasty_mssql
+        submitted = []
+        monkeypatch.setattr(background, "is_running", lambda: True)
+        monkeypatch.setattr(background, "submit",
+                            lambda name, handler, args=(): submitted.append(
+                                (name, handler, args)))
+
+        local = str(tmp_path / "bg.bak")
+        filesystem.run_action(cursor, driver, "download", [_payload(
+            {"path": driver.join_path(root, "top.bak"), "local": local})])
+
+        assert submitted, "the copy should have been handed off"
+        # And nothing was read on the session's own connection yet.
+        assert not os.path.exists(local)
+        # The caller is told, rather than left wondering.
+        said = " ".join(a[0] for k, a in captured if k == "info")
+        assert "background" in said, said
+
+    def test_the_handed_off_task_does_the_work(self, mssql_env, nasty_mssql,
+                                               tmp_path, captured,
+                                               monkeypatch):
+        from datum import background
+        from datum.panels import filesystem
+
+        cursor, driver = mssql_env
+        root, _spaced = nasty_mssql
+        submitted = []
+        monkeypatch.setattr(background, "is_running", lambda: True)
+        monkeypatch.setattr(background, "submit",
+                            lambda name, handler, args=(): submitted.append(
+                                handler))
+
+        local = str(tmp_path / "bg.bak")
+        filesystem.run_action(cursor, driver, "download", [_payload(
+            {"path": driver.join_path(root, "top.bak"), "local": local})])
+
+        # The worker calls it with a connection of its own, as conn=.
+        class Connection:
+            def __init__(self, cur): self._cur = cur
+            def cursor(self): return self._cur
+
+        submitted[0](conn=Connection(cursor))
+        assert os.path.getsize(local) > 0
+        panel = [a[0] for k, a in captured if k == "admin_panel"][0]
+        assert panel["local"] == local
+
+    def test_a_tree_is_handed_off_too(self, mssql_env, nasty_mssql, tmp_path,
+                                     captured, monkeypatch):
+        from datum import background
+        from datum.panels import filesystem
+
+        cursor, driver = mssql_env
+        root, _spaced = nasty_mssql
+        submitted = []
+        monkeypatch.setattr(background, "is_running", lambda: True)
+        monkeypatch.setattr(background, "submit",
+                            lambda name, handler, args=(): submitted.append(
+                                name))
+        filesystem.run_action(cursor, driver, "download-tree", [_payload(
+            {"path": root, "local": str(tmp_path / "tree")})])
+        assert submitted and "tree" in submitted[0], submitted
+
+    def test_without_a_worker_it_still_copies(self, mssql_env, nasty_mssql,
+                                              tmp_path, captured,
+                                              monkeypatch):
+        from datum import background
+        from datum.panels import filesystem
+
+        cursor, driver = mssql_env
+        root, _spaced = nasty_mssql
+        monkeypatch.setattr(background, "is_running", lambda: False)
+        local = str(tmp_path / "inline.bak")
+        filesystem.run_action(cursor, driver, "download", [_payload(
+            {"path": driver.join_path(root, "top.bak"), "local": local})])
+        # Same behaviour, only blocking -- which is better than nothing.
+        assert os.path.getsize(local) > 0
+
+    def test_viewing_stays_on_the_session(self, mssql_env, captured,
+                                          monkeypatch):
+        from datum import background
+        from datum.panels import filesystem
+
+        cursor, driver = mssql_env
+        submitted = []
+        monkeypatch.setattr(background, "is_running", lambda: True)
+        monkeypatch.setattr(background, "submit",
+                            lambda *a, **k: submitted.append(a))
+        filesystem.run_action(cursor, driver, "view", [_payload(
+            {"path": "/var/opt/mssql/log/errorlog"})])
+        # A peek is capped at 256KB, so it answers at once and its
+        # ordering stays predictable.
+        assert not submitted
+        assert [a[0] for k, a in captured if k == "admin_panel"]

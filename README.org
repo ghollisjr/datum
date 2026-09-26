@@ -1112,6 +1112,16 @@ measured whole against it before anything is copied, so a stray key on
 a multi-gigabyte backup does not quietly start pulling it.  Within a
 directory, one unreadable file is reported and the rest still arrive.
 
+A copy runs on the background worker's own connection, not the one the
+interactive session uses.  Reading a file holds its connection for as
+long as the file takes, and the process reads the next command on the
+same thread — so copying on the session's connection would leave the
+session unable to answer anything until the file was done.  The worker
+already exists for introspection, and has a connection of its own.
+
+=v= stays on the session, since a capped peek answers at once and its
+ordering is easier to follow that way.
+
 Reads are chunked only where that helps.  SQL Server has no seek —
 =OPENROWSET= starts at the beginning of the file every time — so a file
 is read whole there; PostgreSQL seeks, so a large one is pulled in

@@ -213,9 +213,10 @@ def run_action(cursor, driver, action_name, args):
         elif action_name == "view":
             _view_file(cursor, driver, args)
         elif action_name == "download":
-            _download(cursor, driver, args)
+            _off_the_session(cursor, driver, args, _download, "copy")
         elif action_name == "download-tree":
-            _download_tree(cursor, driver, args)
+            _off_the_session(cursor, driver, args, _download_tree,
+                             "copy tree")
         else:
             envelope.error(f"Unknown filesystem action: {action_name}")
     except Exception as err:
@@ -446,3 +447,33 @@ def _relative_to(driver, root, path):
         return None
     # The server's separator, whichever it is.
     return [part for part in rest.replace("\\", "/").split("/") if part]
+
+
+def _off_the_session(cursor, driver, args, handler, label):
+    """Run HANDLER on the background connection, where there is one.
+
+    A copy holds its connection for as long as the file takes to read,
+    and the main connection is the interactive session — so running it
+    there leaves the session unable to answer anything until the file
+    is done.  The background worker has a connection of its own, which
+    is what it is for.
+
+    Falls back to running inline when no worker is up, so the behaviour
+    is the same, only blocking.
+    """
+    from .. import background
+    from .. import envelope
+
+    if not background.is_running():
+        handler(cursor, driver, args)
+        return
+
+    def task(conn=None):
+        # A cursor of its own, on the worker's own connection.
+        handler(conn.cursor(), driver, args)
+
+    payload = _decode_payload(args) if args else {}
+    remote = payload.get("path") or ""
+    background.submit(f"filesystem {label}", task)
+    envelope.info(f"Copying {remote} in the background — "
+                  f"the session stays usable")
