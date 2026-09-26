@@ -165,8 +165,13 @@ def get_data(cursor, driver, args):
         {"key": "w", "label": "Copy path", "command": None},
     ]
     if driver.supports_file_read:
-        actions.insert(2, {"key": "v", "label": "View file",
+        actions.insert(2, {"key": "v", "label": "View as text",
                            "command": "view"})
+        actions.insert(3, {"key": "o", "label": "Open here",
+                           "command": "download"})
+        actions.insert(4, {"key": "C", "label": "Copy here",
+                           "command": "download"})
+        actions.insert(5, {"key": "m", "label": "Mark", "command": None})
     rows = _rows_for(driver, cursor, path, entries)
     files = sum(1 for r in rows if r[0] == "file")
     dirs = sum(1 for r in rows if r[0] == "dir" and r[1] != "..")
@@ -240,7 +245,8 @@ def _view_file(cursor, driver, args):
         return
 
     if driver.looks_binary(text):
-        # Better to say what it is than to fill a buffer with it.
+        # Better to say what it is than to fill a buffer with it, and
+        # point at the key that fetches it whole for Emacs to open.
         size = f"{len(text)} bytes read" if text else "empty"
         envelope.admin_panel({
             "panel": "filesystem",
@@ -250,10 +256,14 @@ def _view_file(cursor, driver, args):
             "rows": [],
             "row_id": None,
             "actions": [],
-            "info": f"{path} looks like a binary file — not shown",
+            "info": f"{path} is not text — press o in the listing to "
+                    f"fetch it and let Emacs open it",
             "content": (f"{path}\n\n"
                         f"This does not decode as text ({size}), so it is "
-                        f"not shown.\n"),
+                        f"not shown here.\n\n"
+                        f"Press o in the listing to fetch it whole and let "
+                        f"Emacs open it — an archive in archive-mode, an "
+                        f"image in image-mode, and so on.\n"),
             "parent_panel": "filesystem",
             "context": {"path": path},
         })
@@ -355,6 +365,10 @@ def _download(cursor, driver, args):
         "remote": remote,
         "size": stat.get("size"),
         "modified": stat.get("modified") or "",
+        # Echoed back so the client knows what it asked for: whether to
+        # open what arrived, and where to put it afterwards.
+        "then": opts.get("then") or "",
+        "final": opts.get("final") or "",
         "context": {"path": remote},
     })
 
@@ -415,6 +429,8 @@ def _download_tree(cursor, driver, args):
         "info": note,
         "local": local,
         "remote": remote,
+        "then": opts.get("then") or "",
+        "final": opts.get("final") or "",
         "context": {"path": remote},
     })
 

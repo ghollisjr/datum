@@ -532,4 +532,226 @@
                     sql-datum--admin-timer)
     (sql-datum--admin-stop-timer (current-buffer))))
 
+
+(message "\n=== copying to this machine ===")
+
+(defvar test-fs--dl (expand-file-name "datum-test-dl" temporary-file-directory))
+
+(setq sql-datum-download-directory (expand-file-name "cache" test-fs--dl))
+(when (file-directory-p test-fs--dl) (delete-directory test-fs--dl t))
+
+(with-current-buffer (test-fs--panel)
+  (clrhash sql-datum--fs-cache)
+  (let (sent)
+    (cl-letf (((symbol-function 'sql-datum--admin-send-command)
+               (lambda (c) (setq sent c))))
+      ;; o asks for the file and says to open it when it lands.
+      (test-fs--goto "errorlog")
+      (sql-datum-admin-open-locally)
+      (test-fs-assert "o asks for a copy of the file"
+                      (string-prefix-p ":admin-action filesystem download "
+                                       sent))
+      (let ((payload (json-parse-string
+                      (decode-coding-string
+                       (base64-decode-string
+                        (car (last (split-string sent " "))))
+                       'utf-8)
+                      :object-type 'alist)))
+        (test-fs-assert "naming the server file"
+                        (equal (alist-get 'path payload)
+                               "/var/opt/mssql/log/errorlog"))
+        (test-fs-assert "and saying to open it once it is here"
+                        (equal (alist-get 'then payload) "open"))
+        ;; The local name has to keep the extension, or Emacs will not
+        ;; know what the file is.
+        (test-fs--goto "system_health.xel")
+        (test-fs-assert "the local name keeps the extension"
+                        (string-suffix-p
+                         ".xel" (sql-datum--fs-local-name
+                                 "/var/opt/mssql/log/system_health.xel"))))
+      ;; A directory is opened by RET, not fetched.
+      (test-fs--goto "archive")
+      (test-fs-error "o on a directory says to use RET"
+                     (sql-datum-admin-open-locally))))
+
+  ;; Once it is here and still current, it is not fetched again.
+  (let* ((remote "/var/opt/mssql/log/errorlog")
+         (local (sql-datum--fs-local-name remote)))
+    (make-directory (file-name-directory local) t)
+    (with-temp-file local (insert "cached contents"))
+    (sql-datum--fs-cache-put remote local 1327517 "2026-09-25 12:39:48")
+    (test-fs-assert "a copy matching the listing is reused"
+                    (equal (sql-datum--fs-cached
+                            remote "1327517" "2026-09-25 12:39:48")
+                           local))
+    ;; Both have to match: a file rewritten to the same length still
+    ;; moves its timestamp.
+    (test-fs-assert "a changed timestamp means fetching it again"
+                    (null (sql-datum--fs-cached
+                           remote "1327517" "2026-09-26 08:00:00")))
+    (test-fs-assert "and so does a changed size"
+                    (null (sql-datum--fs-cached
+                           remote "99" "2026-09-25 12:39:48")))
+    (delete-file local)
+    (test-fs-assert "a copy that has been deleted is not offered"
+                    (null (sql-datum--fs-cached
+                           remote "1327517" "2026-09-25 12:39:48")))))
+
+(message "\n=== marking ===")
+
+(with-current-buffer (test-fs--panel)
+  (setq sql-datum--admin-fs-marks nil)
+  (test-fs--goto "errorlog")
+  (sql-datum-admin-fs-mark)
+  (test-fs-assert "m marks the row"
+                  (equal sql-datum--admin-fs-marks
+                         '("/var/opt/mssql/log/errorlog")))
+  (test-fs-assert "and moves on, as dired does"
+                  (progn (equal (nth 1 (sql-datum--admin-row-cells-at-point))
+                                "errorlog.1")))
+  (sql-datum-admin-fs-mark)
+  (test-fs-assert "marking again adds to the set"
+                  (= 2 (length sql-datum--admin-fs-marks)))
+  ;; A mark shows in the margin, so it cannot shift the columns.
+  (test-fs-assert "a marked row is shown as marked"
+                  (progn (test-fs--goto "errorlog")
+                         (cl-some (lambda (o) (overlay-get o 'sql-datum-mark))
+                                  (overlays-in (line-beginning-position)
+                                               (line-end-position)))))
+  (test-fs-assert "the columns are where they were"
+                  (equal (mapcar #'car sql-datum--admin-col-positions)
+                         '(0 1 2 3)))
+  (test-fs--goto "errorlog")
+  (sql-datum-admin-fs-unmark)
+  (test-fs-assert "u takes a mark off"
+                  (equal sql-datum--admin-fs-marks
+                         '("/var/opt/mssql/log/errorlog.1")))
+  (sql-datum-admin-fs-toggle-marks)
+  (test-fs-assert "t marks everything else instead"
+                  (and (member "/var/opt/mssql/log/errorlog"
+                               sql-datum--admin-fs-marks)
+                       (not (member "/var/opt/mssql/log/errorlog.1"
+                                    sql-datum--admin-fs-marks))))
+  (test-fs-assert "and never marks the way up"
+                  (not (member ":drives" sql-datum--admin-fs-marks)))
+  (sql-datum-admin-fs-unmark-all)
+  (test-fs-assert "U clears them"
+                  (null sql-datum--admin-fs-marks))
+  (test-fs--goto "..")
+  (test-fs-error "the way up is not something to mark"
+                 (sql-datum-admin-fs-mark)))
+
+;; Marks survive a redraw, which erases the buffer.
+(with-current-buffer (test-fs--panel)
+  (setq sql-datum--admin-fs-marks '("/var/opt/mssql/log/errorlog"))
+  (sql-datum--admin-show-panel sql-datum--admin-panel-data
+                               sql-datum--admin-sqli-buf)
+  (test-fs-assert "a mark is drawn again after a refresh"
+                  (progn (test-fs--goto "errorlog")
+                         (cl-some (lambda (o) (overlay-get o 'sql-datum-mark))
+                                  (overlays-in (line-beginning-position)
+                                               (line-end-position)))))
+  (setq sql-datum--admin-fs-marks nil))
+
+(message "\n=== C copies what is marked ===")
+
+(with-current-buffer (test-fs--panel)
+  (clrhash sql-datum--fs-cache)
+  (setq sql-datum--admin-fs-marks
+        '("/var/opt/mssql/log/errorlog" "/var/opt/mssql/log/errorlog.1"))
+  (sql-datum--admin-show-panel sql-datum--admin-panel-data
+                               sql-datum--admin-sqli-buf)
+  (let (sent)
+    (cl-letf (((symbol-function 'sql-datum--admin-send-command)
+               (lambda (c) (push c sent))))
+      (sql-datum-admin-fs-copy (expand-file-name "out" test-fs--dl))
+      (test-fs-assert "both marked files are asked for"
+                      (= 2 (length sent)))
+      (test-fs-assert "each names where it should end up"
+                      (cl-every
+                       (lambda (c)
+                         (let ((p (json-parse-string
+                                   (decode-coding-string
+                                    (base64-decode-string
+                                     (car (last (split-string c " "))))
+                                    'utf-8)
+                                   :object-type 'alist)))
+                           (and (alist-get 'final p)
+                                (string-match-p "/out/"
+                                                (alist-get 'final p)))))
+                       sent))))
+  (setq sql-datum--admin-fs-marks nil))
+
+;; A directory is copied whole.
+(with-current-buffer (test-fs--panel)
+  (let (sent)
+    (cl-letf (((symbol-function 'sql-datum--admin-send-command)
+               (lambda (c) (setq sent c))))
+      (test-fs--goto "archive")
+      (sql-datum-admin-fs-copy (expand-file-name "out" test-fs--dl))
+      (test-fs-assert "a directory is copied with what is under it"
+                      (string-prefix-p
+                       ":admin-action filesystem download-tree " sent)))))
+
+;; A file already here is copied from that copy, not fetched again.
+(with-current-buffer (test-fs--panel)
+  (clrhash sql-datum--fs-cache)
+  (let* ((remote "/var/opt/mssql/log/errorlog")
+         (local (sql-datum--fs-local-name remote))
+         (out (expand-file-name "out2" test-fs--dl))
+         sent)
+    (make-directory (file-name-directory local) t)
+    (with-temp-file local (insert "already here"))
+    (sql-datum--fs-cache-put remote local "1327517" "2026-09-25 12:39:48")
+    (cl-letf (((symbol-function 'sql-datum--admin-send-command)
+               (lambda (c) (setq sent c))))
+      (test-fs--goto "errorlog")
+      (sql-datum-admin-fs-copy out))
+    (test-fs-assert "nothing is fetched for a file already here"
+                    (null sent))
+    (test-fs-assert "and it lands where it was asked to"
+                    (equal (with-temp-buffer
+                             (insert-file-contents
+                              (expand-file-name "errorlog" out))
+                             (buffer-string))
+                           "already here"))))
+
+(message "\n=== what arrives is remembered, and opened if asked ===")
+
+(let ((local (expand-file-name "arrived.zip" test-fs--dl)))
+  (make-directory test-fs--dl t)
+  (with-temp-file local (insert "PK\003\004 not really a zip"))
+  (clrhash sql-datum--fs-cache)
+  (let (opened)
+    (cl-letf (((symbol-function 'find-file)
+               (lambda (f) (setq opened f))))
+      (sql-datum--admin-handle-downloaded
+       (list (cons 'local local) (cons 'remote "/srv/arrived.zip")
+             (cons 'size 21) (cons 'modified "2026-09-25 12:00:00")
+             (cons 'then "open") (cons 'info "21 bytes"))
+       nil)
+      (test-fs-assert "a file asked to be opened is opened"
+                      (equal opened local)))
+    (test-fs-assert "and is remembered for next time"
+                    (equal (sql-datum--fs-cached
+                            "/srv/arrived.zip" "21" "2026-09-25 12:00:00")
+                           local))))
+
+;; Where a copy was wanted, the temporary one is moved on.
+(let ((local (expand-file-name "temp.bin" test-fs--dl))
+      (final (expand-file-name "kept/temp.bin" test-fs--dl)))
+  (with-temp-file local (insert "payload"))
+  (sql-datum--admin-handle-downloaded
+   (list (cons 'local local) (cons 'remote "/srv/temp.bin")
+         (cons 'final final) (cons 'size 7) (cons 'modified "t")
+         (cons 'info "7 bytes"))
+   nil)
+  (test-fs-assert "a file wanted for keeping is put in place"
+                  (and (file-readable-p final)
+                       (equal (with-temp-buffer
+                                (insert-file-contents final) (buffer-string))
+                              "payload"))))
+
+(when (file-directory-p test-fs--dl) (delete-directory test-fs--dl t))
+
 (message "\n%d passed, %d failed" test-fs--pass test-fs--fail)

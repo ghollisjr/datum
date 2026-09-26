@@ -1051,6 +1051,10 @@ deletes.
 | =C-u s=           | Reverse the current sort                |
 | =(=               | Show names only, or the details again   |
 | =g=               | Reload                                  |
+| =o=               | Fetch the file and let Emacs open it    |
+| =C=               | Copy what is marked here                |
+| =m= / =u=         | Mark / unmark, moving on                |
+| =t= / =U=         | Toggle the marks / drop them all        |
 
 The keys are dired's where dired has one for the job, since that is
 what the hands expect: =e= and =f= open, =w= copies the name, =s=
@@ -1077,6 +1081,47 @@ on the server's OS and the Emacs client has no way to know it — SQL
 Server runs on Linux as readily as on Windows.  Navigation therefore
 uses the full path the server reported for each entry rather than one
 assembled here.
+
+**** Copying files off the server
+
+The datum process runs beside Emacs — it is the ODBC client — so a file
+read over SQL can be written straight to the local disk.  Nothing
+travels through the envelope, which is the same route =:out= already
+takes for exported results.
+
+=o= fetches the file at point whole and hands it to Emacs, which then
+decides what it is: an archive opens in =archive-mode=, an image in
+=image-mode=, and so on.  That is the answer to viewing a zip — =v=
+reads a capped prefix and decodes it as text, which no archive survives,
+and its note says as much and points at =o=.
+
+=C= copies what is marked — or what is at point — into a directory you
+choose.  A directory is copied with everything under it.
+
+Fetched files are kept under =sql-datum-download-directory=, or a
+=datum-files= directory under the temporary one, named so that Emacs
+still recognises them: the basename is kept, so a =.zip= still looks
+like a =.zip=, and the directories above it become a hash of the server
+path so two files of the same name do not collide.  A copy is reused
+when its size and timestamp still match what the listing reports, which
+costs nothing to check — the row already carries both.  So looking at a
+file with =o= and then keeping it with =C= fetches it once.
+
+Both are bounded by =sql-datum-download-limit=, and a directory is
+measured whole against it before anything is copied, so a stray key on
+a multi-gigabyte backup does not quietly start pulling it.  Within a
+directory, one unreadable file is reported and the rest still arrive.
+
+Reads are chunked only where that helps.  SQL Server has no seek —
+=OPENROWSET= starts at the beginning of the file every time — so a file
+is read whole there; PostgreSQL seeks, so a large one is pulled in
+pieces and never held entirely in memory.
+
+Nothing here writes to the server.  Both dialects *can* write, as it
+happens — PostgreSQL through =lo_export= and =COPY=, SQL Server through
+=BACKUP= and =xp_create_subdir= — but a write through a database
+connection runs as the *server's* account with its privileges, which is
+a sharper edge than dired's, and is left out deliberately.
 
 **** Windows drives
 

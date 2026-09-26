@@ -90,6 +90,26 @@ Override per-call with a prefix argument to `sql-datum-import'."
   :type 'integer
   :group 'SQL)
 
+(defcustom sql-datum-download-directory nil
+  "Where files pulled off a server are kept while being looked at.
+
+nil means a datum directory under `temporary-file-directory\='.  Files
+land here when opened with `o\=' in the server filesystem panel, and are
+reused when the same file is copied somewhere for keeping, so that
+looking at a file and then deciding to keep it fetches it once."
+  :type '(choice (const :tag "A directory under the temporary one" nil)
+                 directory)
+  :group 'SQL)
+
+(defcustom sql-datum-download-limit (* 256 1024 1024)
+  "Largest file, in bytes, that will be copied off a server.
+
+A directory is measured whole against this before anything is copied.
+The limit is there so that a stray key on a multi-gigabyte backup does
+not quietly start pulling it."
+  :type 'integer
+  :group 'SQL)
+
 (defcustom sql-datum-confirm-drop t
   "When non-nil, prompt for confirmation before dropping a table."
   :type 'boolean
@@ -925,6 +945,9 @@ Set to nil to disable auto-refresh."
 (defvar-local sql-datum--admin-timer nil
   "Auto-refresh timer for this admin buffer.")
 
+(defvar-local sql-datum--admin-fs-marks nil
+  "Server paths marked in this listing, as dired marks lines.")
+
 (defvar-local sql-datum--admin-hide-details nil
   "Non-nil to draw only names in a filesystem listing.
 `(\=' toggles it, as `dired-hide-details-mode\=' does in dired.")
@@ -1007,6 +1030,10 @@ still letting an explicit request raise one.")
          ;; Server-side directory listing for a path field
          ((equal sub-panel "path-browser")
           (run-at-time 0 nil #'sql-datum--admin-show-path-browser
+                       data sqli-buf))
+         ;; A file that has just been copied to this machine
+         ((equal sub-panel "downloaded")
+          (run-at-time 0 nil #'sql-datum--admin-handle-downloaded
                        data sqli-buf))
          ;; A server file's contents, read-only
          ((equal sub-panel "file")
@@ -1142,7 +1169,10 @@ SQLI-BUF is the originating SQLi buffer."
           (setq sql-datum--admin-header-line-count header-lines)
           ;; Help line
           (insert "\n")
-          (sql-datum--admin-insert-help-line actions))
+          (sql-datum--admin-insert-help-line actions)
+          ;; The buffer was erased, so the marks have to be drawn again.
+          (when (equal panel "filesystem")
+            (sql-datum--admin-fs-apply-marks)))
         ;; Set buffer-local state after mode init
         (setq sql-datum--admin-panel-data data
               sql-datum--admin-sqli-buf sqli-buf
@@ -1610,6 +1640,15 @@ SQLI-BUF is the originating SQLi buffer."
     ;; jobs; s and ( are free, so only s needs sharing with the jobs
     ;; panel, where it starts a job.
     (define-key map "f" #'sql-datum-admin-open-path)
+    ;; o and U already meant something: o prompts for a column to sort
+    ;; by, and U shows a login's database users.  In a listing they are
+    ;; dired's keys instead.  C, m, u and t were free.
+    (define-key map "o" #'sql-datum-admin-open-or-sort)
+    (define-key map "U" #'sql-datum-admin-unmark-or-mappings)
+    (define-key map "C" #'sql-datum-admin-fs-copy)
+    (define-key map "m" #'sql-datum-admin-fs-mark)
+    (define-key map "u" #'sql-datum-admin-fs-unmark)
+    (define-key map "t" #'sql-datum-admin-fs-toggle-marks)
     (define-key map "(" #'sql-datum-admin-toggle-details)
     (define-key map "^" #'sql-datum-admin-parent-directory)
     (define-key map "v" #'sql-datum-admin-view-file)
@@ -2346,6 +2385,238 @@ moving to the next column."
   (if (equal sql-datum--admin-panel-name "filesystem")
       (sql-datum-admin-cycle-sort reverse)
     (sql-datum-admin-start-job)))
+
+(defun sql-datum--admin-handle-downloaded (data sqli-buf)
+  "Note that a file arrived, and open it if that is what was asked.
+DATA is the panel the server sent; SQLI-BUF is the connection."
+  (let ((local (alist-get 'local data))
+        (remote (alist-get 'remote data))
+        (failures (alist-get 'rows data)))
+    (when (and remote local (file-readable-p local)
+               (not (file-directory-p local)))
+      (sql-datum--fs-cache-put remote local
+                               (alist-get 'size data)
+                               (alist-get 'modified data)
+                               sqli-buf))
+    ;; Where a copy was wanted for keeping, the temporary one is moved
+    ;; on rather than the file being fetched twice.
+    (let ((final (alist-get 'final data)))
+      (when (and final (not (string-empty-p final)) local
+                 (file-readable-p local))
+        (condition-case err
+            (progn
+              (make-directory (file-name-directory final) t)
+              (copy-file local final t t)
+              (message "datum: copied to %s" final))
+          (error (message "datum: could not put it at %s: %s"
+                          final (error-message-string err))))))
+    (cond
+     ((and (equal (alist-get 'then data) "open") local
+           (file-readable-p local))
+      ;; Emacs decides what it is: a zip opens in `archive-mode', an
+      ;; image in `image-mode', and so on.
+      (find-file local))
+     (failures
+      (message "datum: %s (%d could not be read)"
+               (alist-get 'info data) (length failures)))
+     (t (message "datum: %s" (alist-get 'info data))))))
+
+(defun sql-datum--admin-fs-apply-marks ()
+  "Show which rows are marked, the way dired shows it."
+  (when sql-datum--admin-fs-marks
+    (require 'dired nil t)
+    (setq left-margin-width 2)
+    (save-excursion
+      (goto-char (point-min))
+      (while (not (eobp))
+        (let ((id (sql-datum--admin-row-id-at-point)))
+          (when (and id (member id sql-datum--admin-fs-marks))
+            (let ((overlay (make-overlay (line-beginning-position)
+                                         (line-end-position))))
+              (overlay-put overlay 'sql-datum-mark t)
+              (overlay-put overlay 'face 'dired-marked)
+              ;; In the margin, so marking cannot shift the columns.
+              (overlay-put overlay 'before-string
+                           (propertize "*" 'display
+                                       '((margin left-margin) "*"))))))
+        (forward-line 1)))))
+
+(defun sql-datum--admin-fs-targets ()
+  "Return the rows to act on: the marked ones, or the one at point.
+Each is a cons of the type and the path."
+  (if sql-datum--admin-fs-marks
+      (let (found)
+        (save-excursion
+          (goto-char (point-min))
+          (while (not (eobp))
+            (let ((id (sql-datum--admin-row-id-at-point)))
+              (when (and id (member id sql-datum--admin-fs-marks))
+                (let ((cells (sql-datum--admin-row-cells-at-point)))
+                  (push (list (if cells (nth 0 cells) "file") id
+                              (and cells (nth 1 cells))
+                              (and cells (nth 2 cells))
+                              (and cells (nth 3 cells)))
+                        found))))
+            (forward-line 1)))
+        (nreverse found))
+    (let ((cells (sql-datum--admin-row-cells-at-point))
+          (path (sql-datum--admin-row-id-at-point)))
+      (unless path (user-error "Nothing at point"))
+      (list (list (if cells (nth 0 cells) "file") path
+                  (and cells (nth 1 cells))
+                  (and cells (nth 2 cells))
+                  (and cells (nth 3 cells)))))))
+
+(defun sql-datum-admin-fs-mark ()
+  "Mark the entry at point and move on, as `m\=' does in dired."
+  (interactive)
+  (unless (equal sql-datum--admin-panel-name "filesystem")
+    (user-error "Not in the server filesystem panel"))
+  (let ((path (sql-datum--admin-row-id-at-point))
+        (cells (sql-datum--admin-row-cells-at-point)))
+    (unless path (user-error "Nothing at point"))
+    (when (equal (and cells (nth 1 cells)) "..")
+      (user-error "The way up is not something to mark"))
+    (cl-pushnew path sql-datum--admin-fs-marks :test #'equal)
+    (sql-datum--admin-fs-apply-marks)
+    (forward-line 1)
+    (message "datum: %d marked" (length sql-datum--admin-fs-marks))))
+
+(defun sql-datum-admin-fs-unmark ()
+  "Unmark the entry at point and move on, as `u\=' does in dired."
+  (interactive)
+  (unless (equal sql-datum--admin-panel-name "filesystem")
+    (user-error "Not in the server filesystem panel"))
+  (let ((path (sql-datum--admin-row-id-at-point)))
+    (setq sql-datum--admin-fs-marks
+          (delete path sql-datum--admin-fs-marks))
+    (remove-overlays (line-beginning-position) (line-end-position)
+                     'sql-datum-mark t)
+    (forward-line 1)
+    (message "datum: %d marked" (length sql-datum--admin-fs-marks))))
+
+(defun sql-datum-admin-fs-unmark-all ()
+  "Drop every mark, as `U\=' does in dired."
+  (interactive)
+  (setq sql-datum--admin-fs-marks nil)
+  (remove-overlays (point-min) (point-max) 'sql-datum-mark t)
+  (message "datum: no marks"))
+
+(defun sql-datum-admin-fs-toggle-marks ()
+  "Mark what is not marked and unmark what is, as `t\=' does in dired."
+  (interactive)
+  (unless (equal sql-datum--admin-panel-name "filesystem")
+    (user-error "Not in the server filesystem panel"))
+  (let (marks)
+    (save-excursion
+      (goto-char (point-min))
+      (while (not (eobp))
+        (let ((id (sql-datum--admin-row-id-at-point))
+              (cells (sql-datum--admin-row-cells-at-point)))
+          (when (and id (not (equal (and cells (nth 1 cells)) ".."))
+                     (not (member id sql-datum--admin-fs-marks)))
+            (push id marks)))
+        (forward-line 1)))
+    (setq sql-datum--admin-fs-marks (nreverse marks))
+    (remove-overlays (point-min) (point-max) 'sql-datum-mark t)
+    (sql-datum--admin-fs-apply-marks)
+    (message "datum: %d marked" (length sql-datum--admin-fs-marks))))
+
+(defun sql-datum-admin-open-locally ()
+  "Copy the file at point to this machine and let Emacs open it.
+
+`v\=' shows a file as text, which is what a log wants.  This is for
+everything else: the file is fetched whole, so Emacs opens it as
+whatever it is — a zip in `archive-mode\=', an image in `image-mode\='.
+A copy already fetched and still current is reused."
+  (interactive)
+  (pcase-let ((`(,type ,path) (sql-datum--admin-fs-row)))
+    (when (equal type "dir")
+      (user-error "%s is a directory — RET opens it" path))
+    (let* ((cells (sql-datum--admin-row-cells-at-point))
+           (size (nth 2 cells))
+           (modified (nth 3 cells))
+           (cached (sql-datum--fs-cached path size modified)))
+      (if cached
+          (progn (find-file cached)
+                 (message "datum: already had it, at %s" cached))
+        (message "datum: fetching %s..." path)
+        (sql-datum--admin-send-command
+         (format ":admin-action filesystem download %s"
+                 (sql-datum--admin-payload
+                  `((path . ,path)
+                    (local . ,(sql-datum--fs-local-name path))
+                    (then . "open")
+                    (limit . ,sql-datum-download-limit)))))))))
+
+(defun sql-datum-admin-open-or-sort ()
+  "Open the file at point locally, or ask which column to sort by.
+`o\=' opens in dired; elsewhere in the panels it has always prompted for
+a sort column, and still does."
+  (interactive)
+  (if (equal sql-datum--admin-panel-name "filesystem")
+      (sql-datum-admin-open-locally)
+    (sql-datum-admin-sort)))
+
+(defun sql-datum-admin-unmark-or-mappings ()
+  "Drop every mark, or show the database users of the login at point.
+`U\=' unmarks in dired; in the security panel it keeps its own meaning."
+  (interactive)
+  (if (equal sql-datum--admin-panel-name "filesystem")
+      (sql-datum-admin-fs-unmark-all)
+    (sql-datum-admin-user-mappings)))
+
+(defun sql-datum-admin-fs-copy (destination)
+  "Copy what is marked, or what is at point, into DESTINATION.
+
+A directory is copied with everything under it.  A file already
+fetched and still current is copied from that copy rather than being
+pulled again, which is the point of keeping it."
+  (interactive
+   (progn
+     (unless (equal sql-datum--admin-panel-name "filesystem")
+       (user-error "Not in the server filesystem panel"))
+     (list (read-directory-name "Copy to: " default-directory nil nil))))
+  (let ((targets (sql-datum--admin-fs-targets))
+        (fetched 0) (reused 0) (trees 0))
+    (dolist (target targets)
+      (pcase-let ((`(,type ,path ,name ,size ,modified) target))
+        (let* ((base (or (and name (not (string-empty-p name)) name)
+                         (file-name-nondirectory path)))
+               (final (expand-file-name base destination)))
+          (cond
+           ((equal type "dir")
+            (cl-incf trees)
+            (sql-datum--admin-send-command
+             (format ":admin-action filesystem download-tree %s"
+                     (sql-datum--admin-payload
+                      `((path . ,path) (local . ,final)
+                        (limit . ,sql-datum-download-limit))))))
+           ((sql-datum--fs-cached path size modified)
+            (cl-incf reused)
+            (make-directory destination t)
+            (copy-file (sql-datum--fs-cached path size modified) final t t))
+           (t
+            (cl-incf fetched)
+            ;; Fetched into the cache and put in place from there, so
+            ;; looking at it again later costs nothing.
+            (sql-datum--admin-send-command
+             (format ":admin-action filesystem download %s"
+                     (sql-datum--admin-payload
+                      `((path . ,path)
+                        (local . ,(sql-datum--fs-local-name path))
+                        (final . ,final)
+                        (limit . ,sql-datum-download-limit))))))))))
+    (message "datum: %s"
+             (string-join
+              (delq nil
+                    (list (and (> reused 0)
+                               (format "%d already had" reused))
+                          (and (> fetched 0) (format "%d fetching" fetched))
+                          (and (> trees 0)
+                               (format "%d director%s" trees
+                                       (if (= trees 1) "y" "ies")))))
+              ", "))))
 
 (defun sql-datum-admin-restore-or-revoke ()
   "Revoke the permission at point, or restore the backup at point.
@@ -3737,6 +4008,65 @@ rebuilds the form.")
   "Return to the form without changing the path."
   (interactive)
   (sql-datum--path-browser-return nil))
+
+(defvar sql-datum--fs-cache (make-hash-table :test 'equal)
+  "Files already pulled off a server, keyed by connection and path.
+
+Each value is a plist of :local, :size and :modified.  A listing row
+already carries the size and the time the server last reported, so
+deciding whether a copy is still good costs nothing — no extra round
+trip to ask.")
+
+(defun sql-datum--fs-download-root ()
+  "Return the directory downloaded files are kept in, creating it."
+  (let ((root (or sql-datum-download-directory
+                  (expand-file-name "datum-files"
+                                    temporary-file-directory))))
+    (unless (file-directory-p root)
+      (make-directory root t))
+    root))
+
+(defun sql-datum--fs-cache-key (path &optional sqli-buf)
+  "Return the cache key for PATH on a connection.
+SQLI-BUF defaults to the one this buffer was filled from."
+  (let ((buf (or sqli-buf sql-datum--admin-sqli-buf)))
+    (concat (if (buffer-live-p buf) (buffer-name buf) "?") "|" path)))
+
+(defun sql-datum--fs-local-name (path &optional sqli-buf)
+  "Return a local path to keep PATH at.
+
+The basename is kept so that Emacs still recognises the file by its
+extension — a zip has to look like a zip for `archive-mode\=' to open
+it — and the directories above it are replaced by a hash of the
+server path, so two files of the same name do not collide."
+  (let* ((trimmed (replace-regexp-in-string "[/\\\\]+\\'" "" path))
+         (base (if (string-match "\\([^/\\\\]+\\)\\'" trimmed)
+                   (match-string 1 trimmed)
+                 "file"))
+         (key (sql-datum--fs-cache-key path sqli-buf)))
+    (expand-file-name (concat (substring (md5 key) 0 10) "-" base)
+                      (sql-datum--fs-download-root))))
+
+(defun sql-datum--fs-cached (path size modified)
+  "Return the local copy of PATH when it is still good, else nil.
+
+SIZE and MODIFIED are what the listing last reported."
+  (let ((entry (gethash (sql-datum--fs-cache-key path) sql-datum--fs-cache)))
+    (when (and entry
+               (file-readable-p (plist-get entry :local))
+               ;; Both have to match: a file rewritten to the same length
+               ;; still moves its timestamp.
+               (equal (plist-get entry :size) (format "%s" size))
+               (equal (plist-get entry :modified) (format "%s" modified)))
+      (plist-get entry :local))))
+
+(defun sql-datum--fs-cache-put (path local size modified &optional sqli-buf)
+  "Remember that PATH is held at LOCAL, as of SIZE and MODIFIED."
+  (puthash (sql-datum--fs-cache-key path sqli-buf)
+           (list :local local
+                 :size (format "%s" size)
+                 :modified (format "%s" modified))
+           sql-datum--fs-cache))
 
 (defvar sql-datum--admin-file-path nil
   "Path of the server file shown in this buffer.")

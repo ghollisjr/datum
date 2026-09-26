@@ -314,6 +314,10 @@ writes, renames or deletes.
 | =s=               | Cycle the sort: name, size, date        |
 | =C-u s=           | Reverse the current sort                |
 | =(=               | Show names only, or the details again   |
+| =o=               | Fetch the file and let Emacs open it    |
+| =C=               | Copy what is marked here                |
+| =m= / =u=         | Mark / unmark, moving on                |
+| =t= / =U=         | Toggle the marks / drop them all        |
 
 Dired's keys where dired has one, and dired's faces for directories —
 but not a dired buffer: the mode line reads =datum-fs=, it is
@@ -330,6 +334,13 @@ text at all is named rather than dumped.
 The server reads as *its own* account, not yours: it reaches the files
 it owns — its error log, its config — and is refused elsewhere.  On
 PostgreSQL, listing needs superuser or =pg_read_server_files=.
+
+=o= fetches a file and lets Emacs open it, so a zip lands in
+=archive-mode= — that is how to read an archive, since =v= only reads a
+capped prefix as text.  =C= copies what is marked into a directory you
+pick, a directory with everything under it.  A file fetched with =o= is
+reused by =C= rather than pulled twice, while its size and timestamp
+still match the listing.  Nothing here writes to the server.
 
 On Windows there is no single root, so going up from =C:\= (or a UNC
 share) lands on a list of the server's drives; =RET= descends into one.

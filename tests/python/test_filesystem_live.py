@@ -455,11 +455,13 @@ class TestAwkwardNames:
         filesystem.run_action(cursor, driver, "view", [_payload(
             {"path": driver.join_path(spaced, "a file.bak")})])
         panel = [a[0] for k, a in captured if k == "admin_panel"][0]
-        assert "binary" in panel["info"]
+        assert "not text" in panel["info"]
+        # And points at the key that fetches it for Emacs to open.
+        assert " o " in panel["info"]
         # What reaches the buffer is a sentence, not the bytes.
-        assert "not shown" in panel["content"]
+        assert "not shown here" in panel["content"]
         assert "\x00" not in panel["content"]
-        assert len(panel["content"]) < 500
+        assert len(panel["content"]) < 800
 
     def test_the_panel_lists_the_awkward_tree_too(self, mssql_env,
                                                   nasty_mssql):
@@ -563,8 +565,8 @@ class TestEncodingsEndToEnd:
         filesystem.run_action(cursor, driver, "view",
                               [_payload({"path": f"{root}/random.bin"})])
         panel = [a[0] for k, a in captured if k == "admin_panel"][0]
-        assert "binary" in panel["info"]
-        assert len(panel["content"]) < 500
+        assert "not text" in panel["info"]
+        assert len(panel["content"]) < 800
 
     def test_a_name_with_a_space_lists_and_reads(self, pg_env, nasty_pg):
         cursor, driver = pg_env

@@ -210,7 +210,9 @@
 (dolist (spec '(("P" sql-datum-admin-permissions)
                 ("G" sql-datum-admin-grant)
                 ("R" sql-datum-admin-restore-or-revoke)
-                ("U" sql-datum-admin-user-mappings)))
+                ;; U is shared with the filesystem listing, where it
+                ;; unmarks; the dispatcher keeps this meaning here.
+                ("U" sql-datum-admin-unmark-or-mappings)))
   (test-table-keys-assert
    (format "panel key %s runs %s" (nth 0 spec) (nth 1 spec))
    (eq (lookup-key sql-datum--admin-mode-map (nth 0 spec)) (nth 1 spec))))
@@ -239,6 +241,26 @@
       (sql-datum-admin-restore-or-revoke)
       (test-table-keys-assert "and revokes in the permissions view"
                               (eq called 'revoke)))))
+
+
+;; The shared keys must keep their old meaning outside the listing.
+(dolist (probe '(("U" sql-datum-admin-user-mappings "security")
+                 ("o" sql-datum-admin-sort "databases")))
+  (with-temp-buffer
+    (setq-local sql-datum--admin-panel-name (nth 2 probe))
+    (let (called)
+      (cl-letf (((symbol-function (nth 1 probe))
+                 (lambda (&rest _) (setq called t)))
+                ((symbol-function 'sql-datum-admin-fs-unmark-all)
+                 (lambda () (setq called 'marks)))
+                ((symbol-function 'sql-datum-admin-open-locally)
+                 (lambda () (setq called 'open))))
+        (call-interactively (lookup-key sql-datum--admin-mode-map
+                                        (nth 0 probe)))
+        (test-table-keys-assert
+         (format "%s still means %s in the %s panel"
+                 (nth 0 probe) (nth 1 probe) (nth 2 probe))
+         (eq called t))))))
 
 (message "\n=== which principal and database the panel is about ===")
 
