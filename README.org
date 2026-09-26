@@ -774,6 +774,12 @@ Admin panels provide interactive views for server administration.  Press
 - =security=  — Logins, roles, database users (MSSQL, PostgreSQL)
 - =ssis=      — SSIS packages (MSSQL)
 
+A panel is raised when you ask for it and left alone by a refresh, and
+that request belongs to the connection that made it.  Held in one place
+for every connection, a request made on one would be answered by
+whichever replied first — raising a panel nobody asked for and leaving
+the asked-for one buried.
+
 Every panel names the server it is on, under its title, and carries the
 connection in its buffer name — =*datum-admin:databases [prod]*=.  Both
 matter once more than one connection is open: a listing or a database

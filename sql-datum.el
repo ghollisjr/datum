@@ -952,14 +952,50 @@ Set to nil to disable auto-refresh."
   "Non-nil to draw only names in a filesystem listing.
 `(\=' toggles it, as `dired-hide-details-mode\=' does in dired.")
 
-(defvar sql-datum--admin-display-request nil
-  "Panel name the user has explicitly asked to see, or nil.
+(defvar-local sql-datum--admin-display-request nil
+  "Panel name the user has asked to see on this connection, or nil.
 
 Panel data arrives asynchronously, so by the time it does there is no
 way to tell an auto-refresh from a deliberate request.  The interactive
 entry points set this; `sql-datum--admin-show-panel' consumes it.  That
 keeps a refresh from dragging a buried panel back into a window while
-still letting an explicit request raise one.")
+still letting an explicit request raise one.
+
+It lives in the connection's own buffer.  Held in one place for all of
+them, a request made on one connection would be answered by whichever
+connection replied first — raising a panel nobody asked for and leaving
+the asked-for one buried.")
+
+(defun sql-datum--admin-connection (&optional sqli-buf)
+  "Return the connection buffer to use, or nil.
+
+SQLI-BUF when it is live, else the one this admin buffer was filled
+from, else whichever datum connection is current — the same order
+`sql-datum--admin-send-command-to' resolves in, so a request and the
+command it accompanies always belong to the same connection."
+  (or (and sqli-buf (buffer-live-p sqli-buf) sqli-buf)
+      (and (buffer-live-p sql-datum--admin-sqli-buf)
+           sql-datum--admin-sqli-buf)
+      (let ((found (sql-find-sqli-buffer 'datum)))
+        (and found (get-buffer found)))))
+
+(defun sql-datum--admin-request-display (panel &optional sqli-buf)
+  "Note that PANEL has been asked for on a connection."
+  (let ((connection (sql-datum--admin-connection sqli-buf)))
+    (when connection
+      (with-current-buffer connection
+        (setq sql-datum--admin-display-request panel)))))
+
+(defun sql-datum--admin-take-display-request (panel sqli-buf)
+  "Return non-nil if PANEL was asked for, clearing the request."
+  (let ((connection (sql-datum--admin-connection sqli-buf)))
+    (when (and connection
+               (equal (buffer-local-value 'sql-datum--admin-display-request
+                                          connection)
+                      panel))
+      (with-current-buffer connection
+        (setq sql-datum--admin-display-request nil))
+      t)))
 
 (defvar-local sql-datum--admin-quit-flag nil
   "Non-nil when the user has explicitly quit this admin buffer.")
@@ -1215,9 +1251,7 @@ SQLI-BUF is the originating SQLi buffer."
     ;; Show the buffer on first creation, or when the user explicitly
     ;; asked for this panel.  A plain auto-refresh must not steal focus
     ;; or drag a buried panel back into a window.
-    (let ((requested (equal sql-datum--admin-display-request panel)))
-      (when requested
-        (setq sql-datum--admin-display-request nil))
+    (let ((requested (sql-datum--admin-take-display-request panel sqli-buf)))
       (when (or initial requested)
         (pop-to-buffer buf)))))
 
@@ -1740,7 +1774,7 @@ SQLI-BUF is the originating SQLi buffer."
   (let ((parent (alist-get 'parent_panel sql-datum--admin-panel-data)))
     (if parent
         (progn
-          (setq sql-datum--admin-display-request parent)
+          (sql-datum--admin-request-display parent)
           (sql-datum--admin-send-command
            (format ":admin %s" parent)))
       (message "datum admin: no parent panel"))))
@@ -2001,7 +2035,7 @@ its steps and schedules sit below and are edited the same way."
   (let ((name (or (sql-datum--admin-row-id-at-point)
                   (alist-get 'job_name sql-datum--admin-context))))
     (unless name (user-error "No job at point"))
-    (setq sql-datum--admin-display-request "jobs")
+    (sql-datum--admin-request-display "jobs")
     (sql-datum--admin-send-command
      (format ":admin-action jobs drop-job-check %s" name))))
 
@@ -2131,7 +2165,7 @@ from those sections"))
   (interactive)
   (let ((name (sql-datum--admin-row-id-at-point)))
     (unless name (user-error "No database at point"))
-    (setq sql-datum--admin-display-request "databases")
+    (sql-datum--admin-request-display "databases")
     (sql-datum--admin-send-command
      (format ":admin-action databases files %s" name))))
 
@@ -2140,7 +2174,7 @@ from those sections"))
   (interactive)
   (let ((name (sql-datum--admin-row-id-at-point)))
     (unless name (user-error "No schema at point"))
-    (setq sql-datum--admin-display-request "schema")
+    (sql-datum--admin-request-display "schema")
     (sql-datum--admin-send-command
      (format ":admin-action schema tables %s" name))))
 
@@ -2196,7 +2230,7 @@ from those sections"))
   (interactive)
   (let ((name (sql-datum--admin-row-id-at-point)))
     (unless name (user-error "No database at point"))
-    (setq sql-datum--admin-display-request "databases")
+    (sql-datum--admin-request-display "databases")
     (sql-datum--admin-send-command
      (format ":admin-action databases backups %s" name))))
 
@@ -2290,7 +2324,7 @@ When point is on a recorded backup, its file is offered as the source."
   (interactive)
   (let ((name (sql-datum--admin-row-id-at-point)))
     (unless name (user-error "No login at point"))
-    (setq sql-datum--admin-display-request "security")
+    (sql-datum--admin-request-display "security")
     (sql-datum--admin-send-command
      (format ":admin-action security mappings %s" name))))
 
@@ -2360,7 +2394,7 @@ and the row names the database."
   (interactive)
   (pcase-let ((`(,principal ,database)
                (sql-datum--admin-permission-context)))
-    (setq sql-datum--admin-display-request "security")
+    (sql-datum--admin-request-display "security")
     (sql-datum--admin-send-command
      (format ":admin-action security permissions %s"
              (sql-datum--admin-payload
@@ -2727,7 +2761,7 @@ pulled again, which is the point of keeping it."
   (pcase-let ((`(,type ,path) (sql-datum--admin-fs-row)))
     (if (equal type "dir")
         (progn
-          (setq sql-datum--admin-display-request "filesystem")
+          (sql-datum--admin-request-display "filesystem")
           (sql-datum--admin-send-command
            (format ":admin filesystem %s" path)))
       (sql-datum-admin-view-file))))
@@ -2749,7 +2783,7 @@ pulled again, which is the point of keeping it."
                       (forward-line 1))
                     nil))))
     (unless parent (user-error "Already at the top"))
-    (setq sql-datum--admin-display-request "filesystem")
+    (sql-datum--admin-request-display "filesystem")
     (sql-datum--admin-send-command
      (format ":admin filesystem %s" parent))))
 
@@ -5944,7 +5978,7 @@ on this connection the name is free text."
 
 (defun sql-datum--admin-request (panel cmd)
   "Send CMD and let PANEL show itself when its data comes back."
-  (setq sql-datum--admin-display-request panel)
+  (sql-datum--admin-request-display panel)
   (sql-datum--admin-send-command-to nil cmd))
 
 ;; --- Databases ---
@@ -6107,7 +6141,7 @@ With a prefix argument, prompts for the panel name."
                           '("activity" "databases" "filesystem" "jobs"
                             "schema" "security" "ssis")
                           nil t)))
-  (setq sql-datum--admin-display-request panel)
+  (sql-datum--admin-request-display panel)
   (sql-datum--send-command (format ":admin %s" panel) t))
 
 (defun sql-datum-browse-server-files (path)

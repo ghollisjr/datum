@@ -139,15 +139,22 @@
 (message "\n=== what the database and security keys send ===")
 
 (let (sent request)
+  ;; A request belongs to a connection now, so the test has to offer one
+  ;; for the commands to find.
+  (setq test-table-keys--sqli (get-buffer-create "*SQL: keys-test*"))
   (cl-letf (((symbol-function 'sql-datum--admin-send-command-to)
-             (lambda (_buf cmd) (setq sent cmd))))
-    (setq sql-datum--admin-display-request nil)
+             (lambda (_buf cmd) (setq sent cmd)))
+            ((symbol-function 'sql-find-sqli-buffer)
+             (lambda (&rest _) "*SQL: keys-test*")))
+    (with-current-buffer test-table-keys--sqli
+      (setq sql-datum--admin-display-request nil))
     (sql-datum-alter-database "payroll")
     (test-table-keys-assert "alter names the database"
                             (equal sent
                                    ":admin-action databases edit-database payroll"))
     (sql-datum-drop-database "payroll")
-    (setq request sql-datum--admin-display-request)
+    (setq request (buffer-local-value 'sql-datum--admin-display-request
+                                      test-table-keys--sqli))
     (test-table-keys-assert "drop goes through the check, not a DROP"
                             (equal sent
                                    ":admin-action databases drop-check payroll"))

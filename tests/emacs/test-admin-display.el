@@ -49,26 +49,36 @@
   (let ((buf (get-buffer name)))
     (and buf (get-buffer-window buf t) t)))
 
+;; A request belongs to the connection that made it, so the tests need
+;; one to make it on.
+(defvar test-admin-display--connection
+  (get-buffer-create "*SQL: display-test*"))
+
 (defun test-admin-display--show (panel &optional requested)
   "Deliver panel data for PANEL, as an explicit REQUESTED one if non-nil."
   (when requested
-    (setq sql-datum--admin-display-request panel))
-  (sql-datum--admin-show-panel (test-admin-display--panel panel) nil))
+    (sql-datum--admin-request-display panel
+                                      test-admin-display--connection))
+  (sql-datum--admin-show-panel (test-admin-display--panel panel)
+                               test-admin-display--connection))
 
 (message "\n=== Admin panel display ===")
 
-(let ((db "*datum-admin:databases*")
-      (jobs "*datum-admin:jobs*"))
+(let ((db "*datum-admin:databases [display-test]*")
+      (jobs "*datum-admin:jobs [display-test]*"))
   ;; Start from a clean slate so a stale buffer cannot mask a failure.
   (dolist (name (list db jobs))
     (when (get-buffer name) (kill-buffer name)))
-  (setq sql-datum--admin-display-request nil)
+  (with-current-buffer test-admin-display--connection
+    (setq sql-datum--admin-display-request nil))
 
   (test-admin-display--show "databases" t)
   (test-admin-display-assert "first request displays the panel"
                              (test-admin-display--visible-p db))
   (test-admin-display-assert "request flag is consumed"
-                             (null sql-datum--admin-display-request))
+                             (null (buffer-local-value
+                                    'sql-datum--admin-display-request
+                                    test-admin-display--connection)))
 
   (test-admin-display--show "databases")
   (test-admin-display-assert "refresh leaves a visible panel visible"
@@ -96,6 +106,50 @@
   (test-admin-display--show "jobs")
   (test-admin-display-assert "the requested panel is displayed when it arrives"
                              (test-admin-display--visible-p jobs)))
+
+
+(message "\n=== a request belongs to the connection that made it ===")
+
+;; Held in one place for every connection, a request made on one would be
+;; answered by whichever replied first: the wrong panel raised, and the
+;; asked-for one left buried.
+(let ((prod (get-buffer-create "*SQL: prod*"))
+      (dev (get-buffer-create "*SQL: dev*")))
+  (cl-flet ((deliver (sqli panel)
+              (sql-datum--admin-show-panel
+               (test-admin-display--panel panel) sqli)))
+    (deliver prod "databases")
+    (deliver dev "databases")
+    (let ((prod-panel "*datum-admin:databases [prod]*")
+          (dev-panel "*datum-admin:databases [dev]*"))
+      (test-admin-display-assert "each connection has its own panel"
+                                 (and (get-buffer prod-panel)
+                                      (get-buffer dev-panel)))
+      ;; Bury both, so only an explicit request can raise one.
+      (dolist (name (list prod-panel dev-panel))
+        (delete-windows-on (get-buffer name)))
+      (test-admin-display-assert "both are buried to begin with"
+                                 (and (not (test-admin-display--visible-p
+                                            prod-panel))
+                                      (not (test-admin-display--visible-p
+                                            dev-panel))))
+      ;; prod asks; dev answers first.
+      (sql-datum--admin-request-display "databases" prod)
+      (deliver dev "databases")
+      (test-admin-display-assert
+       "another connection's refresh does not take the request"
+       (not (test-admin-display--visible-p dev-panel)))
+      (test-admin-display-assert
+       "and leaves the asked-for panel still to come"
+       (equal (buffer-local-value 'sql-datum--admin-display-request prod)
+              "databases"))
+      (deliver prod "databases")
+      (test-admin-display-assert "which surfaces when its own data arrives"
+                                 (test-admin-display--visible-p prod-panel))
+      (test-admin-display-assert "the request having been used up"
+                                 (null (buffer-local-value
+                                        'sql-datum--admin-display-request
+                                        prod))))))
 
 (message "\n%d passed, %d failed"
          test-admin-display--pass test-admin-display--fail)
