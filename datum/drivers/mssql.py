@@ -558,6 +558,62 @@ class MSSQLDriver(BaseDriver):
         row = cursor.fetchone()
         return self.decode_file_bytes(row[0] if row else None)
 
+    # OPENROWSET has no seek: every read starts at the beginning of the
+    # file, so chunking one costs a full read per chunk.
+    seeks_when_reading = False
+
+    def read_bytes(self, cursor, path, offset=0, length=None):
+        literal = self.quote_ddl_literal(path)
+        start = int(offset) + 1          # SUBSTRING counts from 1
+        if length is None:
+            expression = f"SUBSTRING(BulkColumn, {start}, 2147483647)"
+        else:
+            expression = f"SUBSTRING(BulkColumn, {start}, {int(length)})"
+        cursor.execute(
+            f"SELECT {expression} "
+            f"FROM OPENROWSET(BULK N{literal}, SINGLE_BLOB) AS contents")
+        row = cursor.fetchone()
+        return bytes(row[0]) if row and row[0] is not None else b""
+
+    def stat_file(self, cursor, path):
+        parent = self.parent_path(path) or path
+        trimmed = path.rstrip("/\\")
+        index = max(trimmed.rfind("/"), trimmed.rfind("\\"))
+        name = trimmed[index + 1:] if index >= 0 else trimmed
+        try:
+            cursor.execute(
+                "SELECT size_in_bytes, last_write_time, is_directory "
+                "FROM sys.dm_os_enumerate_filesystem(?, ?) WHERE level = 0",
+                [parent, name])
+            row = cursor.fetchone()
+        except Exception:
+            return None
+        if not row:
+            return None
+        return {"size": None if row[0] is None else int(row[0]),
+                "modified": _clean_timestamp(row[1]),
+                "is_dir": self.coerce_bool(row[2])}
+
+    def walk_path(self, cursor, path):
+        # The DMV already returns the whole subtree with each entry's
+        # depth, which is the very thing a one-directory listing filters
+        # out — so a recursive walk is the same query without the filter.
+        cursor.execute(
+            "SELECT full_filesystem_path, file_or_directory_name, "
+            "       is_directory, size_in_bytes, level "
+            "FROM sys.dm_os_enumerate_filesystem(?, N'*') "
+            "ORDER BY level, full_filesystem_path", [path])
+        entries = []
+        for full, name, is_dir, size, level in cursor.fetchall():
+            if not full:
+                continue
+            entries.append({"path": full,
+                            "name": name or "",
+                            "is_dir": self.coerce_bool(is_dir),
+                            "size": None if size is None else int(size),
+                            "depth": int(level or 0)})
+        return entries
+
     def browse_path(self, cursor, path):
         path = path or self.default_paths(cursor).get("data") or "/"
         # Documented and permission-light, but SQL Server 2017+ only.

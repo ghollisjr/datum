@@ -11,6 +11,15 @@ of dired but read-only: nothing here writes, renames or deletes.
 # is enough to see what a config or a log says.
 _READ_LIMIT = 262144
 
+# A download is bounded so that a stray RET on a multi-gigabyte backup
+# does not quietly try to pull it.  The caller can raise it.
+_DOWNLOAD_LIMIT = 256 * 1024 * 1024
+
+# SQL Server re-reads the file for every chunk, so it is read whole;
+# PostgreSQL seeks, so it is read in pieces and never held entirely in
+# memory.
+_CHUNK = 4 * 1024 * 1024
+
 
 def _db_error(err):
     """Return the useful part of a driver error."""
@@ -198,6 +207,10 @@ def run_action(cursor, driver, action_name, args):
             envelope.admin_panel(get_data(cursor, driver, args))
         elif action_name == "view":
             _view_file(cursor, driver, args)
+        elif action_name == "download":
+            _download(cursor, driver, args)
+        elif action_name == "download-tree":
+            _download_tree(cursor, driver, args)
         else:
             envelope.error(f"Unknown filesystem action: {action_name}")
     except Exception as err:
@@ -261,3 +274,159 @@ def _view_file(cursor, driver, args):
         "parent_panel": "filesystem",
         "context": {"path": path},
     })
+
+
+# --- Copying to the client ---
+#
+# The datum process runs on the client, beside Emacs, so a file read
+# over SQL can simply be written to the local disk.  Nothing has to
+# travel through the envelope.
+
+def _fetch_to(cursor, driver, remote, local, limit=_DOWNLOAD_LIMIT):
+    """Write REMOTE to LOCAL, returning how many bytes were written."""
+    import os
+
+    stat = driver.stat_file(cursor, remote) or {}
+    size = stat.get("size")
+    if size is not None and size > limit:
+        raise ValueError(
+            f"{remote} is {size} bytes, over the {limit}-byte limit")
+
+    parent = os.path.dirname(local)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+
+    written = 0
+    with open(local, "wb") as handle:
+        if driver.seeks_when_reading and size and size > _CHUNK:
+            offset = 0
+            while offset < size:
+                chunk = driver.read_bytes(cursor, remote, offset, _CHUNK)
+                if not chunk:
+                    break
+                handle.write(chunk)
+                offset += len(chunk)
+                written += len(chunk)
+        else:
+            data = driver.read_bytes(cursor, remote)
+            if len(data) > limit:
+                raise ValueError(
+                    f"{remote} is over the {limit}-byte limit")
+            handle.write(data)
+            written = len(data)
+    return written
+
+
+def _download(cursor, driver, args):
+    """Copy one server file to a path on the client."""
+    from .. import envelope
+
+    if not driver.supports_file_read:
+        envelope.error(f"Reading server files is not supported on "
+                       f"{driver.dialect_name}")
+        return
+    opts = _decode_payload(args) if args else {}
+    remote = (opts.get("path") or "").strip()
+    local = (opts.get("local") or "").strip()
+    if not (remote and local):
+        envelope.error("download requires a server path and a local one")
+        return
+
+    try:
+        written = _fetch_to(cursor, driver, remote, local,
+                            int(opts.get("limit") or _DOWNLOAD_LIMIT))
+    except Exception as err:
+        envelope.error(f"Cannot copy {remote}: {_db_error(err)}")
+        return
+
+    stat = driver.stat_file(cursor, remote) or {}
+    # The client caches by these, so that viewing a file and then
+    # copying it does not fetch it twice.
+    envelope.admin_panel({
+        "panel": "filesystem",
+        "sub_panel": "downloaded",
+        "title": f"Copied {remote}",
+        "headers": [],
+        "rows": [],
+        "row_id": None,
+        "actions": [],
+        "info": f"{written} bytes to {local}",
+        "local": local,
+        "remote": remote,
+        "size": stat.get("size"),
+        "modified": stat.get("modified") or "",
+        "context": {"path": remote},
+    })
+
+
+def _download_tree(cursor, driver, args):
+    """Copy a server directory, and everything under it, to the client."""
+    import os
+
+    from .. import envelope
+
+    opts = _decode_payload(args) if args else {}
+    remote = (opts.get("path") or "").strip().rstrip("/\\")
+    local = (opts.get("local") or "").strip()
+    if not (remote and local):
+        envelope.error("download-tree requires a server path and a local one")
+        return
+    limit = int(opts.get("limit") or _DOWNLOAD_LIMIT)
+
+    try:
+        entries = driver.walk_path(cursor, remote)
+    except Exception as err:
+        envelope.error(f"Cannot read {remote}: {_db_error(err)}")
+        return
+
+    total = sum(e.get("size") or 0 for e in entries if not e["is_dir"])
+    if total > limit:
+        envelope.error(f"{remote} holds {total} bytes, over the "
+                       f"{limit}-byte limit")
+        return
+
+    copied, failed = 0, []
+    for entry in entries:
+        relative = _relative_to(driver, remote, entry["path"])
+        if relative is None:
+            continue
+        target = os.path.join(local, *relative)
+        if entry["is_dir"]:
+            os.makedirs(target, exist_ok=True)
+            continue
+        try:
+            _fetch_to(cursor, driver, entry["path"], target, limit)
+            copied += 1
+        except Exception as err:
+            # One unreadable file should not lose the rest of the tree.
+            failed.append(f"{entry['path']}: {_db_error(err)}")
+
+    note = f"{copied} file{'' if copied == 1 else 's'} to {local}"
+    if failed:
+        note += f" — {len(failed)} could not be read"
+    envelope.admin_panel({
+        "panel": "filesystem",
+        "sub_panel": "downloaded",
+        "title": f"Copied {remote}",
+        "headers": ["Could not be read"] if failed else [],
+        "rows": [[f] for f in failed],
+        "row_id": None,
+        "actions": [],
+        "info": note,
+        "local": local,
+        "remote": remote,
+        "context": {"path": remote},
+    })
+
+
+def _relative_to(driver, root, path):
+    """Return PATH under ROOT as a list of segments, or None."""
+    trimmed = path.rstrip("/\\")
+    root = root.rstrip("/\\")
+    if not trimmed.startswith(root):
+        return None
+    rest = trimmed[len(root):].lstrip("/\\")
+    if not rest:
+        return None
+    # The server's separator, whichever it is.
+    return [part for part in rest.replace("\\", "/").split("/") if part]

@@ -932,6 +932,33 @@ class BaseDriver(ABC):
         raise NotImplementedError(
             f"Reading server files is not supported on {self.dialect_name}")
 
+    def read_bytes(self, cursor, path, offset=0, length=None):
+        """Return LENGTH bytes of PATH from OFFSET, as bytes.
+
+        LENGTH of None means to the end.  Whether seeking is cheap is
+        the dialect's business: PostgreSQL seeks, while SQL Server
+        re-reads the file for every call.
+        """
+        raise NotImplementedError(
+            f"Reading server files is not supported on {self.dialect_name}")
+
+    # True where a read at an offset seeks rather than re-reading from
+    # the start, which decides whether a download is worth chunking.
+    seeks_when_reading = False
+
+    def stat_file(self, cursor, path):
+        """Return {"size", "modified", "is_dir"} for PATH, or None."""
+        return None
+
+    def walk_path(self, cursor, path):
+        """Return every entry under PATH, at any depth.
+
+        Each carries `path`, `is_dir` and `size`, as `browse_path' does,
+        plus `depth`.  Used for copying a directory rather than a file.
+        """
+        raise NotImplementedError(
+            f"Walking server paths is not supported on {self.dialect_name}")
+
     @staticmethod
     def looks_binary(text):
         """Return True if TEXT is not worth showing as text.

@@ -334,6 +334,71 @@ class PostgreSQLDriver(BaseDriver):
         return headers, [[str(c) if c is not None else "" for c in r]
                          for r in cursor.fetchall()]
 
+    # pg_read_binary_file seeks, so a large file can be pulled in
+    # pieces without paying for the whole file each time.
+    seeks_when_reading = True
+
+    def read_bytes(self, cursor, path, offset=0, length=None):
+        offset = int(offset)
+        if length is None and offset == 0:
+            # The whole file; the two-argument form means exactly that.
+            cursor.execute("SELECT pg_read_binary_file(?)", [path])
+        else:
+            if length is None:
+                # There is no "to the end" from an offset, so the rest
+                # has to be measured first.
+                stat = self.stat_file(cursor, path) or {}
+                size = stat.get("size")
+                if size is None:
+                    return b""
+                length = max(0, size - offset)
+            cursor.execute("SELECT pg_read_binary_file(?, ?, ?)",
+                           [path, offset, int(length)])
+        row = cursor.fetchone()
+        return bytes(row[0]) if row and row[0] is not None else b""
+
+    def stat_file(self, cursor, path):
+        try:
+            cursor.execute(
+                "SELECT size, modification, isdir "
+                "FROM pg_stat_file(?, true)", [path])
+            row = cursor.fetchone()
+        except Exception:
+            return None
+        if not row or row[0] is None:
+            return None
+        return {"size": int(row[0]),
+                "modified": "" if row[1] is None else str(row[1]),
+                "is_dir": self.coerce_bool(row[2])}
+
+    def walk_path(self, cursor, path):
+        """Walk PATH by listing each directory in turn.
+
+        There is no one call that returns a subtree, so this descends
+        itself, breadth first, and stops where a directory cannot be
+        read rather than abandoning the walk.
+        """
+        entries, queue = [], [(path.rstrip("/"), 0)]
+        seen = set()
+        while queue:
+            directory, depth = queue.pop(0)
+            if directory in seen or depth > 32:
+                continue
+            seen.add(directory)
+            try:
+                listing = self.browse_path(cursor, directory)
+            except Exception:
+                continue
+            for entry in listing:
+                entries.append({"path": entry["path"],
+                                "name": entry["name"],
+                                "is_dir": entry["is_dir"],
+                                "size": entry.get("size"),
+                                "depth": depth})
+                if entry["is_dir"]:
+                    queue.append((entry["path"], depth + 1))
+        return entries
+
     def _securable_clause(self, scope, securable, column=None):
         if scope == "database":
             return f" ON DATABASE {self.quote_ddl_identifier(securable)}"

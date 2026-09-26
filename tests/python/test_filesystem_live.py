@@ -590,3 +590,173 @@ class TestEncodingsEndToEnd:
         assert "with space" in names
         assert "buried.txt" not in names
         assert "deeper" not in names
+
+
+class TestCopyingToTheClient:
+    """The datum process runs beside Emacs, so a file read over SQL can
+    simply be written to the local disk."""
+
+    def test_a_file_arrives_byte_for_byte(self, mssql_env, nasty_mssql,
+                                          tmp_path, captured):
+        from datum.panels import filesystem
+
+        cursor, driver = mssql_env
+        _root, spaced = nasty_mssql
+        remote = driver.join_path(spaced, "a file.bak")
+        local = str(tmp_path / "copy.bak")
+
+        filesystem.run_action(cursor, driver, "download",
+                              [_payload({"path": remote, "local": local})])
+        assert "error" not in [k for k, _ in captured], captured
+        expected = driver.read_bytes(cursor, remote)
+        with open(local, "rb") as handle:
+            assert handle.read() == expected
+        assert len(expected) > 0
+
+    def test_the_panel_says_where_it_landed(self, mssql_env, nasty_mssql,
+                                            tmp_path, captured):
+        from datum.panels import filesystem
+
+        cursor, driver = mssql_env
+        root, _spaced = nasty_mssql
+        local = str(tmp_path / "top.bak")
+        filesystem.run_action(cursor, driver, "download", [_payload(
+            {"path": driver.join_path(root, "top.bak"), "local": local})])
+        panel = [a[0] for k, a in captured if k == "admin_panel"][0]
+        # The client caches by these, so viewing then copying fetches once.
+        assert panel["local"] == local
+        assert panel["size"] and panel["size"] > 0
+        assert panel["sub_panel"] == "downloaded"
+
+    def test_a_file_too_big_is_refused_rather_than_pulled(self, mssql_env,
+                                                          nasty_mssql,
+                                                          tmp_path, captured):
+        from datum.panels import filesystem
+
+        cursor, driver = mssql_env
+        root, _spaced = nasty_mssql
+        local = str(tmp_path / "nope.bak")
+        filesystem.run_action(cursor, driver, "download", [_payload(
+            {"path": driver.join_path(root, "top.bak"), "local": local,
+             "limit": 16})])
+        assert [k for k, _ in captured] == ["error"], captured
+        assert not os.path.exists(local)
+
+    def test_a_tree_keeps_its_shape(self, mssql_env, nasty_mssql, tmp_path,
+                                    captured):
+        from datum.panels import filesystem
+
+        cursor, driver = mssql_env
+        root, _spaced = nasty_mssql
+        local = str(tmp_path / "tree")
+        filesystem.run_action(cursor, driver, "download-tree",
+                              [_payload({"path": root, "local": local})])
+        assert "error" not in [k for k, _ in captured], captured
+        # The directory with a space in its name, and the level below it.
+        assert os.path.isfile(os.path.join(local, "top.bak"))
+        assert os.path.isfile(os.path.join(local, "with space", "a file.bak"))
+        assert os.path.isfile(
+            os.path.join(local, "with space", "deeper", "buried.bak"))
+
+    def test_a_tree_over_the_limit_is_refused_before_anything_is_written(
+            self, mssql_env, nasty_mssql, tmp_path, captured):
+        from datum.panels import filesystem
+
+        cursor, driver = mssql_env
+        root, _spaced = nasty_mssql
+        local = str(tmp_path / "toobig")
+        filesystem.run_action(cursor, driver, "download-tree", [_payload(
+            {"path": root, "local": local, "limit": 64})])
+        assert [k for k, _ in captured] == ["error"], captured
+        assert not os.path.exists(local)
+
+    def test_postgres_copies_too(self, pg_env, nasty_pg, tmp_path, captured):
+        from datum.panels import filesystem
+
+        cursor, driver = pg_env
+        root, _spaced, body = nasty_pg
+        local = str(tmp_path / "utf16.xml")
+        filesystem.run_action(cursor, driver, "download", [_payload(
+            {"path": f"{root}/utf16le.xml", "local": local})])
+        assert "error" not in [k for k, _ in captured], captured
+        # The bytes, not a decoding of them: a copy is a copy.
+        with open(local, "rb") as handle:
+            assert handle.read() == (body + "\n").encode("utf-16-le")
+
+    def test_postgres_copies_a_tree(self, pg_env, nasty_pg, tmp_path,
+                                    captured):
+        from datum.panels import filesystem
+
+        cursor, driver = pg_env
+        root, _spaced, _body = nasty_pg
+        local = str(tmp_path / "tree")
+        filesystem.run_action(cursor, driver, "download-tree",
+                              [_payload({"path": root, "local": local})])
+        assert "error" not in [k for k, _ in captured], captured
+        assert os.path.isfile(os.path.join(local, "utf8.txt"))
+        assert os.path.isfile(
+            os.path.join(local, "with space", "deeper", "buried.txt"))
+
+    def test_an_unreadable_file_does_not_lose_the_rest_of_the_tree(
+            self, mssql_env, nasty_mssql, tmp_path, captured):
+        from datum.panels import filesystem
+
+        cursor, driver = mssql_env
+        root, _spaced = nasty_mssql
+        local = str(tmp_path / "partial")
+
+        real = driver.read_bytes
+        state = {"first": True}
+
+        def flaky(cur, path, offset=0, length=None):
+            if state["first"]:
+                state["first"] = False
+                raise Exception("Access is denied")
+            return real(cur, path, offset, length)
+
+        driver.read_bytes = flaky
+        try:
+            filesystem.run_action(cursor, driver, "download-tree",
+                                  [_payload({"path": root, "local": local})])
+        finally:
+            driver.read_bytes = real
+
+        panel = [a[0] for k, a in captured if k == "admin_panel"][0]
+        assert "could not be read" in panel["info"], panel["info"]
+        assert panel["rows"], "the unreadable one should be named"
+        # And the others still arrived.
+        assert any(os.path.isfile(os.path.join(dirpath, name))
+                   for dirpath, _dirs, names in os.walk(local)
+                   for name in names)
+
+
+class TestWalking:
+
+    def test_mssql_walks_the_whole_subtree(self, mssql_env, nasty_mssql):
+        cursor, driver = mssql_env
+        root, _spaced = nasty_mssql
+        depths = {e["depth"] for e in driver.walk_path(cursor, root)}
+        assert depths >= {0, 1, 2}, depths
+
+    def test_postgres_walks_it_too(self, pg_env, nasty_pg):
+        cursor, driver = pg_env
+        root, _spaced, _body = nasty_pg
+        entries = driver.walk_path(cursor, root)
+        names = {e["name"] for e in entries}
+        assert "buried.txt" in names
+        assert {e["depth"] for e in entries} >= {0, 1}
+
+    def test_reading_at_an_offset(self, mssql_env, nasty_mssql):
+        cursor, driver = mssql_env
+        root, _spaced = nasty_mssql
+        path = driver.join_path(root, "top.bak")
+        whole = driver.read_bytes(cursor, path, 0, 64)
+        assert driver.read_bytes(cursor, path, 8, 8) == whole[8:16]
+
+    def test_which_dialect_can_seek(self, mssql_env, pg_env):
+        # Decides whether a download is worth chunking: SQL Server
+        # re-reads the file for every call.
+        _c, mssql = mssql_env
+        _c2, postgres = pg_env
+        assert not mssql.seeks_when_reading
+        assert postgres.seeks_when_reading
