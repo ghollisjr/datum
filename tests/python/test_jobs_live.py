@@ -6,6 +6,7 @@ Steps and schedules already had this; the job they belong to did not.
 import base64
 import json
 import os
+import time
 
 import pytest
 
@@ -898,3 +899,264 @@ class TestStepFlowIsChecked:
         jobs.run_action(cursor, driver, "detail", [JOB])
         panel = [a[0] for k, a in captured if k == "admin_panel"][0]
         assert panel["info"] == f"Job: {JOB}", panel["info"]
+
+
+def _agent_running(cursor):
+    try:
+        cursor.execute("SELECT status_desc FROM sys.dm_server_services "
+                       "WHERE servicename LIKE '%Agent%'")
+        return any(row[0] == "Running" for row in cursor.fetchall())
+    except Exception:
+        return False
+
+
+def _wait_for_outcome(cursor, job_name, seconds=40):
+    """Wait for the job's outcome row, returning its status and message."""
+    for _ in range(seconds * 2):
+        time.sleep(0.5)
+        cursor.execute("""
+            SELECT h.run_status, CAST(h.message AS NVARCHAR(400))
+            FROM msdb.dbo.sysjobhistory h
+            JOIN msdb.dbo.sysjobs j ON j.job_id = h.job_id
+            WHERE j.name = ? AND h.step_id = 0
+            ORDER BY h.instance_id DESC
+        """, [job_name])
+        row = cursor.fetchone()
+        if row:
+            return int(row[0]), row[1]
+    return None, None
+
+
+class TestRunningAJob:
+    """End to end, with the Agent actually running.
+
+    None of this could be exercised until the Agent was enabled in the
+    test container: sp_start_job refuses outright without it, so a job
+    could be built but never run.
+    """
+
+    BASE = {"subsystem": "TSQL", "database_name": "master",
+            "command": "SELECT 1", "retry_attempts": "0",
+            "retry_interval": "0", "on_success_step_id": "0",
+            "on_fail_action": "2", "on_fail_step_id": "0"}
+
+    def _built(self, cursor, driver, command="SELECT 1"):
+        from datum.panels import jobs
+        jobs.run_action(cursor, driver, "create-job", [_payload(
+            {"name": JOB, "enabled": True, "description": "",
+             "owner": "sa", "category": "[Uncategorized (Local)]",
+             "notify_eventlog": "0", "notify_email": "0",
+             "delete_level": "0"})])
+        jobs.run_action(cursor, driver, "create-step", [_payload(
+            dict(self.BASE, job_name=JOB, step_name="the step",
+                 command=command, on_success_action="1"))])
+
+    def test_a_job_built_through_the_panel_runs(self, agent, captured):
+        from datum.panels import jobs
+
+        cursor, driver = agent
+        if not _agent_running(cursor):
+            pytest.skip("SQL Server Agent is not running")
+        self._built(cursor, driver)
+        captured.clear()
+        jobs.run_action(cursor, driver, "start-job", [JOB])
+        assert "error" not in [k for k, _ in captured], captured
+        status, message = _wait_for_outcome(cursor, JOB)
+        assert status == 1, message      # 1 is Succeeded
+        # Which is only possible because the job was given a target
+        # server; sp_add_job alone leaves it unable to run at all.
+
+    def test_the_history_panel_shows_the_run(self, agent, captured):
+        from datum.panels import jobs
+
+        cursor, driver = agent
+        if not _agent_running(cursor):
+            pytest.skip("SQL Server Agent is not running")
+        self._built(cursor, driver)
+        jobs.run_action(cursor, driver, "start-job", [JOB])
+        _wait_for_outcome(cursor, JOB)
+        captured.clear()
+        jobs.run_action(cursor, driver, "history", [JOB])
+        panel = [a[0] for k, a in captured if k == "admin_panel"][0]
+        assert panel["rows"], "the run should be in the history"
+        assert any("Succeeded" in row[0] for row in panel["rows"])
+
+    def test_a_failing_step_is_reported_as_failing(self, agent, captured):
+        from datum.panels import jobs
+
+        cursor, driver = agent
+        if not _agent_running(cursor):
+            pytest.skip("SQL Server Agent is not running")
+        self._built(cursor, driver, command="RAISERROR('no', 16, 1)")
+        jobs.run_action(cursor, driver, "start-job", [JOB])
+        status, message = _wait_for_outcome(cursor, JOB)
+        assert status == 0, message      # 0 is Failed
+
+    def test_the_flow_the_check_refuses_is_the_one_that_breaks(self, agent,
+                                                              captured):
+        """The fault the step check exists for, watched happening.
+
+        Built behind the panel's back, since the panel now refuses it.
+        """
+        from datum.panels import jobs
+
+        cursor, driver = agent
+        if not _agent_running(cursor):
+            pytest.skip("SQL Server Agent is not running")
+        jobs.run_action(cursor, driver, "create-job", [_payload(
+            {"name": JOB, "enabled": True, "description": "",
+             "owner": "sa", "category": "[Uncategorized (Local)]",
+             "notify_eventlog": "0", "notify_email": "0",
+             "delete_level": "0"})])
+        cursor.execute(
+            "EXEC msdb.dbo.sp_add_jobstep @job_name = ?, @step_name = ?, "
+            "@subsystem = N'TSQL', @command = N'SELECT 1', "
+            "@database_name = N'master', @on_success_action = 3, "
+            "@on_fail_action = 2", [JOB, "only step"])
+        jobs.run_action(cursor, driver, "start-job", [JOB])
+        status, message = _wait_for_outcome(cursor, JOB)
+        # The step succeeds and the job fails, which is what makes this
+        # so puzzling to run into.
+        assert status == 0, message
+        assert "non-existent step" in message, message
+
+        # And the panel refuses to create that in the first place.
+        captured.clear()
+        jobs.run_action(cursor, driver, "create-step", [_payload(
+            dict(self.BASE, job_name=JOB, step_name="another",
+                 on_success_action="3"))])
+        assert [k for k, _ in captured] == ["error"], captured
+
+    def test_stopping_a_job(self, agent, captured):
+        from datum.panels import jobs
+
+        cursor, driver = agent
+        if not _agent_running(cursor):
+            pytest.skip("SQL Server Agent is not running")
+        self._built(cursor, driver, command="WAITFOR DELAY '00:00:20'")
+        jobs.run_action(cursor, driver, "start-job", [JOB])
+        time.sleep(2)
+        captured.clear()
+        jobs.run_action(cursor, driver, "stop-job", [JOB])
+        assert "error" not in [k for k, _ in captured], captured
+        status, message = _wait_for_outcome(cursor, JOB)
+        # 3 is Canceled.
+        assert status in (0, 3), message
+
+    def test_a_step_shows_as_running_while_it_runs(self, agent, captured):
+        """The Status column means "running now", not "last outcome".
+
+        Only checkable with the Agent going, which is why it was not
+        before -- and it was wrong: sysjobactivity records the last step
+        to finish, so a one-step job showed nothing and a longer one
+        marked the step before the one actually running.
+        """
+        from datum.panels import jobs
+
+        cursor, driver = agent
+        if not _agent_running(cursor):
+            pytest.skip("SQL Server Agent is not running")
+        self._built(cursor, driver, command="WAITFOR DELAY '00:00:10'")
+        jobs.run_action(cursor, driver, "start-job", [JOB])
+        try:
+            running = False
+            for _ in range(20):
+                time.sleep(0.5)
+                captured.clear()
+                jobs.run_action(cursor, driver, "detail", [JOB])
+                panel = [a[0] for k, a in captured
+                         if k == "admin_panel"][0]
+                steps = next(s for s in panel["sections"]
+                             if s["title"] == "Steps")
+                if any("Running" in str(cell)
+                       for row in steps["rows"] for cell in row):
+                    running = True
+                    break
+            assert running, "the running step should say so"
+        finally:
+            try:
+                jobs.run_action(cursor, driver, "stop-job", [JOB])
+            except Exception:
+                pass
+
+    def test_the_step_named_is_the_one_running_not_the_one_before(
+            self, agent, captured):
+        """Two steps, the first quick and the second slow.
+
+        sysjobactivity.last_executed_step_id is the last step to
+        *finish*, so this used to name the quick one for the whole time
+        the slow one was running.
+        """
+        from datum.panels import jobs
+
+        cursor, driver = agent
+        if not _agent_running(cursor):
+            pytest.skip("SQL Server Agent is not running")
+        jobs.run_action(cursor, driver, "create-job", [_payload(
+            {"name": JOB, "enabled": True, "description": "",
+             "owner": "sa", "category": "[Uncategorized (Local)]",
+             "notify_eventlog": "0", "notify_email": "0",
+             "delete_level": "0"})])
+        jobs.run_action(cursor, driver, "create-step", [_payload(
+            dict(self.BASE, job_name=JOB, step_name="quick",
+                 command="SELECT 1", on_success_action="1"))])
+        jobs.run_action(cursor, driver, "create-step", [_payload(
+            dict(self.BASE, job_name=JOB, step_name="slow",
+                 command="WAITFOR DELAY '00:00:10'",
+                 on_success_action="1"))])
+        jobs.run_action(cursor, driver, "update-step", [_payload(
+            dict(self.BASE, job_name=JOB, step_id="1", step_name="quick",
+                 command="SELECT 1", on_success_action="3"))])
+        jobs.run_action(cursor, driver, "start-job", [JOB])
+        try:
+            seen = None
+            for _ in range(20):
+                time.sleep(0.5)
+                captured.clear()
+                jobs.run_action(cursor, driver, "detail", [JOB])
+                panel = [a[0] for k, a in captured
+                         if k == "admin_panel"][0]
+                steps = next(s for s in panel["sections"]
+                             if s["title"] == "Steps")
+                running = [row[1] for row in steps["rows"]
+                           if "Running" in str(row[2])]
+                if running:
+                    seen = running
+                    break
+            assert seen == ["slow"], seen
+        finally:
+            try:
+                jobs.run_action(cursor, driver, "stop-job", [JOB])
+            except Exception:
+                pass
+
+    def test_the_job_list_names_the_step_being_run(self, agent, captured):
+        """The list has a Current Step column, which needs a running job."""
+        from datum.panels import jobs
+
+        cursor, driver = agent
+        if not _agent_running(cursor):
+            pytest.skip("SQL Server Agent is not running")
+        self._built(cursor, driver, command="WAITFOR DELAY '00:00:10'")
+        jobs.run_action(cursor, driver, "start-job", [JOB])
+        try:
+            named = False
+            for _ in range(20):
+                time.sleep(0.5)
+                captured.clear()
+                jobs.run_action(cursor, driver, "detail", [JOB])
+                # The list itself, where Current Step lives.
+                panel = jobs.get_data(cursor, driver, [])
+                index = panel["headers"].index("Current Step")
+                for row in panel["rows"]:
+                    if row[0] == JOB and row[index]:
+                        named = True
+                        break
+                if named:
+                    break
+            assert named, "the running step should be named in the list"
+        finally:
+            try:
+                jobs.run_action(cursor, driver, "stop-job", [JOB])
+            except Exception:
+                pass

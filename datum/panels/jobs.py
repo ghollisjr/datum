@@ -405,6 +405,19 @@ def _job_list(cursor):
     rows = [[str(v) if v is not None else "" for v in row]
             for row in cursor.fetchall()]
 
+    # sysjobactivity gave the last step to finish, which is the wrong
+    # one while the next is running and nothing at all on the first.
+    if "Current Step" in headers:
+        column = headers.index("Current Step")
+        name_column = 0
+        for job_name in _jobs_running(cursor):
+            _step_id, label = _running_step(cursor, job_name)
+            if not label:
+                continue
+            for row in rows:
+                if row[name_column] == job_name:
+                    row[column] = label
+
     return {
         "panel": "jobs",
         "headers": headers,
@@ -503,6 +516,17 @@ def _job_detail(cursor, job_name):
     # The job's own properties, at the top of its own tree: editing a
     # job is where its steps are, so the two should not be down
     # different paths.
+    # Which step is running, asked of the server rather than inferred
+    # from the last one to finish.
+    running_id, _running_label = _running_step(cursor, job_name)
+    if running_id is not None and "Status" in step_headers:
+        status_column = step_headers.index("Status")
+        step_column = step_headers.index("Step")
+        for row in step_rows:
+            row[status_column] = ("Running"
+                                  if str(row[step_column]) == str(running_id)
+                                  else "")
+
     from . import jobdefs
     from . import steps as steps_module
     flow = steps_module.flow_problems(cursor, job_name)
@@ -781,3 +805,51 @@ def _refresh_detail(cursor, job_name):
         envelope.admin_panel(_job_detail(cursor, job_name))
     except Exception:
         pass
+
+
+def _running_step(cursor, job_name):
+    """Return (step_id, label) for the step a job is running, or (None, "").
+
+    sysjobactivity only records the last step to *finish*, so using it
+    names the wrong step for the whole time the next one is running --
+    and names nothing at all for a job still on its first step.
+    sp_help_job reports the step actually executing, which is what SSMS
+    shows.  It is a procedure rather than a view, so it is asked only
+    about jobs already known to be running.
+    """
+    try:
+        cursor.execute("EXEC msdb.dbo.sp_help_job @job_name = ?, "
+                       "@job_aspect = N'JOB'", [job_name])
+        columns = [column[0] for column in cursor.description]
+        row = cursor.fetchone()
+        while cursor.nextset():
+            pass
+    except Exception:
+        return None, ""
+    if not row or "current_execution_step" not in columns:
+        return None, ""
+    label = row[columns.index("current_execution_step")]
+    if not label:
+        return None, ""
+    label = str(label).strip()
+    # Reported as "2 (slow)".
+    head = label.split(" ", 1)[0]
+    try:
+        return int(head), label
+    except ValueError:
+        return None, label
+
+
+def _jobs_running(cursor):
+    """Return the names of the jobs executing right now."""
+    try:
+        cursor.execute("""
+            SELECT CAST(j.name AS NVARCHAR(128))
+            FROM msdb.dbo.sysjobactivity ja
+            JOIN msdb.dbo.sysjobs j ON j.job_id = ja.job_id
+            WHERE ja.start_execution_date IS NOT NULL
+              AND ja.stop_execution_date IS NULL
+        """)
+        return [row[0] for row in cursor.fetchall()]
+    except Exception:
+        return []

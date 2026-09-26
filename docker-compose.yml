@@ -45,6 +45,10 @@ services:
     environment:
       ACCEPT_EULA: "Y"
       MSSQL_SA_PASSWORD: "DatumTest1!"
+      # Without the Agent, nothing in the jobs panel can be exercised:
+      # sp_start_job refuses, so a job cannot be run and the history
+      # stays empty.
+      MSSQL_AGENT_ENABLED: "true"
     ports:
       - "1434:1433"
     healthcheck:

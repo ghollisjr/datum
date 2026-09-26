@@ -90,6 +90,16 @@ datum --sql-type oracle \
   "Driver={Oracle 23 ODBC driver};DBQ=localhost:1522/FREEPDB1;Uid=datum_test;Pwd=datum_test"
 #+END_SRC
 
+** SQL Server Agent
+
+The mssql service sets =MSSQL_AGENT_ENABLED= so the Agent runs.  Without
+it =sp_start_job= refuses outright, so nothing in the jobs panel can be
+exercised: a job can be built but never run, its history stays empty,
+and which step is executing can never be observed.
+
+The job tests skip rather than fail where the Agent is not running, so
+they still work against a server without it.
+
 ** Connecting to the Docker databases from Emacs
 
 =tests/emacs/docker-connections.el= defines =sql-connection-alist=

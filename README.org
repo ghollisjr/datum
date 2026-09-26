@@ -911,6 +911,13 @@ leaves the session at all — the SQL is what you are waiting to read.
 Shows SQL Agent jobs with status, enabled state, the step currently
 executing, last run result and next run time.  Executing jobs sort first.
 
+The step currently executing comes from =sp_help_job=, which is what
+SSMS reads.  =sysjobactivity= records the last step to *finish*, so
+using it named nothing while a job was on its first step and named the
+step *before* the one running thereafter — asked for the step and given
+its predecessor.  It is asked only about jobs already known to be
+running, since it is a procedure rather than a view.
+
 | Key | Action                                |
 |-----+---------------------------------------|
 | =d= | Job detail (steps + schedules)        |
