@@ -16,6 +16,14 @@
 
 (require 'cl-lib)
 
+(defun datum-test--panel-buffer (panel &optional sub)
+  "Return the buffer showing PANEL, whatever connection it names.
+Panel buffers carry the connection in their name, so a test cannot
+look one up by an exact string."
+  (let ((prefix (concat "*datum-admin:" panel (if sub (concat ":" sub) ""))))
+    (seq-find (lambda (b) (string-prefix-p prefix (buffer-name b)))
+              (buffer-list))))
+
 (defvar test-panel-refresh--pass 0)
 (defvar test-panel-refresh--fail 0)
 
@@ -191,7 +199,7 @@
                         "\"info\":null}")
                 :object-type 'alist :array-type 'list))
               nil)
-             (get-buffer "*datum-admin:databases*"))))
+             (datum-test--panel-buffer "databases"))))
   (with-current-buffer buf
     (test-panel-refresh-assert "a panel action appears in the header"
                                (string-match-p

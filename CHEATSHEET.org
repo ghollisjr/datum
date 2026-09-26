@@ -171,6 +171,9 @@ panel's header line, which stays visible as the contents scroll.
 Panels: =activity=, =databases=, =filesystem=, =jobs=, =schema=,
 =security=, =ssis=
 
+Each panel names the server under its title and carries the connection
+in its buffer name, so two connections do not share one panel.
+
 Most wizards are also one key away from the query buffer — see =C-c t=,
 =C-c d= and =C-c g= above.
 

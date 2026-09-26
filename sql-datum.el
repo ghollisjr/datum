@@ -988,11 +988,33 @@ still letting an explicit request raise one.")
 (defvar-local sql-datum--admin-saved-col nil
   "Last known column at cursor, saved after each render.")
 
-(defun sql-datum--admin-buffer-name (panel-name &optional sub-panel)
-  "Return the buffer name for PANEL-NAME, with optional SUB-PANEL."
-  (if sub-panel
-      (format "*datum-admin:%s:%s*" panel-name sub-panel)
-    (format "*datum-admin:%s*" panel-name)))
+(defun sql-datum--admin-connection-tag (sqli-buf)
+  "Return a short name for the connection SQLI-BUF is, or nil.
+
+Taken from the buffer's own name, since two connections to the same
+server are a thing people do, and the server alone would not tell them
+apart."
+  (let ((name (and sqli-buf (buffer-live-p sqli-buf)
+                   (buffer-name sqli-buf))))
+    (when name
+      ;; "*SQL: prod*" is the shape sql.el gives these.
+      (let ((trimmed (replace-regexp-in-string
+                      "\\`\\*SQL: ?\\|\\*\\'" "" name)))
+        (and (not (string-empty-p trimmed)) trimmed)))))
+
+(defun sql-datum--admin-buffer-name (panel-name &optional sub-panel sqli-buf)
+  "Return the buffer name for PANEL-NAME, with optional SUB-PANEL.
+
+The connection is part of the name.  Without it every connection shares
+one buffer per panel, so opening a panel on a second server silently
+replaces the first — and a key pressed in what looks like the first
+panel acts on the second, which for a panel that can drop a database is
+worse than confusing."
+  (let ((tag (sql-datum--admin-connection-tag sqli-buf)))
+    (concat "*datum-admin:" panel-name
+            (if sub-panel (concat ":" sub-panel) "")
+            (if tag (concat " [" tag "]") "")
+            "*")))
 
 (defun sql-datum--admin-denull (val)
   "Convert JSON :null to nil, leave other values unchanged."
@@ -1076,7 +1098,7 @@ SQLI-BUF is the originating SQLi buffer."
          (actions (alist-get 'actions data))
          (info (alist-get 'info data))
          (row-id (alist-get 'row_id data))
-         (buf-name (sql-datum--admin-buffer-name panel sub-panel))
+         (buf-name (sql-datum--admin-buffer-name panel sub-panel sqli-buf))
          (buf (get-buffer-create buf-name))
          (initial (not (buffer-local-value 'sql-datum--admin-panel-name buf))))
     (when (and (equal panel "security") (null sub-panel) (eql row-id 0))
@@ -1139,6 +1161,12 @@ SQLI-BUF is the originating SQLi buffer."
                                 'bold))
                   "\n")
           (cl-incf header-lines)
+          ;; Which machine this is, before anything about it.
+          (let ((server (sql-datum--admin-connected-to sqli-buf)))
+            (when server
+              (insert (propertize (format "on %s" server)
+                                  'face 'font-lock-keyword-face)
+                      "  ·  ")))
           (insert (format "Last refresh: %s" (format-time-string "%H:%M:%S")))
           (if sql-datum--admin-timer
               (insert (format "  [auto-refresh %ds]"
@@ -1234,6 +1262,21 @@ _ROWS is accepted for interface consistency."
     (move-to-column saved-col))
    ;; Shouldn't happen, but be safe
    (t (goto-char (point-min)))))
+
+(defun sql-datum--admin-connected-to (sqli-buf)
+  "Return the server SQLI-BUF is connected to, or nil.
+
+Taken from the metadata the connection already reported, so naming it
+costs no query.  Worth naming: a panel gives no other sign of which
+machine it is showing, and a directory listing or a dropped database
+looks the same on any of them."
+  (let ((buf (or (and sqli-buf (buffer-live-p sqli-buf) sqli-buf)
+                 (let ((b (sql-find-sqli-buffer 'datum)))
+                   (and b (get-buffer b))))))
+    (when buf
+      (let ((server (gethash "server"
+                             (buffer-local-value 'sql-datum--meta buf) "")))
+        (and (stringp server) (not (string-empty-p server)) server)))))
 
 (defun sql-datum--admin-insert-table (headers rows row-id &optional shown)
   "Insert a formatted table with HEADERS and ROWS.
@@ -1526,7 +1569,7 @@ SQLI-BUF is the originating SQLi buffer."
                     (format "datum admin: %s detail" panel)))
          (sections (alist-get 'sections data))
          (info (alist-get 'info data))
-         (buf-name (sql-datum--admin-buffer-name panel sub-panel))
+         (buf-name (sql-datum--admin-buffer-name panel sub-panel sqli-buf))
          (buf (get-buffer-create buf-name))
          (initial (not (buffer-local-value 'sql-datum--admin-panel-name buf))))
     (with-current-buffer buf
@@ -4134,9 +4177,18 @@ SIZE and MODIFIED are what the listing last reported."
 SQLI-BUF is the originating SQLi buffer."
   (let* ((path (or (alist-get 'path (alist-get 'context data)) ""))
          (content (or (alist-get 'content data) ""))
+         (tag (sql-datum--admin-connection-tag sqli-buf))
+         ;; The separator is the server's, so the name is cut here
+         ;; rather than by `file-name-nondirectory', which only knows
+         ;; this machine's.
+         (base (let ((trimmed (replace-regexp-in-string
+                               "[/\\\\]+\\'" "" path)))
+                 (if (string-match "\\([^/\\\\]+\\)\\'" trimmed)
+                     (match-string 1 trimmed)
+                   trimmed)))
          (buf (get-buffer-create
-               (format "*datum-file: %s*" (file-name-nondirectory
-                                           (directory-file-name path))))))
+               (format "*datum-file: %s%s*" base
+                       (if tag (concat " [" tag "]") "")))))
     (with-current-buffer buf
       (let ((inhibit-read-only t))
         (erase-buffer)
@@ -4150,7 +4202,11 @@ SQLI-BUF is the originating SQLi buffer."
       ;; The helper takes the panel's action list, not a string, so the
       ;; description is prepended rather than passed in.
       (setq-local header-line-format
-                  (concat " " (or (alist-get 'info data) path) "  "
+                  (concat " "
+                          (let ((server (sql-datum--admin-connected-to
+                                         sqli-buf)))
+                            (if server (concat "on " server " · ") ""))
+                          (or (alist-get 'info data) path) "  "
                           (sql-datum--admin-header-line
                            nil
                            '(("w" . "copy path") ("B" . "back")

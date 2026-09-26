@@ -2,6 +2,14 @@
 
 (require 'cl-lib)
 
+(defun datum-test--panel-buffer (panel &optional sub)
+  "Return the buffer showing PANEL, whatever connection it names.
+Panel buffers carry the connection in their name, so a test cannot
+look one up by an exact string."
+  (let ((prefix (concat "*datum-admin:" panel (if sub (concat ":" sub) ""))))
+    (seq-find (lambda (b) (string-prefix-p prefix (buffer-name b)))
+              (buffer-list))))
+
 (defvar test-fs--pass 0)
 (defvar test-fs--fail 0)
 
@@ -51,7 +59,7 @@
     (json-parse-string test-fs--listing
                        :object-type 'alist :array-type 'list))
    (current-buffer))
-  (get-buffer "*datum-admin:filesystem*"))
+  (datum-test--panel-buffer "filesystem"))
 
 (defun test-fs--goto (name)
   "Put point on the row whose Name cell is NAME."
@@ -155,7 +163,12 @@
   (sql-datum--handle-admin-panel payload)
   ;; The display is deferred through run-at-time, as the other panels are.
   (sleep-for 0.2)
-  (let ((buf (get-buffer "*datum-file: errorlog*")))
+  ;; The viewer buffer carries the connection too, so it cannot be
+  ;; looked up by an exact name.
+  (let ((buf (seq-find (lambda (b)
+                         (string-prefix-p "*datum-file: errorlog"
+                                          (buffer-name b)))
+                       (buffer-list))))
     (test-fs-assert "the file opens in a buffer of its own" buf)
     (when buf
       (with-current-buffer buf
@@ -409,7 +422,7 @@
    (sql-datum--admin-denull-alist
     (json-parse-string json :object-type 'alist :array-type 'list))
    (current-buffer))
-  (get-buffer "*datum-admin:filesystem*"))
+  (datum-test--panel-buffer "filesystem"))
 
 (with-current-buffer (test-fs--render test-fs--drive-root)
   (test-fs-assert "a drive root lists a way up"
@@ -527,7 +540,7 @@
              "\"info\":null}")
      :object-type 'alist :array-type 'list))
    (current-buffer))
-  (with-current-buffer "*datum-admin:activity*"
+  (with-current-buffer (datum-test--panel-buffer "activity")
     (test-fs-assert "a panel that does not opt out is still polled"
                     sql-datum--admin-timer)
     (sql-datum--admin-stop-timer (current-buffer))))
@@ -753,5 +766,87 @@
                               "payload"))))
 
 (when (file-directory-p test-fs--dl) (delete-directory test-fs--dl t))
+
+
+(message "\n=== the viewer says where the file came from ===")
+
+(let ((conn (get-buffer-create "*SQL: prod*")))
+  (with-current-buffer conn
+    (setq-local sql-datum--meta (make-hash-table :test #'equal))
+    (puthash "server" "prod-db01,1433" sql-datum--meta))
+  (sql-datum--admin-show-file
+   (list (cons 'info "/var/opt/mssql/log/errorlog")
+         (cons 'content "line one\n")
+         (cons 'context (list (cons 'path "/var/opt/mssql/log/errorlog"))))
+   conn)
+  (let ((buf (get-buffer "*datum-file: errorlog [prod]*")))
+    (test-fs-assert "the viewer buffer carries the connection" buf)
+    (when buf
+      (with-current-buffer buf
+        (test-fs-assert "and its header line names the server"
+                        (string-match-p "prod-db01,1433"
+                                        header-line-format)))))
+  ;; The separator belongs to the server, not to this machine, so the
+  ;; name cannot be cut with `file-name-nondirectory'.
+  (sql-datum--admin-show-file
+   (list (cons 'info "C:\\Logs\\ERRORLOG.1")
+         (cons 'content "x")
+         (cons 'context (list (cons 'path "C:\\Logs\\ERRORLOG.1"))))
+   conn)
+  (test-fs-assert "a Windows path is cut at the server's separator"
+                  (get-buffer "*datum-file: ERRORLOG.1 [prod]*")))
+
+(message "\n=== which machine this is ===")
+
+(let ((conn (get-buffer-create "*SQL: prod*")))
+  (with-current-buffer conn
+    (setq-local sql-datum--meta (make-hash-table :test #'equal))
+    (puthash "server" "prod-db01,1433" sql-datum--meta))
+  (sql-datum--admin-show-panel
+   (sql-datum--admin-denull-alist
+    (json-parse-string test-fs--listing
+                       :object-type 'alist :array-type 'list))
+   conn)
+  (with-current-buffer (datum-test--panel-buffer "filesystem")
+    ;; A listing gives no other sign of which machine it is showing.
+    (test-fs-assert "the panel names the server it is on"
+                    (save-excursion
+                      (goto-char (point-min))
+                      (forward-line 1)
+                      (string-match-p
+                       "prod-db01,1433"
+                       (buffer-substring-no-properties
+                        (line-beginning-position) (line-end-position)))))
+    ;; And the buffer belongs to that connection, not to panels in
+    ;; general: two connections would otherwise share one buffer, and a
+    ;; key pressed in what looks like the first would act on the second.
+    (test-fs-assert "the buffer name carries the connection"
+                    (string-match-p "\\[prod\\]" (buffer-name)))))
+
+(let ((other (get-buffer-create "*SQL: dev*")))
+  (with-current-buffer other
+    (setq-local sql-datum--meta (make-hash-table :test #'equal))
+    (puthash "server" "dev-db01,1433" sql-datum--meta))
+  (sql-datum--admin-show-panel
+   (sql-datum--admin-denull-alist
+    (json-parse-string test-fs--listing
+                       :object-type 'alist :array-type 'list))
+   other)
+  (test-fs-assert "a second connection gets a buffer of its own"
+                  (and (get-buffer "*datum-admin:filesystem [prod]*")
+                       (get-buffer "*datum-admin:filesystem [dev]*")))
+  (test-fs-assert "and the first still knows its own connection"
+                  (with-current-buffer "*datum-admin:filesystem [prod]*"
+                    (equal (buffer-name sql-datum--admin-sqli-buf)
+                           "*SQL: prod*"))))
+
+;; With nothing to name, the old name is what is used.
+(test-fs-assert "a nameless connection leaves the name alone"
+                (equal (sql-datum--admin-buffer-name "filesystem" nil nil)
+                       "*datum-admin:filesystem*"))
+(test-fs-assert "and a sub-panel still says which it is"
+                (string-prefix-p "*datum-admin:security:permissions"
+                                 (sql-datum--admin-buffer-name
+                                  "security" "permissions" nil)))
 
 (message "\n%d passed, %d failed" test-fs--pass test-fs--fail)

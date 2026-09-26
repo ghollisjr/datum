@@ -774,6 +774,16 @@ Admin panels provide interactive views for server administration.  Press
 - =security=  — Logins, roles, database users (MSSQL, PostgreSQL)
 - =ssis=      — SSIS packages (MSSQL)
 
+Every panel names the server it is on, under its title, and carries the
+connection in its buffer name — =*datum-admin:databases [prod]*=.  Both
+matter once more than one connection is open: a listing or a database
+list looks much the same on any machine, and without the connection in
+the name every connection would share one buffer per panel, so opening
+a panel on a second server would silently replace the first and a key
+pressed in what looked like the first would act on the second.  The
+server comes from what the connection already reported, so naming it
+costs no query.
+
 The keys available in a panel are shown in its *header line*, which stays
 visible however far the contents scroll.  Panel-specific actions come
 first, followed by the common keys below.  Top-level panels auto-refresh
