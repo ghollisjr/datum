@@ -1160,3 +1160,126 @@ class TestRunningAJob:
                 jobs.run_action(cursor, driver, "stop-job", [JOB])
             except Exception:
                 pass
+
+
+class TestStartingAtAStep:
+    """SSMS's "Start Job at Step..." -- sp_start_job takes a step name."""
+
+    BASE = {"subsystem": "TSQL", "database_name": "master",
+            "retry_attempts": "0", "retry_interval": "0",
+            "on_success_step_id": "0", "on_fail_action": "2",
+            "on_fail_step_id": "0"}
+
+    def _three_steps(self, cursor, driver):
+        from datum.panels import jobs
+        jobs.run_action(cursor, driver, "create-job", [_payload(
+            {"name": JOB, "enabled": True, "description": "",
+             "owner": "sa", "category": "[Uncategorized (Local)]",
+             "notify_eventlog": "0", "notify_email": "0",
+             "delete_level": "0"})])
+        for name in ("first", "second", "third"):
+            jobs.run_action(cursor, driver, "create-step", [_payload(
+                dict(self.BASE, job_name=JOB, step_name=name,
+                     command=f"PRINT '{name}'", on_success_action="1"))])
+        # Chain them, now that they all exist.
+        for step_id in ("1", "2"):
+            jobs.run_action(cursor, driver, "update-step", [_payload(
+                dict(self.BASE, job_name=JOB, step_id=step_id,
+                     step_name={"1": "first", "2": "second"}[step_id],
+                     command="PRINT 'x'", on_success_action="3"))])
+
+    def _steps_that_ran(self, cursor):
+        cursor.execute("""
+            SELECT h.step_id, CAST(h.step_name AS NVARCHAR(40))
+            FROM msdb.dbo.sysjobhistory h
+            JOIN msdb.dbo.sysjobs j ON j.job_id = h.job_id
+            WHERE j.name = ? ORDER BY h.instance_id
+        """, [JOB])
+        rows = cursor.fetchall()
+        return ([int(r[0]) for r in rows if int(r[0]) != 0],
+                any(int(r[0]) == 0 for r in rows))
+
+    def _wait(self, cursor, seconds=40):
+        for _ in range(seconds * 2):
+            time.sleep(0.5)
+            ran, done = self._steps_that_ran(cursor)
+            if done:
+                return ran
+        return None
+
+    def test_starting_at_a_step_skips_the_ones_before(self, agent, captured):
+        from datum.panels import jobs
+
+        cursor, driver = agent
+        if not _agent_running(cursor):
+            pytest.skip("SQL Server Agent is not running")
+        self._three_steps(cursor, driver)
+        cursor.execute("EXEC msdb.dbo.sp_purge_jobhistory @job_name = ?",
+                       [JOB])
+        captured.clear()
+        jobs.run_action(cursor, driver, "start-at-step",
+                        [_payload({"job_name": JOB, "step_id": "2"})])
+        assert "error" not in [k for k, _ in captured], captured
+        ran = self._wait(cursor)
+        assert ran == [2, 3], ran
+
+    def test_the_whole_job_still_starts_from_the_first_step(self, agent,
+                                                            captured):
+        from datum.panels import jobs
+
+        cursor, driver = agent
+        if not _agent_running(cursor):
+            pytest.skip("SQL Server Agent is not running")
+        self._three_steps(cursor, driver)
+        cursor.execute("EXEC msdb.dbo.sp_purge_jobhistory @job_name = ?",
+                       [JOB])
+        captured.clear()
+        jobs.run_action(cursor, driver, "start-job", [JOB])
+        ran = self._wait(cursor)
+        assert ran == [1, 2, 3], ran
+
+    def test_the_message_names_the_step(self, agent, captured):
+        from datum.panels import jobs
+
+        cursor, driver = agent
+        if not _agent_running(cursor):
+            pytest.skip("SQL Server Agent is not running")
+        self._three_steps(cursor, driver)
+        captured.clear()
+        jobs.run_action(cursor, driver, "start-at-step",
+                        [_payload({"job_name": JOB, "step_id": "3"})])
+        said = " ".join(str(a[0]) for k, a in captured if k == "info")
+        assert "step 3" in said and "third" in said, said
+        self._wait(cursor)
+
+    def test_a_step_that_is_not_there(self, agent, captured):
+        from datum.panels import jobs
+
+        cursor, driver = agent
+        self._three_steps(cursor, driver)
+        captured.clear()
+        jobs.run_action(cursor, driver, "start-at-step",
+                        [_payload({"job_name": JOB, "step_id": "9"})])
+        assert [k for k, _ in captured] == ["error"], captured
+        assert "no step 9" in captured[0][1][0]
+
+    def test_it_needs_both_a_job_and_a_step(self, agent, captured):
+        from datum.panels import jobs
+
+        cursor, driver = agent
+        for bad in ({"job_name": JOB}, {"step_id": "1"}, {}):
+            captured.clear()
+            jobs.run_action(cursor, driver, "start-at-step", [_payload(bad)])
+            assert [k for k, _ in captured] == ["error"], (bad, captured)
+
+    def test_the_steps_section_offers_it(self, agent, captured):
+        from datum.panels import jobs
+
+        cursor, driver = agent
+        self._three_steps(cursor, driver)
+        captured.clear()
+        jobs.run_action(cursor, driver, "detail", [JOB])
+        panel = [a[0] for k, a in captured if k == "admin_panel"][0]
+        steps = next(s for s in panel["sections"] if s["title"] == "Steps")
+        keys = {a["key"]: a["command"] for a in steps["actions"]}
+        assert keys.get("s") == "start-at-step", keys

@@ -64,7 +64,7 @@ def run_action(cursor, driver, action_name, args):
         return
 
     if action_name in ("new-job", "edit-job", "create-job", "update-job",
-                       "drop-job-check", "delete-job"):
+                       "drop-job-check", "delete-job", "start-at-step"):
         _handle_job_action(cursor, action_name, args)
         return
 
@@ -571,6 +571,8 @@ def _job_detail(cursor, job_name):
                     {"key": "E", "label": "Edit step", "command": "edit-step"},
                     {"key": "N", "label": "New step", "command": "new-step"},
                     {"key": "D", "label": "Delete step", "command": "delete-step"},
+                    {"key": "s", "label": "Start at this step",
+                     "command": "start-at-step"},
                 ],
             },
             {
@@ -758,6 +760,35 @@ def _handle_job_action(cursor, action_name, args):
                 "info": None,
                 "context": {"job_name": name},
             })
+
+        elif action_name == "start-at-step":
+            opts = _decode_job_payload(args)
+            name = (opts.get("job_name") or "").strip()
+            step_id = opts.get("step_id")
+            if not (name and step_id not in (None, "")):
+                envelope.error("start-at-step requires a job and a step")
+                return
+            # sp_start_job identifies the step by name, and the row the
+            # user is on gives its number.
+            cursor.execute("""
+                SELECT CAST(s.step_name AS NVARCHAR(128))
+                FROM msdb.dbo.sysjobsteps s
+                JOIN msdb.dbo.sysjobs j ON j.job_id = s.job_id
+                WHERE j.name = ? AND s.step_id = ?
+            """, [name, int(step_id)])
+            row = cursor.fetchone()
+            if not row:
+                envelope.error(f"Job {name} has no step {step_id}")
+                return
+            step_name = row[0]
+            cursor.execute(
+                "EXEC msdb.dbo.sp_start_job @job_name = ?, @step_name = ?",
+                [name, step_name])
+            while cursor.nextset():
+                pass
+            cursor.connection.commit()
+            envelope.info(f"Started {name} at step {step_id} ({step_name})")
+            _refresh_detail(cursor, name)
 
         elif action_name == "delete-job":
             # Sent as a payload when it comes from the confirmation

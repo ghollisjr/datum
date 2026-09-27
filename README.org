@@ -928,7 +928,7 @@ running, since it is a procedure rather than a view.
 |-----+---------------------------------------|
 | =d= | Job detail (steps + schedules)        |
 | =H= | Job history                           |
-| =s= | Start job                             |
+| =s= | Start job (on a step row: start there) |
 | =S= | Stop job                              |
 | =N= | New job                               |
 | =E= | Open the job: properties, steps, schedules |
@@ -942,7 +942,11 @@ down separate paths.  =d= does the same thing.
 
 Inside, =E=, =N= and =D= act on whichever section point is in: on the
 *Job* section they edit or delete the job itself, on *Steps* and
-*Schedules* they edit, add and remove those.  Each opens the same
+*Schedules* they edit, add and remove those.  =s= on a step row starts
+the job *at that step* and carries on from there — SSMS's "Start Job at
+Step..." — where in the list it starts the job from the beginning.  The
+prompt says which step and that the earlier ones are skipped, since that
+is the part worth being sure about.  Each opens the same
 wizard form the other panels use, so they navigate the same way: arrow
 keys between fields, =TAB= to complete or move on, =C-c C-c= to submit.  In the list they act on the job itself: its name,
 whether it is enabled, its description, owner and category, and what it

@@ -478,4 +478,57 @@
   (test-table-keys-error "new-job elsewhere says where it belongs"
                          (sql-datum-admin-new-job)))
 
+
+(message "\n=== s starts a job, or starts it at a step ===")
+
+;; On a step row the row id is the step number, not a job name -- so this
+;; used to ask to start a job called "2".
+(with-temp-buffer
+  (setq-local sql-datum--admin-panel-name "jobs")
+  (setq-local sql-datum--admin-panel-data '((sub_panel . "detail")))
+  (setq-local sql-datum--admin-context '((job_name . "nightly load")))
+  (insert "2     second\n")
+  (put-text-property (point-min) (point-max) 'sql-datum-section "Steps")
+  (put-text-property (point-min) (point-max) 'sql-datum-row-id "2")
+  (goto-char (point-min))
+  (let (sent asked)
+    (cl-letf (((symbol-function 'sql-datum--admin-send-command)
+               (lambda (c) (setq sent c)))
+              ((symbol-function 'yes-or-no-p)
+               (lambda (prompt) (setq asked prompt) t)))
+      (sql-datum-admin-start-job)
+      (test-table-keys-assert "s on a step starts the job at that step"
+                              (string-prefix-p
+                               ":admin-action jobs start-at-step " sent))
+      (test-table-keys-assert "naming the job, not the step number"
+                              (equal (json-parse-string
+                                      (decode-coding-string
+                                       (base64-decode-string
+                                        (car (last (split-string sent " "))))
+                                       'utf-8)
+                                      :object-type 'alist)
+                                     '((job_name . "nightly load")
+                                       (step_id . "2"))))
+      ;; The prompt has to say what will be skipped.
+      (test-table-keys-assert "and says the earlier steps are skipped"
+                              (and asked
+                                   (string-match-p "nightly load" asked)
+                                   (string-match-p "skipping" asked))))))
+
+;; In the list it still starts the whole job.
+(with-temp-buffer
+  (setq-local sql-datum--admin-panel-name "jobs")
+  (setq-local sql-datum--admin-panel-data '((sub_panel . nil)))
+  (insert "nightly load\n")
+  (put-text-property (point-min) (point-max) 'sql-datum-row-id "nightly load")
+  (goto-char (point-min))
+  (let (sent)
+    (cl-letf (((symbol-function 'sql-datum--admin-send-command)
+               (lambda (c) (setq sent c)))
+              ((symbol-function 'yes-or-no-p) (lambda (_) t)))
+      (sql-datum-admin-start-job)
+      (test-table-keys-assert "s in the list starts the whole job"
+                              (equal sent
+                                     ":admin-action jobs start-job nightly load")))))
+
 (message "\n%d passed, %d failed" test-table-keys--pass test-table-keys--fail)

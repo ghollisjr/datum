@@ -1958,15 +1958,41 @@ Returns a list of strings by parsing the current line against column widths."
      (format ":admin-action activity query-text %s" id))))
 
 (defun sql-datum-admin-start-job ()
-  "Start the SQL Agent job at point."
+  "Start the job at point, or the job at this step.
+
+On a step row inside a job's tree it starts the job *at that step* and
+carries on from there, which is SSMS's \"Start Job at Step...\" — and
+what the row is asking for.  Elsewhere it starts the job from the
+beginning."
   (interactive)
   (unless (equal sql-datum--admin-panel-name "jobs")
     (user-error "Start job is only available in the jobs panel"))
-  (let ((id (sql-datum--admin-row-id-at-point)))
-    (unless id (user-error "No job at point"))
-    (when (yes-or-no-p (format "Start job '%s'? " id))
-      (sql-datum--admin-send-command
-       (format ":admin-action jobs start-job %s" id)))))
+  (if (equal (get-text-property (line-beginning-position)
+                               'sql-datum-section)
+             "Steps")
+      (sql-datum-admin-start-at-step)
+    (let ((id (sql-datum--admin-row-id-at-point)))
+      (unless id (user-error "No job at point"))
+      (when (yes-or-no-p (format "Start job '%s'? " id))
+        (sql-datum--admin-send-command
+         (format ":admin-action jobs start-job %s" id))))))
+
+(defun sql-datum-admin-start-at-step ()
+  "Start this job at the step at point, carrying on from there."
+  (interactive)
+  (let ((job-name (alist-get 'job_name sql-datum--admin-context))
+        (step-id (sql-datum--admin-row-id-at-point))
+        (cells (sql-datum--admin-row-cells-at-point)))
+    (unless job-name (user-error "No job context available"))
+    (unless step-id (user-error "No step at point"))
+    (let ((step-name (or (and cells (nth 1 cells)) step-id)))
+      (when (yes-or-no-p
+             (format "Start '%s' at step %s (%s), skipping the steps before? "
+                     job-name step-id step-name))
+        (sql-datum--admin-send-command
+         (format ":admin-action jobs start-at-step %s"
+                 (sql-datum--admin-payload
+                  `((job_name . ,job-name) (step_id . ,step-id)))))))))
 
 (defun sql-datum-admin-stop-job ()
   "Stop the SQL Agent job at point."

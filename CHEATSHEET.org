@@ -235,6 +235,7 @@ leaving it shut because the restore failed would lock everybody out.
 | =d=       | Job detail (steps + schedules) |
 | =H=       | Job history                    |
 | =s= / =S= | Start / stop job               |
+| =s=       | on a step row: start there     |
 | =e=       | Enable/disable toggle          |
 | =N=       | New job                        |
 | =E=       | Open the job (as =d=)          |
