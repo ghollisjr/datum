@@ -1342,3 +1342,107 @@ class TestTheListCarriesTheSteps:
         # One panel, carrying everything the menu needs.
         assert panel["job_steps"][JOB] == [[1, "only"]]
         assert any(row[0] == JOB for row in panel["rows"])
+
+
+class TestWhereAPlainStartBegins:
+    """A job's start step is a property of the job, not always its first.
+
+    With start_step_id set to 2, simply starting the job skips step 1 --
+    so "from the beginning" was not a synonym for "step 1", and the menu
+    has to follow the job rather than assume.
+    """
+
+    BASE = {"subsystem": "TSQL", "database_name": "master",
+            "command": "SELECT 1", "retry_attempts": "0",
+            "retry_interval": "0", "on_success_step_id": "0",
+            "on_fail_action": "2", "on_fail_step_id": "0"}
+
+    def _two_steps(self, cursor, driver):
+        from datum.panels import jobs
+        jobs.run_action(cursor, driver, "create-job", [_payload(
+            {"name": JOB, "enabled": True, "description": "",
+             "owner": "sa", "category": "[Uncategorized (Local)]",
+             "notify_eventlog": "0", "notify_email": "0",
+             "delete_level": "0"})])
+        for name in ("one", "two"):
+            jobs.run_action(cursor, driver, "create-step", [_payload(
+                dict(self.BASE, job_name=JOB, step_name=name,
+                     on_success_action="1"))])
+
+    def test_the_list_says_where_a_plain_start_begins(self, agent, captured):
+        from datum.panels import jobs
+
+        cursor, driver = agent
+        self._two_steps(cursor, driver)
+        panel = jobs.get_data(cursor, driver, [])
+        assert panel["job_start_step"][JOB] == 1
+
+    def test_it_follows_the_job_when_set_elsewhere(self, agent, captured):
+        from datum.panels import jobs
+
+        cursor, driver = agent
+        self._two_steps(cursor, driver)
+        cursor.execute("EXEC msdb.dbo.sp_update_job @job_name = ?, "
+                       "@start_step_id = 2", [JOB])
+        panel = jobs.get_data(cursor, driver, [])
+        assert panel["job_start_step"][JOB] == 2
+
+    def test_a_plain_start_really_does_skip_the_earlier_steps(self, agent,
+                                                             captured):
+        from datum.panels import jobs
+
+        cursor, driver = agent
+        if not _agent_running(cursor):
+            pytest.skip("SQL Server Agent is not running")
+        self._two_steps(cursor, driver)
+        cursor.execute("EXEC msdb.dbo.sp_update_job @job_name = ?, "
+                       "@start_step_id = 2", [JOB])
+        cursor.execute("EXEC msdb.dbo.sp_purge_jobhistory @job_name = ?",
+                       [JOB])
+        jobs.run_action(cursor, driver, "start-job", [JOB])
+        for _ in range(60):
+            time.sleep(0.5)
+            cursor.execute("""
+                SELECT h.step_id FROM msdb.dbo.sysjobhistory h
+                JOIN msdb.dbo.sysjobs j ON j.job_id = h.job_id
+                WHERE j.name = ? ORDER BY h.instance_id""", [JOB])
+            ran = [int(r[0]) for r in cursor.fetchall()]
+            if 0 in ran:
+                # Step 1 never ran, which is the whole point.
+                assert [r for r in ran if r] == [2], ran
+                return
+        pytest.fail("the job did not finish")
+
+
+class TestStartingDoesNotOpenTheTree:
+    """Starting a job is not a reason to open it."""
+
+    BASE = TestWhereAPlainStartBegins.BASE
+
+    def _two_steps(self, cursor, driver):
+        TestWhereAPlainStartBegins._two_steps(self, cursor, driver)
+
+    def test_from_the_list_it_only_reports(self, agent, captured):
+        from datum.panels import jobs
+
+        cursor, driver = agent
+        self._two_steps(cursor, driver)
+        captured.clear()
+        jobs.run_action(cursor, driver, "start-at-step",
+                        [_payload({"job_name": JOB, "step_id": "2"})])
+        kinds = [k for k, _ in captured]
+        assert "error" not in kinds, captured
+        # No panel: pushed unasked, it opened the tree over the list the
+        # user started from.
+        assert "admin_panel" not in kinds, captured
+
+    def test_from_the_tree_it_refreshes_the_tree(self, agent, captured):
+        from datum.panels import jobs
+
+        cursor, driver = agent
+        self._two_steps(cursor, driver)
+        captured.clear()
+        jobs.run_action(cursor, driver, "start-at-step", [_payload(
+            {"job_name": JOB, "step_id": "2", "from": "detail"})])
+        panels = [a[0] for k, a in captured if k == "admin_panel"]
+        assert panels and panels[-1].get("sub_panel") == "detail", captured

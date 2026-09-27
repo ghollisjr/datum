@@ -241,10 +241,10 @@ leaving it shut because the restore failed would lock everybody out.
 | =E=       | Open the job (as =d=)          |
 | =D=       | Delete the job (confirmation)  |
 
-=s= on a job with more than one step asks where to start: the default
-runs it from the beginning, or pick a step to start there and carry on.
-Choices read as =2: load warehouse=, and a bare number or a bare name
-picks one just as well.
+=s= on a job with more than one step asks where to start.  The default
+is the step the job itself starts at, and taking it just starts the job;
+pick another to start there and carry on.  Choices read as =2: load
+warehouse=, and a bare number or a bare name picks one just as well.
 
 =E= opens the job, which holds everything about it: a *Job* section
 with its properties, then *Steps*, then *Schedules*.  Inside, =E= / =N=

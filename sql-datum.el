@@ -1957,8 +1957,14 @@ Returns a list of strings by parsing the current line against column widths."
     (sql-datum--admin-send-command
      (format ":admin-action activity query-text %s" id))))
 
-(defconst sql-datum--admin-from-the-beginning "(from the beginning)"
-  "What the start-job prompt offers instead of naming a step.")
+(defun sql-datum--admin-job-start-step (job-name)
+  "Return the step id JOB-NAME begins at when simply started.
+
+Usually its first step, but that is a property of the job and can be
+any of them: with it set to 2, starting the job skips step 1 — so this
+is not the same as \"step 1\" and cannot be assumed to be."
+  (let ((table (alist-get 'job_start_step sql-datum--admin-panel-data)))
+    (format "%s" (or (alist-get (intern job-name) table nil nil #'eq) 1))))
 
 (defun sql-datum--admin-job-steps (job-name)
   "Return ((STEP-ID . NAME) ...) for JOB-NAME, from the panel's own data.
@@ -1970,52 +1976,58 @@ trip — the menu opens on the keypress rather than after one."
               (cons (format "%s" (nth 0 step)) (format "%s" (nth 1 step))))
             (alist-get (intern job-name) table nil nil #'eq))))
 
-(defun sql-datum--admin-read-step (job-name steps)
-  "Ask which of STEPS to start JOB-NAME at, or nil for the beginning.
+(defun sql-datum--admin-read-step (job-name steps start-step)
+  "Ask which of STEPS to start JOB-NAME at, returning a step id.
 
 Each choice reads as \"2: load warehouse\", so a number completes it and
 so does a name.  Whatever is typed is matched against both, so a bare
-number or a bare name is enough even where completion does not help."
+number or a bare name is enough even where completion does not help.
+
+START-STEP — the step a plain start would begin at — is the default, so
+RET does what pressing `s\=' always did.  There is no separate entry for
+that: the step itself is the entry."
   (let* ((choices (mapcar (lambda (step)
                             (format "%s: %s" (car step) (cdr step)))
                           steps))
+         (default (or (cl-find-if
+                       (lambda (choice)
+                         (equal (car (split-string choice ":")) start-step))
+                       choices)
+                      (car choices)))
          ;; Substring matching, so a name completes as readily as the
          ;; number it comes after.
          (completion-styles (cons 'substring completion-styles))
-         (answer (completing-read
-                  (format "Start '%s' at step (default from the beginning): "
-                          job-name)
-                  (cons sql-datum--admin-from-the-beginning choices)
-                  nil nil nil nil
-                  sql-datum--admin-from-the-beginning))
-         (answer (string-trim answer)))
+         (answer (string-trim
+                  (completing-read
+                   (format "Start '%s' at step (default %s): "
+                           job-name default)
+                   choices nil nil nil nil default)))
+         (match (lambda (test) (cl-find-if test steps))))
     (cond
-     ((or (string-empty-p answer)
-          (equal answer sql-datum--admin-from-the-beginning))
-      nil)
+     ((string-empty-p answer) start-step)
      ;; "2: load warehouse", or just "2".
-     ((cl-find-if (lambda (step)
-                    (or (equal answer (format "%s: %s" (car step) (cdr step)))
-                        (equal answer (car step))))
-                  steps)
-      (car (cl-find-if
-            (lambda (step)
-              (or (equal answer (format "%s: %s" (car step) (cdr step)))
-                  (equal answer (car step))))
-            steps)))
+     ((funcall match (lambda (step)
+                       (or (equal answer (format "%s: %s"
+                                                 (car step) (cdr step)))
+                           (equal answer (car step)))))
+      (car (funcall match (lambda (step)
+                            (or (equal answer (format "%s: %s"
+                                                      (car step) (cdr step)))
+                                (equal answer (car step)))))))
      ;; Or just the name, however it was cased.
-     ((cl-find-if (lambda (step) (cl-equalp answer (cdr step))) steps)
-      (car (cl-find-if (lambda (step) (cl-equalp answer (cdr step))) steps)))
+     ((funcall match (lambda (step) (cl-equalp answer (cdr step))))
+      (car (funcall match (lambda (step) (cl-equalp answer (cdr step))))))
      (t (user-error "No step of '%s' matches %s" job-name answer)))))
 
 (defun sql-datum-admin-start-job ()
   "Start the job at point, asking which step to start at.
 
-A job with more than one step offers them: pick one to start there and
-carry on from it, which is SSMS's \"Start Job at Step...\", or take the
-default and run the job from the beginning.
+A job with more than one step offers them, with the step it would start
+at anyway as the default — so RET behaves as it always did, and picking
+another starts there and carries on, which is SSMS's \"Start Job at
+Step...\".
 
-On a step row inside a job's tree there is nothing to ask — that row is
+On a step row inside a job's tree there is nothing to ask: that row is
 the answer."
   (interactive)
   (unless (equal sql-datum--admin-panel-name "jobs")
@@ -2026,17 +2038,19 @@ the answer."
       (sql-datum-admin-start-at-step)
     (let ((id (sql-datum--admin-row-id-at-point)))
       (unless id (user-error "No job at point"))
-      (let ((steps (sql-datum--admin-job-steps id)))
+      (let ((steps (sql-datum--admin-job-steps id))
+            (start (sql-datum--admin-job-start-step id)))
         (if (cdr steps)
             ;; More than one step, so where to start is a real question.
-            (let ((step-id (sql-datum--admin-read-step id steps)))
-              (if step-id
+            (let ((step-id (sql-datum--admin-read-step id steps start)))
+              (if (equal step-id start)
+                  ;; The step it would have started at anyway.
                   (sql-datum--admin-send-command
-                   (format ":admin-action jobs start-at-step %s"
-                           (sql-datum--admin-payload
-                            `((job_name . ,id) (step_id . ,step-id)))))
+                   (format ":admin-action jobs start-job %s" id))
                 (sql-datum--admin-send-command
-                 (format ":admin-action jobs start-job %s" id))))
+                 (format ":admin-action jobs start-at-step %s"
+                         (sql-datum--admin-payload
+                          `((job_name . ,id) (step_id . ,step-id)))))))
           ;; One step, or none reported: nothing to choose between.
           (when (yes-or-no-p (format "Start job '%s'? " id))
             (sql-datum--admin-send-command
@@ -2057,7 +2071,10 @@ the answer."
         (sql-datum--admin-send-command
          (format ":admin-action jobs start-at-step %s"
                  (sql-datum--admin-payload
-                  `((job_name . ,job-name) (step_id . ,step-id)))))))))
+                  `((job_name . ,job-name) (step_id . ,step-id)
+                    ;; The tree is what is on screen here, so it is
+                    ;; worth refreshing; from the list it is not.
+                    (from . "detail")))))))))
 
 (defun sql-datum-admin-stop-job ()
   "Stop the SQL Agent job at point."

@@ -421,24 +421,30 @@ def _job_list(cursor):
     # Each job's steps travel with the list, so choosing where to start
     # is a menu rather than a round trip.
     steps_by_job = {}
+    starts_at = {}
     try:
         cursor.execute("""
             SELECT CAST(j.name AS NVARCHAR(128)), s.step_id,
-                   CAST(s.step_name AS NVARCHAR(128))
+                   CAST(s.step_name AS NVARCHAR(128)), j.start_step_id
             FROM msdb.dbo.sysjobsteps s
             JOIN msdb.dbo.sysjobs j ON j.job_id = s.job_id
             ORDER BY j.name, s.step_id
         """)
-        for job, step_id, step_name in cursor.fetchall():
+        for job, step_id, step_name, start_step in cursor.fetchall():
             steps_by_job.setdefault(job, []).append([int(step_id), step_name])
+            # Which step a plain start begins at.  Usually the first, but
+            # it is a property of the job and can be any of them: with it
+            # set to 2, starting the job skips step 1 entirely.
+            starts_at[job] = int(start_step or 1)
     except Exception:
-        steps_by_job = {}
+        steps_by_job, starts_at = {}, {}
 
     return {
         "panel": "jobs",
         "headers": headers,
         "rows": rows,
         "job_steps": steps_by_job,
+        "job_start_step": starts_at,
         "row_id": 0,  # Job Name column
         "actions": [
             {"key": "s", "label": "Start job", "command": "start-job"},
@@ -805,7 +811,11 @@ def _handle_job_action(cursor, action_name, args):
                 pass
             cursor.connection.commit()
             envelope.info(f"Started {name} at step {step_id} ({step_name})")
-            _refresh_detail(cursor, name)
+            # Only where the tree is what the user is looking at.  Sent
+            # unasked, it opened the tree over the list they started
+            # from.
+            if (opts.get("from") or "") == "detail":
+                _refresh_detail(cursor, name)
 
         elif action_name == "delete-job":
             # Sent as a payload when it comes from the confirmation

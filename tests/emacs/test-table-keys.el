@@ -501,14 +501,17 @@
                               (string-prefix-p
                                ":admin-action jobs start-at-step " sent))
       (test-table-keys-assert "naming the job, not the step number"
-                              (equal (json-parse-string
-                                      (decode-coding-string
-                                       (base64-decode-string
-                                        (car (last (split-string sent " "))))
-                                       'utf-8)
-                                      :object-type 'alist)
-                                     '((job_name . "nightly load")
-                                       (step_id . "2"))))
+                              (let ((payload (json-parse-string
+                                              (decode-coding-string
+                                               (base64-decode-string
+                                                (car (last (split-string
+                                                            sent " "))))
+                                               'utf-8)
+                                              :object-type 'alist)))
+                                (and (equal (alist-get 'job_name payload)
+                                            "nightly load")
+                                     (equal (alist-get 'step_id payload)
+                                            "2"))))
       ;; The prompt has to say what will be skipped.
       (test-table-keys-assert "and says the earlier steps are skipped"
                               (and asked
@@ -534,39 +537,42 @@
 
 (message "\n=== s offers the steps to start at ===")
 
-(defconst test-table-keys--jobs-panel
+(defun test-table-keys--jobs-panel (start-step)
+  "A jobs list whose only job has three steps and starts at START-STEP."
   (sql-datum--admin-denull-alist
    (json-parse-string
-    (concat "{\"panel\":\"jobs\","
-            "\"headers\":[\"Job Name\",\"Enabled\"],"
-            "\"rows\":[[\"nightly load\",\"Yes\"],"
-            "[\"one step job\",\"Yes\"]],"
-            "\"row_id\":0,\"actions\":[],\"info\":null,"
-            "\"job_steps\":{\"nightly load\":[[1,\"extract data\"],"
-            "[2,\"load warehouse\"]],"
-            "\"one step job\":[[1,\"the only step\"]]}}")
+    (format (concat "{\"panel\":\"jobs\",\"headers\":[\"Job Name\"],"
+                    "\"rows\":[[\"nightly load\"],[\"one step job\"]],"
+                    "\"row_id\":0,\"actions\":[],\"info\":null,"
+                    "\"job_steps\":{\"nightly load\":"
+                    "[[1,\"extract data\"],[2,\"load warehouse\"],"
+                    "[3,\"publish\"]],"
+                    "\"one step job\":[[1,\"the only step\"]]},"
+                    "\"job_start_step\":{\"nightly load\":%d,"
+                    "\"one step job\":1}}")
+            start-step)
     :object-type 'alist :array-type 'list)))
 
-(defun test-table-keys--start (job answer)
-  "Press s on JOB in the list, answering ANSWER at the prompt.
-Returns (SENT CANDIDATES)."
+(defun test-table-keys--start (job answer &optional start-step)
+  "Press s on JOB, answering ANSWER.  Returns (SENT CHOICES PROMPT)."
   (with-temp-buffer
     (setq-local sql-datum--admin-panel-name "jobs")
-    (setq-local sql-datum--admin-panel-data test-table-keys--jobs-panel)
+    (setq-local sql-datum--admin-panel-data
+                (test-table-keys--jobs-panel (or start-step 1)))
     (insert job "\n")
     (put-text-property (point-min) (point-max) 'sql-datum-row-id job)
     (goto-char (point-min))
-    (let (sent candidates)
+    (let (sent choices prompt)
       (cl-letf (((symbol-function 'sql-datum--admin-send-command)
                  (lambda (c) (setq sent c)))
                 ((symbol-function 'yes-or-no-p) (lambda (_) t))
                 ((symbol-function 'completing-read)
-                 (lambda (_prompt collection &rest _)
-                   (setq candidates collection)
+                 (lambda (p collection &rest _)
+                   (setq prompt p choices collection)
                    answer)))
         (condition-case err (sql-datum-admin-start-job)
           (user-error (setq sent (list 'refused (cadr err))))))
-      (list sent candidates))))
+      (list sent choices prompt))))
 
 (defun test-table-keys--started-at (sent)
   "Return the step id SENT asks to start at, or nil."
@@ -578,48 +584,96 @@ Returns (SENT CANDIDATES)."
                  'utf-8)
                 :object-type 'alist))))
 
-(test-table-keys-assert "the steps are offered by number and name"
+;; The steps themselves are the choices.  A separate "from the beginning"
+;; entry said nothing the steps do not, and said it wrongly for a job
+;; that starts at something other than its first step.
+(test-table-keys-assert "the choices are the steps, and nothing else"
                         (equal (nth 1 (test-table-keys--start
                                        "nightly load" ""))
-                               '("(from the beginning)" "1: extract data"
-                                 "2: load warehouse")))
+                               '("1: extract data" "2: load warehouse"
+                                 "3: publish")))
+(test-table-keys-assert "the prompt names the one RET will take"
+                        (string-match-p
+                         "default 1: extract data"
+                         (nth 2 (test-table-keys--start "nightly load" ""))))
 
-;; Taking the default runs the job as it always did.
-(test-table-keys-assert "the default starts the whole job"
-                        (equal (nth 0 (test-table-keys--start
-                                       "nightly load" ""))
-                               ":admin-action jobs start-job nightly load"))
-(test-table-keys-assert "and so does choosing that entry"
-                        (equal (nth 0 (test-table-keys--start
-                                       "nightly load"
-                                       "(from the beginning)"))
-                               ":admin-action jobs start-job nightly load"))
-
-;; Whatever is typed is matched against both the number and the name, so
-;; completion helping is a convenience rather than a requirement.
-(dolist (answer '("2: load warehouse" "2" "load warehouse" "LOAD WAREHOUSE"))
+;; RET does what pressing s always did.
+(dolist (answer '("" "1: extract data"))
   (test-table-keys-assert
-   (format "%S starts at step 2" answer)
+   (format "%S starts the job as before" answer)
+   (equal (nth 0 (test-table-keys--start "nightly load" answer))
+          ":admin-action jobs start-job nightly load")))
+
+;; Whatever is typed is matched against both number and name.
+(dolist (probe '(("2: load warehouse" "2") ("2" "2") ("publish" "3")
+                 ("PUBLISH" "3")))
+  (test-table-keys-assert
+   (format "%S starts at step %s" (nth 0 probe) (nth 1 probe))
    (equal (test-table-keys--started-at
-           (nth 0 (test-table-keys--start "nightly load" answer)))
-          "2")))
+           (nth 0 (test-table-keys--start "nightly load" (nth 0 probe))))
+          (nth 1 probe))))
 
-(test-table-keys-assert "the first step can be chosen too"
-                        (equal (test-table-keys--started-at
-                                (nth 0 (test-table-keys--start
-                                        "nightly load" "1")))
-                               "1"))
-
-;; Something that matches no step is refused rather than sent on.
 (test-table-keys-assert "an answer matching nothing is refused"
                         (let ((sent (nth 0 (test-table-keys--start
-                                            "nightly load" "nonsense"))))
+                                            "nightly load" "nope"))))
                           (and (consp sent) (eq (car sent) 'refused))))
+
+;; A job can begin at a step other than its first, and then a plain start
+;; skips the ones before it -- so the default has to follow the job.
+(test-table-keys-assert "the default follows the job's own start step"
+                        (string-match-p
+                         "default 2: load warehouse"
+                         (nth 2 (test-table-keys--start
+                                 "nightly load" "" 2))))
+(test-table-keys-assert "choosing that step starts the job plainly"
+                        (equal (nth 0 (test-table-keys--start
+                                       "nightly load" "2: load warehouse" 2))
+                               ":admin-action jobs start-job nightly load"))
+(test-table-keys-assert "and its first step can be asked for explicitly"
+                        (equal (test-table-keys--started-at
+                                (nth 0 (test-table-keys--start
+                                        "nightly load" "1" 2)))
+                               "1"))
 
 ;; One step is not a choice, so it is not presented as one.
 (test-table-keys-assert "a single-step job just starts"
                         (equal (nth 0 (test-table-keys--start
                                        "one step job" ""))
                                ":admin-action jobs start-job one step job"))
+
+;; From a step row the tree is on screen, so it says so and gets a
+;; refresh; from the list it must not, or the tree opens unasked.
+(with-temp-buffer
+  (setq-local sql-datum--admin-panel-name "jobs")
+  (setq-local sql-datum--admin-panel-data '((sub_panel . "detail")))
+  (setq-local sql-datum--admin-context '((job_name . "nightly load")))
+  (insert "2     load warehouse\n")
+  (put-text-property (point-min) (point-max) 'sql-datum-section "Steps")
+  (put-text-property (point-min) (point-max) 'sql-datum-row-id "2")
+  (goto-char (point-min))
+  (let (sent)
+    (cl-letf (((symbol-function 'sql-datum--admin-send-command)
+               (lambda (c) (setq sent c)))
+              ((symbol-function 'yes-or-no-p) (lambda (_) t)))
+      (sql-datum-admin-start-job)
+      (let ((payload (json-parse-string
+                      (decode-coding-string
+                       (base64-decode-string
+                        (car (last (split-string sent " "))))
+                       'utf-8)
+                      :object-type 'alist)))
+        (test-table-keys-assert "a step row says the tree is on screen"
+                                (equal (alist-get 'from payload) "detail"))))))
+
+(let ((from-list (nth 0 (test-table-keys--start "nightly load" "2"))))
+  (test-table-keys-assert "and from the list it does not"
+                          (null (alist-get
+                                 'from
+                                 (json-parse-string
+                                  (decode-coding-string
+                                   (base64-decode-string
+                                    (car (last (split-string from-list " "))))
+                                   'utf-8)
+                                  :object-type 'alist)))))
 
 (message "\n%d passed, %d failed" test-table-keys--pass test-table-keys--fail)

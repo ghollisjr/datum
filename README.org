@@ -919,21 +919,34 @@ executing, last run result and next run time.  Executing jobs sort first.
 
 =s= on a job with more than one step asks where to start it:
 
-: Start 'nightly load' at step (default from the beginning):
-:   (from the beginning)
+: Start 'nightly load' at step (default 1: extract data):
 :   1: extract data
 :   2: load warehouse
 
 Each choice carries both the number and the name, so either completes
 it, and whatever is typed is matched against both — a bare =2=, a bare
 =load warehouse=, or the whole line all pick step 2, and the name is
-matched whatever its case.  Taking the default runs the job from its
-first step, as it always did.  An answer matching no step is refused
-rather than sent on.
+matched whatever its case.  An answer matching no step is refused rather
+than sent on.
 
-The steps travel with the list itself, so the menu opens on the keypress
-rather than after a round trip.  A job with one step is not offered a
-choice it does not have.
+The choices are the steps and nothing besides.  There was a separate
+=(from the beginning)= entry above them, which said nothing the first
+step did not — except on a job whose =start_step_id= is not 1, where it
+said it wrongly: =sp_update_job @start_step_id = 2= is accepted, and
+then simply starting the job runs step 2 onward and never runs step 1.
+So the job's own start step is the default instead, named in the prompt,
+and choosing it starts the job plainly rather than at a step — pressing
+=s= =RET= does what pressing =s= always did, whichever step that is.
+
+The steps travel with the list itself, along with where each job starts,
+so the menu opens on the keypress rather than after a round trip.  A job
+with one step is not offered a choice it does not have.
+
+Starting at a step from the list only reports what it started; it
+refreshes the job's tree only when asked from inside the tree, where the
+tree is what you are looking at.  Sent either way, it opened the job
+over the list the keypress was made in — which read as though =RET= had
+gone through to the buffer underneath.
 
 The step currently executing comes from =sp_help_job=, which is what
 SSMS reads.  =sysjobactivity= records the last step to *finish*, so
