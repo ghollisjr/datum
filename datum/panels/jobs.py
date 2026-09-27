@@ -418,10 +418,27 @@ def _job_list(cursor):
                 if row[name_column] == job_name:
                     row[column] = label
 
+    # Each job's steps travel with the list, so choosing where to start
+    # is a menu rather than a round trip.
+    steps_by_job = {}
+    try:
+        cursor.execute("""
+            SELECT CAST(j.name AS NVARCHAR(128)), s.step_id,
+                   CAST(s.step_name AS NVARCHAR(128))
+            FROM msdb.dbo.sysjobsteps s
+            JOIN msdb.dbo.sysjobs j ON j.job_id = s.job_id
+            ORDER BY j.name, s.step_id
+        """)
+        for job, step_id, step_name in cursor.fetchall():
+            steps_by_job.setdefault(job, []).append([int(step_id), step_name])
+    except Exception:
+        steps_by_job = {}
+
     return {
         "panel": "jobs",
         "headers": headers,
         "rows": rows,
+        "job_steps": steps_by_job,
         "row_id": 0,  # Job Name column
         "actions": [
             {"key": "s", "label": "Start job", "command": "start-job"},

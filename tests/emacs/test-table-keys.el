@@ -531,4 +531,95 @@
                               (equal sent
                                      ":admin-action jobs start-job nightly load")))))
 
+
+(message "\n=== s offers the steps to start at ===")
+
+(defconst test-table-keys--jobs-panel
+  (sql-datum--admin-denull-alist
+   (json-parse-string
+    (concat "{\"panel\":\"jobs\","
+            "\"headers\":[\"Job Name\",\"Enabled\"],"
+            "\"rows\":[[\"nightly load\",\"Yes\"],"
+            "[\"one step job\",\"Yes\"]],"
+            "\"row_id\":0,\"actions\":[],\"info\":null,"
+            "\"job_steps\":{\"nightly load\":[[1,\"extract data\"],"
+            "[2,\"load warehouse\"]],"
+            "\"one step job\":[[1,\"the only step\"]]}}")
+    :object-type 'alist :array-type 'list)))
+
+(defun test-table-keys--start (job answer)
+  "Press s on JOB in the list, answering ANSWER at the prompt.
+Returns (SENT CANDIDATES)."
+  (with-temp-buffer
+    (setq-local sql-datum--admin-panel-name "jobs")
+    (setq-local sql-datum--admin-panel-data test-table-keys--jobs-panel)
+    (insert job "\n")
+    (put-text-property (point-min) (point-max) 'sql-datum-row-id job)
+    (goto-char (point-min))
+    (let (sent candidates)
+      (cl-letf (((symbol-function 'sql-datum--admin-send-command)
+                 (lambda (c) (setq sent c)))
+                ((symbol-function 'yes-or-no-p) (lambda (_) t))
+                ((symbol-function 'completing-read)
+                 (lambda (_prompt collection &rest _)
+                   (setq candidates collection)
+                   answer)))
+        (condition-case err (sql-datum-admin-start-job)
+          (user-error (setq sent (list 'refused (cadr err))))))
+      (list sent candidates))))
+
+(defun test-table-keys--started-at (sent)
+  "Return the step id SENT asks to start at, or nil."
+  (when (and (stringp sent) (string-match-p "start-at-step" sent))
+    (alist-get 'step_id
+               (json-parse-string
+                (decode-coding-string
+                 (base64-decode-string (car (last (split-string sent " "))))
+                 'utf-8)
+                :object-type 'alist))))
+
+(test-table-keys-assert "the steps are offered by number and name"
+                        (equal (nth 1 (test-table-keys--start
+                                       "nightly load" ""))
+                               '("(from the beginning)" "1: extract data"
+                                 "2: load warehouse")))
+
+;; Taking the default runs the job as it always did.
+(test-table-keys-assert "the default starts the whole job"
+                        (equal (nth 0 (test-table-keys--start
+                                       "nightly load" ""))
+                               ":admin-action jobs start-job nightly load"))
+(test-table-keys-assert "and so does choosing that entry"
+                        (equal (nth 0 (test-table-keys--start
+                                       "nightly load"
+                                       "(from the beginning)"))
+                               ":admin-action jobs start-job nightly load"))
+
+;; Whatever is typed is matched against both the number and the name, so
+;; completion helping is a convenience rather than a requirement.
+(dolist (answer '("2: load warehouse" "2" "load warehouse" "LOAD WAREHOUSE"))
+  (test-table-keys-assert
+   (format "%S starts at step 2" answer)
+   (equal (test-table-keys--started-at
+           (nth 0 (test-table-keys--start "nightly load" answer)))
+          "2")))
+
+(test-table-keys-assert "the first step can be chosen too"
+                        (equal (test-table-keys--started-at
+                                (nth 0 (test-table-keys--start
+                                        "nightly load" "1")))
+                               "1"))
+
+;; Something that matches no step is refused rather than sent on.
+(test-table-keys-assert "an answer matching nothing is refused"
+                        (let ((sent (nth 0 (test-table-keys--start
+                                            "nightly load" "nonsense"))))
+                          (and (consp sent) (eq (car sent) 'refused))))
+
+;; One step is not a choice, so it is not presented as one.
+(test-table-keys-assert "a single-step job just starts"
+                        (equal (nth 0 (test-table-keys--start
+                                       "one step job" ""))
+                               ":admin-action jobs start-job one step job"))
+
 (message "\n%d passed, %d failed" test-table-keys--pass test-table-keys--fail)

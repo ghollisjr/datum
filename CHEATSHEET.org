@@ -235,11 +235,16 @@ leaving it shut because the restore failed would lock everybody out.
 | =d=       | Job detail (steps + schedules) |
 | =H=       | Job history                    |
 | =s= / =S= | Start / stop job               |
-| =s=       | on a step row: start there     |
+| =s=       | asks which step to start at    |
 | =e=       | Enable/disable toggle          |
 | =N=       | New job                        |
 | =E=       | Open the job (as =d=)          |
 | =D=       | Delete the job (confirmation)  |
+
+=s= on a job with more than one step asks where to start: the default
+runs it from the beginning, or pick a step to start there and carry on.
+Choices read as =2: load warehouse=, and a bare number or a bare name
+picks one just as well.
 
 =E= opens the job, which holds everything about it: a *Job* section
 with its properties, then *Steps*, then *Schedules*.  Inside, =E= / =N=

@@ -917,6 +917,24 @@ leaves the session at all — the SQL is what you are waiting to read.
 Shows SQL Agent jobs with status, enabled state, the step currently
 executing, last run result and next run time.  Executing jobs sort first.
 
+=s= on a job with more than one step asks where to start it:
+
+: Start 'nightly load' at step (default from the beginning):
+:   (from the beginning)
+:   1: extract data
+:   2: load warehouse
+
+Each choice carries both the number and the name, so either completes
+it, and whatever is typed is matched against both — a bare =2=, a bare
+=load warehouse=, or the whole line all pick step 2, and the name is
+matched whatever its case.  Taking the default runs the job from its
+first step, as it always did.  An answer matching no step is refused
+rather than sent on.
+
+The steps travel with the list itself, so the menu opens on the keypress
+rather than after a round trip.  A job with one step is not offered a
+choice it does not have.
+
 The step currently executing comes from =sp_help_job=, which is what
 SSMS reads.  =sysjobactivity= records the last step to *finish*, so
 using it named nothing while a job was on its first step and named the
@@ -928,7 +946,7 @@ running, since it is a procedure rather than a view.
 |-----+---------------------------------------|
 | =d= | Job detail (steps + schedules)        |
 | =H= | Job history                           |
-| =s= | Start job (on a step row: start there) |
+| =s= | Start job, choosing which step to start at |
 | =S= | Stop job                              |
 | =N= | New job                               |
 | =E= | Open the job: properties, steps, schedules |
@@ -944,9 +962,8 @@ Inside, =E=, =N= and =D= act on whichever section point is in: on the
 *Job* section they edit or delete the job itself, on *Steps* and
 *Schedules* they edit, add and remove those.  =s= on a step row starts
 the job *at that step* and carries on from there — SSMS's "Start Job at
-Step..." — where in the list it starts the job from the beginning.  The
-prompt says which step and that the earlier ones are skipped, since that
-is the part worth being sure about.  Each opens the same
+Step..." — and the prompt says the earlier steps are skipped, that being
+the part worth being sure about.  Each opens the same
 wizard form the other panels use, so they navigate the same way: arrow
 keys between fields, =TAB= to complete or move on, =C-c C-c= to submit.  In the list they act on the job itself: its name,
 whether it is enabled, its description, owner and category, and what it

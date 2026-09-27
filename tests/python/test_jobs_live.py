@@ -1283,3 +1283,62 @@ class TestStartingAtAStep:
         steps = next(s for s in panel["sections"] if s["title"] == "Steps")
         keys = {a["key"]: a["command"] for a in steps["actions"]}
         assert keys.get("s") == "start-at-step", keys
+
+
+class TestTheListCarriesTheSteps:
+    """So that choosing where to start is a menu, not a round trip."""
+
+    BASE = {"subsystem": "TSQL", "database_name": "master",
+            "command": "SELECT 1", "retry_attempts": "0",
+            "retry_interval": "0", "on_success_step_id": "0",
+            "on_fail_action": "2", "on_fail_step_id": "0"}
+
+    def test_each_job_brings_its_steps(self, agent, captured):
+        from datum.panels import jobs
+
+        cursor, driver = agent
+        jobs.run_action(cursor, driver, "create-job", [_payload(
+            {"name": JOB, "enabled": True, "description": "",
+             "owner": "sa", "category": "[Uncategorized (Local)]",
+             "notify_eventlog": "0", "notify_email": "0",
+             "delete_level": "0"})])
+        for name in ("extract data", "load warehouse"):
+            jobs.run_action(cursor, driver, "create-step", [_payload(
+                dict(self.BASE, job_name=JOB, step_name=name,
+                     on_success_action="1"))])
+        panel = jobs.get_data(cursor, driver, [])
+        assert JOB in panel["job_steps"], panel["job_steps"].keys()
+        # Number and name, in order, which is what the menu reads from.
+        assert panel["job_steps"][JOB] == [[1, "extract data"],
+                                          [2, "load warehouse"]]
+
+    def test_a_job_with_no_steps_brings_none(self, agent, captured):
+        from datum.panels import jobs
+
+        cursor, driver = agent
+        jobs.run_action(cursor, driver, "create-job", [_payload(
+            {"name": JOB, "enabled": True, "description": "",
+             "owner": "sa", "category": "[Uncategorized (Local)]",
+             "notify_eventlog": "0", "notify_email": "0",
+             "delete_level": "0"})])
+        panel = jobs.get_data(cursor, driver, [])
+        assert JOB not in panel["job_steps"]
+
+    def test_the_steps_are_there_without_asking_again(self, agent, captured):
+        """The point of carrying them: no second query to open the menu."""
+        from datum.panels import jobs
+
+        cursor, driver = agent
+        jobs.run_action(cursor, driver, "create-job", [_payload(
+            {"name": JOB, "enabled": True, "description": "",
+             "owner": "sa", "category": "[Uncategorized (Local)]",
+             "notify_eventlog": "0", "notify_email": "0",
+             "delete_level": "0"})])
+        jobs.run_action(cursor, driver, "create-step", [_payload(
+            dict(self.BASE, job_name=JOB, step_name="only",
+                 on_success_action="1"))])
+        captured.clear()
+        panel = jobs.get_data(cursor, driver, [])
+        # One panel, carrying everything the menu needs.
+        assert panel["job_steps"][JOB] == [[1, "only"]]
+        assert any(row[0] == JOB for row in panel["rows"])
