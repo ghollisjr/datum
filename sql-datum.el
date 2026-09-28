@@ -940,6 +940,13 @@ Set to nil to disable auto-refresh."
 (defvar-local sql-datum--admin-panel-data nil
   "Last received panel data (parsed JSON) for this admin buffer.")
 
+(defvar-local sql-datum--admin-server nil
+  "The server this panel's rows came from.
+
+Remembered so that a panel whose connection has since been closed can
+still say which machine it is showing, rather than falling silent or --
+worse -- borrowing the name of whichever connection is still open.")
+
 (defvar-local sql-datum--admin-sqli-buf nil
   "The SQLi buffer associated with this admin panel.")
 
@@ -1128,7 +1135,17 @@ SQLI-BUF is the originating SQLi buffer."
          (info (alist-get 'info data))
          (row-id (alist-get 'row_id data))
          (buf-name (sql-datum--admin-buffer-name panel sub-panel sqli-buf))
-         (buf (get-buffer-create buf-name))
+         ;; A panel redrawing itself -- sorting, hiding details -- stays
+         ;; in the buffer it is already in.  Its name carries the
+         ;; connection, so once that connection is closed the name no
+         ;; longer matches and the redraw would land in a second,
+         ;; untagged panel while the one on screen stayed as it was.
+         (buf (if (and (not (buffer-live-p sqli-buf))
+                       (equal sql-datum--admin-panel-name panel)
+                       (equal (alist-get 'sub_panel sql-datum--admin-panel-data)
+                              sub-panel))
+                  (current-buffer)
+                (get-buffer-create buf-name)))
          (initial (not (buffer-local-value 'sql-datum--admin-panel-name buf))))
     (when (and (equal panel "security") (null sub-panel) (eql row-id 0))
       (sql-datum--cache-principals rows sqli-buf))
@@ -1190,11 +1207,18 @@ SQLI-BUF is the originating SQLi buffer."
                                 'bold))
                   "\n")
           (cl-incf header-lines)
-          ;; Which machine this is, before anything about it.
-          (let ((server (sql-datum--admin-connected-to sqli-buf)))
+          ;; Which machine this is, before anything about it.  Kept
+          ;; here as well, so that a panel outliving its connection
+          ;; still says which server the rows came from -- and says
+          ;; that they are no longer being refreshed from it.
+          (let* ((live (sql-datum--admin-connected-to sqli-buf))
+                 (server (or live sql-datum--admin-server)))
+            (when live (setq sql-datum--admin-server live))
             (when server
               (insert (propertize (format "on %s" server)
                                   'face 'font-lock-keyword-face)
+                      (if live ""
+                        (propertize " (disconnected)" 'face 'warning))
                       "  ·  ")))
           (insert (format "Last refresh: %s" (format-time-string "%H:%M:%S")))
           (if sql-datum--admin-timer
@@ -1296,10 +1320,17 @@ _ROWS is accepted for interface consistency."
 Taken from the metadata the connection already reported, so naming it
 costs no query.  Worth naming: a panel gives no other sign of which
 machine it is showing, and a directory listing or a dropped database
-looks the same on any of them."
+looks the same on any of them.
+
+Only this panel's own connection is asked.  Sending a command may fall
+back to whichever connection is current, because a command sent to the
+wrong server fails loudly; a *label* that falls back is worse than no
+label at all, since it quietly puts another machine's name over this
+machine's rows.  Once prod's connection was closed, its still-open
+panel read `on dev-sql-09'."
   (let ((buf (or (and sqli-buf (buffer-live-p sqli-buf) sqli-buf)
-                 (let ((b (sql-find-sqli-buffer 'datum)))
-                   (and b (get-buffer b))))))
+                 (and (buffer-live-p sql-datum--admin-sqli-buf)
+                      sql-datum--admin-sqli-buf))))
     (when buf
       (let ((server (gethash "server"
                              (buffer-local-value 'sql-datum--meta buf) "")))
@@ -4363,14 +4394,31 @@ A payload that would push the line past what a pty carries is sent as
 (defun sql-datum--admin-tick (buf)
   "Timer callback: refresh admin buffer BUF if it still exists.
 Skip refresh while the minibuffer is active (e.g. company-mode,
-completing-read) to avoid cursor position disruption."
+completing-read) to avoid cursor position disruption.
+
+A panel whose connection has been closed stops polling.  Sending its
+refresh anyway falls back to whichever connection is still open, so a
+panel of prod's jobs would go on asking dev for its jobs every few
+seconds."
   (if (buffer-live-p buf)
-      (unless (active-minibuffer-window)
-        (with-current-buffer buf
-          (sql-datum--admin-send-refresh)))
+      (with-current-buffer buf
+        (if (not (buffer-live-p sql-datum--admin-sqli-buf))
+            (progn
+              (sql-datum--admin-stop-timer buf)
+              ;; Say so where the timer was described, rather than
+              ;; leaving a panel that claims to be refreshing.
+              (sql-datum--admin-redraw-header))
+          (unless (active-minibuffer-window)
+            (sql-datum--admin-send-refresh))))
     ;; Buffer killed — stop timer
     (when (timerp sql-datum--admin-timer)
       (cancel-timer sql-datum--admin-timer))))
+
+(defun sql-datum--admin-redraw-header ()
+  "Redraw the current panel from the data it already holds."
+  (when sql-datum--admin-panel-data
+    (sql-datum--admin-show-panel sql-datum--admin-panel-data
+                                 sql-datum--admin-sqli-buf)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Identifier quoting helpers

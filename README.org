@@ -790,6 +790,27 @@ pressed in what looked like the first would act on the second.  The
 server comes from what the connection already reported, so naming it
 costs no query.
 
+Only the panel's *own* connection is asked for that name.  Sending a
+command may fall back to whichever connection is current, because a
+command sent to the wrong server fails loudly; a label that falls back
+is worse than no label, since it quietly puts another machine's name
+over this machine's rows.  Closing prod's connection used to leave its
+still-open panel reading =on dev-sql-09=.
+
+A panel outliving its connection keeps the server it was showing and
+says the rest plainly:
+
+: datum admin: jobs
+: on prod-sql-01 (disconnected)  ·  Last refresh: 09:14:02  [auto-refresh off]
+
+It stops polling at the same moment, for the same reason: a refresh sent
+on a closed connection falls back too, so a panel of prod's jobs would
+go on asking dev for its jobs every few seconds.  And it redraws in
+place — the connection is part of the buffer name, so once that
+connection is gone the name no longer matches, and sorting such a panel
+used to open a second, untagged one while the panel on screen stayed as
+it was.
+
 The keys available in a panel are shown in its *header line*, which stays
 visible however far the contents scroll.  Panel-specific actions come
 first, followed by the common keys below.  Top-level panels auto-refresh

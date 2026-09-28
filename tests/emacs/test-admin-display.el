@@ -151,6 +151,104 @@
                                         'sql-datum--admin-display-request
                                         prod))))))
 
+(message "\n=== a panel names its own connection ===")
+
+;; A panel that can drop a database must not put another machine's name
+;; over its rows.  Once prod's connection was closed, its still-open
+;; panel read "on dev-sql-09" -- the other connection, found by the same
+;; fallback that sending a command uses.
+
+(defun test-admin-display--connect (name server)
+  "Return a stand-in SQLi buffer called NAME, connected to SERVER."
+  (let ((buf (get-buffer-create (format "*SQL: %s*" name))))
+    (with-current-buffer buf
+      (setq-local sql-datum--meta (make-hash-table :test #'equal))
+      (puthash "server" server sql-datum--meta))
+    buf))
+
+(defun test-admin-display--jobs-on (conn)
+  "Render the jobs panel as CONN would answer it, and return its buffer."
+  (with-current-buffer conn
+    (sql-datum--handle-admin-panel
+     (concat "{\"panel\":\"jobs\",\"headers\":[\"Job Name\"],"
+             "\"rows\":[[\"nightly load\"]],\"row_id\":0,"
+             "\"actions\":[],\"info\":null}")))
+  (sit-for 0.1)
+  (get-buffer (sql-datum--admin-buffer-name "jobs" nil conn)))
+
+(defun test-admin-display--header (buf)
+  "Return the line under the title of panel BUF."
+  (with-current-buffer buf
+    (save-excursion
+      (goto-char (point-min))
+      (forward-line 1)
+      (buffer-substring-no-properties (point) (line-end-position)))))
+
+(let* ((prod (test-admin-display--connect "prod" "prod-sql-01"))
+       (dev  (test-admin-display--connect "dev" "dev-sql-09"))
+       (prod-panel (test-admin-display--jobs-on prod))
+       (dev-panel  (test-admin-display--jobs-on dev)))
+  ;; What a live Emacs answers when asked for "a datum connection": one
+  ;; of them, not necessarily the one meant.
+  (cl-letf (((symbol-function 'sql-find-sqli-buffer) (lambda (&rest _) dev)))
+    (test-admin-display-assert
+     "each panel names the connection it came from"
+     (and (string-match-p "on prod-sql-01"
+                          (test-admin-display--header prod-panel))
+          (string-match-p "on dev-sql-09"
+                          (test-admin-display--header dev-panel))))
+
+    (kill-buffer prod)
+    (with-current-buffer prod-panel (sql-datum-admin-sort-by-column 0))
+
+    (test-admin-display-assert
+     "a panel whose connection closed keeps naming its own server"
+     (string-match-p "on prod-sql-01"
+                     (test-admin-display--header prod-panel)))
+    (test-admin-display-assert
+     "and never borrows the name of one that is still open"
+     (not (string-match-p "dev-sql-09"
+                          (test-admin-display--header prod-panel))))
+    (test-admin-display-assert
+     "saying plainly that it is no longer connected"
+     (string-match-p "disconnected" (test-admin-display--header prod-panel)))
+
+    ;; The tag went with the connection too, so the re-render landed in a
+    ;; second, untagged panel while the one on screen stayed as it was.
+    (test-admin-display-assert
+     "re-rendering stays in the panel it is already in"
+     (null (get-buffer "*datum-admin:jobs*")))
+    (test-admin-display-assert
+     "and leaves the other connection's panel alone"
+     (string-match-p "on dev-sql-09"
+                     (test-admin-display--header dev-panel)))
+
+    ;; Polling on a closed connection falls back the same way, so a panel
+    ;; of prod's jobs would go on asking dev for its jobs every few
+    ;; seconds.
+    (let (sent)
+      (cl-letf (((symbol-function 'sql-datum--enqueue-one)
+                 (lambda (cmd &rest _) (push cmd sent)))
+                ((symbol-function 'get-buffer-process) (lambda (b) (and b t))))
+        (sql-datum--admin-tick prod-panel)
+        (test-admin-display-assert
+         "a disconnected panel asks nobody for a refresh"
+         (null sent))
+        (test-admin-display-assert
+         "and stops its timer"
+         (null (buffer-local-value 'sql-datum--admin-timer prod-panel)))
+        (test-admin-display-assert
+         "saying so where it claimed to be refreshing"
+         (string-match-p "auto-refresh off"
+                         (test-admin-display--header prod-panel)))
+        (setq sent nil)
+        (sql-datum--admin-tick dev-panel)
+        (test-admin-display-assert
+         "while a live panel goes on refreshing"
+         (equal sent '(":admin jobs"))))))
+  (dolist (b (list dev prod-panel dev-panel))
+    (when (buffer-live-p b) (kill-buffer b))))
+
 (message "\n%d passed, %d failed"
          test-admin-display--pass test-admin-display--fail)
 (when (> test-admin-display--fail 0)
