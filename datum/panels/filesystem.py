@@ -63,6 +63,31 @@ def _start_path(cursor, driver):
     return "/"
 
 
+def _human_bytes(value):
+    """Return VALUE as a short binary size, or "" if it is not known.
+
+    A disk is the one place raw bytes stop being readable: a drive's
+    free space runs to twelve digits, and nobody reads that as a size.
+    Directory listings keep their byte counts, where the numbers are
+    small enough to mean something and sorting wants them bare.
+    """
+    if value is None or value == "":
+        return ""
+    try:
+        size = float(value)
+    except (TypeError, ValueError):
+        return ""
+    if size < 1024:
+        return f"{int(size)} B"
+    for unit in ("KiB", "MiB", "GiB", "TiB", "PiB"):
+        size /= 1024.0
+        if size < 1024 or unit == "PiB":
+            # One decimal reads as a size; three read as a measurement
+            # the server is not actually making.
+            return f"{size:.1f} {unit}"
+    return ""
+
+
 def _drives_panel(cursor, driver):
     """Return the list of the server's drives.
 
@@ -82,26 +107,32 @@ def _drives_panel(cursor, driver):
             "context": {"path": driver.DRIVES_PATH},
         }
     rows = [["dir", d.get("name") or d.get("path") or "",
-             "" if d.get("free") is None else str(d["free"]),
+             _human_bytes(d.get("free")),
+             # Blank rather than a guess: capacity is known only for the
+             # volumes the server keeps database files on.
+             _human_bytes(d.get("total")),
              d.get("kind") or "",
              d.get("path") or ""]
             for d in drives]
+    sized = sum(1 for r in rows if r[3])
     return {
         "panel": "filesystem",
         "title": "Server drives",
         # Same shape as a directory listing — type first, path last — so
         # the same keys work here without knowing which view they are in.
-        "headers": ["Type", "Name", "Free", "Kind", "Path"],
+        "headers": ["Type", "Name", "Free", "Total", "Kind", "Path"],
         "rows": rows,
-        "row_id": 4,
-        "display_columns": 4,
+        "row_id": 5,
+        "display_columns": 5,
         "auto_refresh": False,
         "actions": [
             {"key": "RET", "label": "Open drive", "command": "open"},
             {"key": "w", "label": "Copy path", "command": None},
         ],
-        "info": f"{len(rows)} drive{'' if len(rows) == 1 else 's'} "
-                f"— Free is in bytes",
+        "info": (f"{len(rows)} drive{'' if len(rows) == 1 else 's'}"
+                 + ("" if sized == len(rows) else
+                    f" — Total is blank on {len(rows) - sized} of them, "
+                    f"which hold none of the server's database files")),
         "context": {"path": driver.DRIVES_PATH},
     }
 

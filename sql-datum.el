@@ -1478,18 +1478,44 @@ the navigation detail worth reading once."
   (and (not (string-empty-p s))
        (string-match-p "\\`-?[0-9]+\\(?:\\.[0-9]*\\)?\\'" s)))
 
+(defconst sql-datum--admin-size-units
+  '(("B" . 1) ("KiB" . 1024) ("MiB" . 1048576) ("GiB" . 1073741824)
+    ("TiB" . 1099511627776) ("PiB" . 1125899906842624))
+  "Multipliers for the sizes a panel may show in place of bytes.")
+
+(defun sql-datum--admin-size-string-p (s)
+  "Return non-nil if S is a size like \"36.5 GiB\"."
+  (and (string-match "\\`\\([0-9]+\\(?:\\.[0-9]*\\)?\\) \\([KMGTP]iB\\|B\\)\\'" s)
+       (assoc (match-string 2 s) sql-datum--admin-size-units)))
+
+(defun sql-datum--admin-size-value (s)
+  "Return the number of bytes S names, or 0."
+  (if (sql-datum--admin-size-string-p s)
+      (* (string-to-number (match-string 1 s))
+         (float (cdr (assoc (match-string 2 s)
+                            sql-datum--admin-size-units))))
+    0))
+
 (defun sql-datum--admin-sort-rows (rows col-index ascending)
   "Sort ROWS by COL-INDEX.  ASCENDING controls direction.
 Uses numeric comparison when all non-empty values in the column are
-numbers, otherwise string comparison."
+numbers, size comparison when they are all sizes such as \"36.5 GiB\",
+otherwise string comparison."
   (let* ((sorted (copy-sequence rows))
          ;; Probe the column to decide comparison mode
-         (all-numeric t))
+         (all-numeric t)
+         ;; A drive's free space is shown as a size, because twelve
+         ;; digits of bytes is not a thing anyone reads.  Sorting it as
+         ;; text would put 9 GiB above 40 GiB, so the unit is read.
+         (all-sizes t))
     (dolist (row sorted)
       (let ((v (or (nth col-index row) "")))
-        (when (and (not (string-empty-p v))
-                   (not (sql-datum--admin-numeric-string-p v)))
-          (setq all-numeric nil))))
+        (unless (string-empty-p v)
+          (unless (sql-datum--admin-numeric-string-p v)
+            (setq all-numeric nil))
+          (unless (sql-datum--admin-size-string-p v)
+            (setq all-sizes nil)))))
+    (when all-numeric (setq all-sizes nil))
     (sort sorted
           (lambda (a b)
             (let ((va (or (nth col-index a) ""))
@@ -1502,6 +1528,10 @@ numbers, otherwise string comparison."
                (all-numeric
                 (let ((na (string-to-number va))
                       (nb (string-to-number vb)))
+                  (if ascending (< na nb) (> na nb))))
+               (all-sizes
+                (let ((na (sql-datum--admin-size-value va))
+                      (nb (sql-datum--admin-size-value vb)))
                   (if ascending (< na nb) (> na nb))))
                (t
                 (if ascending

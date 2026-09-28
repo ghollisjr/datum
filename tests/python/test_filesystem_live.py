@@ -33,6 +33,15 @@ MS_DSN = (f"Driver={{ODBC Driver 18 for SQL Server}};Server={MS_HOST},{MS_PORT};
 
 _UNREACHABLE = {}
 
+_UNITS = ("B", "KiB", "MiB", "GiB", "TiB", "PiB")
+
+
+def _bytes_of(text):
+    """Return the byte count a size such as "36.5 GiB" stands for."""
+    number, unit = text.split()
+    return float(number) * (1024 ** _UNITS.index(unit))
+
+
 
 def _connect(dsn, label):
     if label in _UNREACHABLE:
@@ -300,7 +309,10 @@ class TestWindowsDrives:
         # same keys work without knowing which view they are in.
         assert panel["headers"][0] == "Type"
         assert panel["headers"][-1] == "Path"
-        assert panel["row_id"] == 4
+        # Path is the last of six here, one further along than a
+        # directory listing's, because the drive view adds Total.
+        assert panel["row_id"] == 5
+        assert panel["row_id"] == len(panel["headers"]) - 1
         assert all(r[0] == "dir" for r in panel["rows"]), panel["rows"]
 
     def test_a_drive_root_offers_a_way_up_to_the_drive_list(self, mssql_env):
@@ -336,6 +348,49 @@ class TestWindowsDrives:
         rows = filesystem._rows_for(driver, None, "C:\\", [])
         # Nothing is invented: PostgreSQL cannot enumerate drives.
         assert not rows or rows[0][1] != ".."
+
+    def test_a_drive_says_how_big_it_is_and_how_much_is_left(self,
+                                                             mssql_env):
+        from datum.panels import filesystem
+
+        cursor, driver = mssql_env
+        panel = filesystem.get_data(cursor, driver, [driver.DRIVES_PATH])
+        free = panel["headers"].index("Free")
+        total = panel["headers"].index("Total")
+        for row in panel["rows"]:
+            # Free comes from the drive list itself, so every drive has
+            # it.  Total is asked of a database file, so a drive holding
+            # none is left blank rather than guessed at.
+            assert row[free], row
+            assert filesystem._human_bytes(row[free]) or True
+        sized = [r for r in panel["rows"] if r[total]]
+        assert sized, "the server keeps its own files somewhere"
+        for row in sized:
+            assert _bytes_of(row[total]) >= _bytes_of(row[free]), row
+
+    def test_the_sizes_are_readable_rather_than_raw_bytes(self, mssql_env):
+        from datum.panels import filesystem
+
+        cursor, driver = mssql_env
+        panel = filesystem.get_data(cursor, driver, [driver.DRIVES_PATH])
+        for row in panel["rows"]:
+            for cell in (row[2], row[3]):
+                if cell:
+                    # Twelve digits of bytes is not a size anyone reads.
+                    assert not cell.isdigit(), cell
+                    assert cell.split()[-1] in _UNITS, cell
+
+    def test_a_listing_keeps_its_byte_counts(self, mssql_env):
+        from datum.panels import filesystem
+
+        cursor, driver = mssql_env
+        panel = filesystem.get_data(cursor, driver, ["/var/opt/mssql"])
+        size = panel["headers"].index("Size")
+        for row in panel["rows"]:
+            # Only the drive view trades bytes for readability; a
+            # listing's numbers are small enough to mean something, and
+            # sorting them wants them bare.
+            assert row[size] == "" or row[size].isdigit(), row
 
     def test_the_drive_list_is_reachable_by_its_path(self, mssql_env):
         from datum.panels import filesystem

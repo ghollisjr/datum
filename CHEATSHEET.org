@@ -376,7 +376,10 @@ writes to the server.
 
 On Windows there is no single root, so going up from =C:\= (or a UNC
 share) lands on a list of the server's drives; =RET= descends into one.
-MSSQL only — PostgreSQL cannot enumerate drives.
+That list shows each drive's free space and size, written as sizes
+rather than bytes.  =Total= is blank for a drive holding none of the
+server's database files, which is the only thing SQL Server can be asked
+about capacity.  MSSQL only — PostgreSQL cannot enumerate drives.
 
 ** SSIS panel (MSSQL)
 

@@ -409,12 +409,18 @@ look one up by an exact string."
 (defconst test-fs--drives
   (concat
    "{\"panel\":\"filesystem\",\"title\":\"Server drives\","
-   "\"headers\":[\"Type\",\"Name\",\"Free\",\"Kind\",\"Path\"],"
-   "\"rows\":[[\"dir\",\"C:\",\"115730000000\",\"DRIVE_FIXED\","
-   "\"C:\\\\\"],"
-   "[\"dir\",\"D:\",\"900000000\",\"DRIVE_FIXED\",\"D:\\\\\"]],"
-   "\"row_id\":4,\"display_columns\":4,\"auto_refresh\":false,\"actions\":[],"
-   "\"info\":\"2 drives — Free is in bytes\","
+   "\"headers\":[\"Type\",\"Name\",\"Free\",\"Total\",\"Kind\","
+   "\"Path\"],"
+   ;; D: holds none of the server's database files, so its size is not
+   ;; something the server can be asked.
+   "\"rows\":[[\"dir\",\"C:\",\"107.8 GiB\",\"465.7 GiB\","
+   "\"DRIVE_FIXED\",\"C:\\\\\"],"
+   "[\"dir\",\"D:\",\"858.3 MiB\",\"\",\"DRIVE_FIXED\","
+   "\"D:\\\\\"]],"
+   "\"row_id\":5,\"display_columns\":5,\"auto_refresh\":false,"
+   "\"actions\":[],"
+   "\"info\":\"2 drives — Total is blank on 1 of them, which hold none "
+   "of the server's database files\","
    "\"context\":{\"path\":\":drives\"}}"))
 
 (defun test-fs--render (json)
@@ -848,5 +854,47 @@ look one up by an exact string."
                 (string-prefix-p "*datum-admin:security:permissions"
                                  (sql-datum--admin-buffer-name
                                   "security" "permissions" nil)))
+
+(message "\n=== sorting a column of sizes ===")
+
+;; A drive's free space is shown as a size, not as twelve digits of
+;; bytes.  Sorted as text, 9 GiB would come out above 40 GiB.
+(defvar test-fs--drive-rows
+  '(("dir" "C:" "9.0 GiB"   "500.0 GiB" "DRIVE_FIXED" "C:\\")
+    ("dir" "D:" "40.5 GiB"  "2.0 TiB"   "DRIVE_FIXED" "D:\\")
+    ("dir" "E:" "512 B"     ""          "DRIVE_FIXED" "E:\\")
+    ("dir" "F:" ""          ""          "DRIVE_FIXED" "F:\\")))
+
+(defun test-fs--column (col ascending)
+  (mapcar (lambda (r) (nth col r))
+          (sql-datum--admin-sort-rows test-fs--drive-rows col ascending)))
+
+(test-fs-assert "the unit is read, not just the number"
+                (equal (test-fs--column 2 t)
+                       '("512 B" "9.0 GiB" "40.5 GiB" "")))
+(test-fs-assert "and reversing turns it around"
+                (equal (test-fs--column 2 nil)
+                       '("40.5 GiB" "9.0 GiB" "512 B" "")))
+(test-fs-assert "a drive with no reading still sorts last"
+                (equal (car (last (test-fs--column 2 nil))) ""))
+(test-fs-assert "terabytes outrank gigabytes"
+                (equal (test-fs--column 3 t) '("500.0 GiB" "2.0 TiB" "" "")))
+
+;; The two modes must not be confused for one another.
+(test-fs-assert "a column of bare numbers still sorts numerically"
+                (equal (mapcar (lambda (r) (nth 0 r))
+                               (sql-datum--admin-sort-rows
+                                '(("10") ("9") ("100")) 0 t))
+                       '("9" "10" "100")))
+(test-fs-assert "and a column of words still sorts as words"
+                (equal (mapcar (lambda (r) (nth 0 r))
+                               (sql-datum--admin-sort-rows
+                                '(("pear") ("apple")) 0 t))
+                       '("apple" "pear")))
+(test-fs-assert "a size is recognised, a bare number is not"
+                (and (sql-datum--admin-size-string-p "36.5 GiB")
+                     (not (sql-datum--admin-size-string-p "36.5"))
+                     (not (sql-datum--admin-size-string-p "36.5 parsecs"))
+                     (not (sql-datum--admin-size-string-p "GiB"))))
 
 (message "\n%d passed, %d failed" test-fs--pass test-fs--fail)

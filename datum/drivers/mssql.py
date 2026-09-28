@@ -491,6 +491,72 @@ class MSSQLDriver(BaseDriver):
 
     supports_drive_list = True
 
+    @staticmethod
+    def _volume_capacity(cursor):
+        """Return capacity per volume, as {mount point: (total, free)}.
+
+        Neither drive-listing source reports how big a drive is — both
+        give only free space — so capacity comes from
+        `sys.dm_os_volume_stats', which is asked about a database file
+        rather than a drive.  That bounds what it can answer: a volume
+        holding none of the server's files is not in the answer at all.
+
+        The key is the mount point, which is what the drive list calls a
+        path on Windows.  On Linux it comes back NULL for every file, so
+        a server with one volume and one drive is paired by position
+        instead — under the sentinel below, which no real path collides
+        with.
+        """
+        try:
+            cursor.execute("""
+                SELECT vs.volume_mount_point,
+                       MAX(vs.total_bytes), MAX(vs.available_bytes)
+                FROM sys.master_files f
+                CROSS APPLY sys.dm_os_volume_stats(f.database_id,
+                                                   f.file_id) vs
+                GROUP BY vs.volume_mount_point
+            """)
+            rows = cursor.fetchall()
+        except Exception:
+            # Wants VIEW SERVER STATE, like the drive list itself.  A
+            # drive with no capacity beside it still lists.
+            return {}
+        capacity = {}
+        for mount, total, free in rows:
+            key = (str(mount).rstrip("/\\").lower()
+                   if mount is not None else None)
+            if key is None:
+                key = MSSQLDriver._ONE_VOLUME
+            capacity[key] = (None if total is None else int(total),
+                             None if free is None else int(free))
+        return capacity
+
+    # Stands for "the only volume there is", which is all Linux says.
+    _ONE_VOLUME = "\0one"
+
+    @staticmethod
+    def _with_capacity(drives, capacity):
+        """Fill in each drive's `total`, and its `free` where better.
+
+        `dm_os_volume_stats' knows the size; where it also knows the
+        free space it is the same reading from the same call, so it is
+        preferred over the drive list's, which was taken separately.
+        """
+        unnamed = capacity.get(MSSQLDriver._ONE_VOLUME)
+        for drive in drives:
+            key = (drive.get("path") or "").rstrip("/\\").lower()
+            found = capacity.get(key)
+            if found is None and unnamed is not None and len(drives) == 1:
+                # One drive, one volume, no name to match on.
+                found = unnamed
+            if found is None:
+                continue
+            total, free = found
+            drive["total"] = total
+            if free is not None:
+                drive["free"] = free
+        return drives
+
     def list_drives(self, cursor):
         """Return the server's drives, newest strategy first.
 
@@ -507,12 +573,14 @@ class MSSQLDriver(BaseDriver):
                 "ORDER BY fixed_drive_path")
             rows = cursor.fetchall()
             if rows:
-                return [{"name": (path or "").rstrip("/\\") or (path or ""),
-                         "path": path,
-                         "is_dir": True,
-                         "kind": kind or "",
-                         "free": None if free is None else int(free)}
-                        for path, kind, free in rows if path]
+                return self._with_capacity(
+                    [{"name": (path or "").rstrip("/\\") or (path or ""),
+                      "path": path,
+                      "is_dir": True,
+                      "kind": kind or "",
+                      "free": None if free is None else int(free)}
+                     for path, kind, free in rows if path],
+                    self._volume_capacity(cursor))
         except Exception:
             pass
         # Older servers: a bare drive letter and the megabytes free.
@@ -531,7 +599,7 @@ class MSSQLDriver(BaseDriver):
                 "kind": "",
                 "free": None if free_mb is None else int(free_mb) * 1024 * 1024,
             })
-        return drives
+        return self._with_capacity(drives, self._volume_capacity(cursor))
 
     supports_file_read = True
 

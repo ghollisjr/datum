@@ -1264,9 +1264,37 @@ So the panel supplies the missing top.  Going up from =C:\= — or from a
 UNC share such as =\\fileserver\backups= — lands on a list of the
 server's drives, which the =..= row labels as such rather than showing a
 bare marker.  Each drive is a directory row, so =RET= descends into it
-the same as any other.  The list shows the free space in bytes and the
-kind of drive (=DRIVE_FIXED=, =DRIVE_REMOTE=), and sorts with =o= like
-any other panel.
+the same as any other.  The list shows how much of each drive is free
+and how big it is, and the kind of drive (=DRIVE_FIXED=,
+=DRIVE_REMOTE=), and sorts with =o= like any other panel.
+
+: Type  Name  Free       Total      Kind
+: dir   C:    107.8 GiB  465.7 GiB  DRIVE_FIXED
+: dir   D:    858.3 MiB             DRIVE_FIXED
+
+Sizes are written as sizes rather than as bytes: this is the one view
+where the numbers run to twelve digits, which nobody reads as a size.  A
+directory listing keeps its byte counts, where they are small enough to
+mean something.  Sorting reads the unit, so =40.5 GiB= comes above =9.0
+GiB= rather than below it as text would have it.
+
+*Total* can be blank, as =D:= is above.  Neither source of the drive
+list reports capacity — =sys.dm_os_enumerate_fixed_drives= gives free
+space alone, and =xp_fixeddrives= gives free megabytes alone.  Capacity
+comes from =sys.dm_os_volume_stats=, which is asked about a *database
+file* rather than about a drive, so it can only answer for the volumes
+the server keeps files on.  A drive holding none of them is left blank
+rather than given a number that would look authoritative and be a
+guess; the panel's info line says how many are in that position.  Where
+that DMV does answer, its free-space reading is used in preference to
+the drive list's, being the same reading taken in the same call as the
+size beside it.
+
+The two are matched by mount point, which is what the drive list calls a
+path.  On Linux the mount point comes back NULL for every file, so a
+server with one drive and one volume is paired by position instead —
+which is unambiguous only because there is one of each, so two or more
+unnamed volumes are left unmatched rather than spread across the drives.
 
 On a server whose filesystem does have a single root, =/= is simply the
 top and no drive list is offered.

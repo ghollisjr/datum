@@ -2048,3 +2048,137 @@ class TestServerFilesystem:
         assert _clean_timestamp("1601-01-01 00:00:00") == ""
         assert _clean_timestamp(None) == ""
         assert _clean_timestamp("2026-09-25 12:39:48") == "2026-09-25 12:39:48"
+
+
+class _Volumes:
+    """A cursor that answers the volume-stats query and nothing else."""
+
+    def __init__(self, rows):
+        self._rows = rows
+
+    def execute(self, *_args, **_kwargs):
+        return self
+
+    def fetchall(self):
+        return list(self._rows)
+
+
+class TestDriveCapacity:
+    """How big a drive is, which neither drive-listing source reports.
+
+    `sys.dm_os_volume_stats' is asked about a database file rather than
+    a drive, so what it can answer is bounded by where the server keeps
+    its files -- and on Linux it does not even name the volume.
+    """
+
+    def test_a_windows_volume_is_matched_by_its_mount_point(self, mssql):
+        capacity = {"c:": (500, 100), "d:": (2000, 900)}
+        drives = mssql._with_capacity(
+            [{"path": "C:\\", "free": 99}, {"path": "D:\\", "free": 899}],
+            capacity)
+        assert [d["total"] for d in drives] == [500, 2000]
+
+    def test_the_match_ignores_case_and_the_trailing_separator(self, mssql):
+        # Both sides through their real normalisation: the DMV spells a
+        # mount point "C:\\", and the drive list need not agree.
+        capacity = mssql._volume_capacity(_Volumes([("C:\\", 500, 100)]))
+        drives = mssql._with_capacity([{"path": "c:/", "free": 1}], capacity)
+        assert drives[0]["total"] == 500
+
+    def test_the_dmv_answer_is_keyed_by_mount_point(self, mssql):
+        capacity = mssql._volume_capacity(
+            _Volumes([("C:\\", 500, 100), ("D:\\", 2000, 900)]))
+        assert capacity == {"c:": (500, 100), "d:": (2000, 900)}
+
+    def test_a_nameless_volume_lands_under_the_sentinel(self, mssql):
+        capacity = mssql._volume_capacity(_Volumes([(None, 500, 100)]))
+        assert capacity == {mssql._ONE_VOLUME: (500, 100)}
+
+    def test_a_drive_holding_no_database_files_has_no_total(self, mssql):
+        drives = mssql._with_capacity(
+            [{"path": "C:\\", "free": 99}, {"path": "E:\\", "free": 5}],
+            {"c:": (500, 100)})
+        assert drives[0]["total"] == 500
+        # Left out rather than guessed: the DMV never saw this volume.
+        assert "total" not in drives[1]
+        assert drives[1]["free"] == 5
+
+    def test_the_volume_free_space_wins_over_the_drive_list(self, mssql):
+        # Both readings are free space, but the volume's was taken in
+        # the same call as the size beside it.
+        drives = mssql._with_capacity([{"path": "C:\\", "free": 99}],
+                                      {"c:": (500, 100)})
+        assert drives[0]["free"] == 100
+
+    def test_a_volume_that_knows_no_free_space_leaves_the_old_one(self,
+                                                                  mssql):
+        drives = mssql._with_capacity([{"path": "C:\\", "free": 99}],
+                                      {"c:": (500, None)})
+        assert drives[0]["total"] == 500
+        assert drives[0]["free"] == 99
+
+    def test_one_unnamed_volume_pairs_with_one_drive(self, mssql):
+        # Linux reports no mount point at all, so position is all there
+        # is -- and with one of each, position is unambiguous.
+        drives = mssql._with_capacity(
+            [{"path": "/", "free": 99}],
+            {mssql._ONE_VOLUME: (500, 100)})
+        assert drives[0]["total"] == 500
+
+    def test_an_unnamed_volume_is_not_spread_over_several_drives(self,
+                                                                 mssql):
+        drives = mssql._with_capacity(
+            [{"path": "C:\\", "free": 1}, {"path": "D:\\", "free": 2}],
+            {mssql._ONE_VOLUME: (500, 100)})
+        assert all("total" not in d for d in drives)
+
+    def test_a_refused_dmv_costs_the_size_and_nothing_else(self, mssql):
+        class Refuses:
+            def execute(self, *_a, **_k):
+                raise RuntimeError("VIEW SERVER STATE denied")
+
+        assert mssql._volume_capacity(Refuses()) == {}
+        drives = mssql._with_capacity([{"path": "C:\\", "free": 99}], {})
+        assert drives[0]["free"] == 99 and "total" not in drives[0]
+
+    def test_the_sentinel_cannot_be_a_real_mount_point(self, mssql):
+        assert "\0" in mssql._ONE_VOLUME
+
+
+class TestReadableSizes:
+    """A drive's free space, written so it can be read."""
+
+    def test_small_numbers_stay_in_bytes(self):
+        from datum.panels import filesystem
+
+        assert filesystem._human_bytes(0) == "0 B"
+        assert filesystem._human_bytes(512) == "512 B"
+        assert filesystem._human_bytes(1023) == "1023 B"
+
+    def test_each_unit_takes_over_at_its_own_scale(self):
+        from datum.panels import filesystem
+
+        assert filesystem._human_bytes(1024) == "1.0 KiB"
+        assert filesystem._human_bytes(1024 ** 2) == "1.0 MiB"
+        assert filesystem._human_bytes(1024 ** 3) == "1.0 GiB"
+        assert filesystem._human_bytes(1024 ** 4) == "1.0 TiB"
+        assert filesystem._human_bytes(1024 ** 5) == "1.0 PiB"
+
+    def test_it_does_not_run_out_of_units(self):
+        from datum.panels import filesystem
+
+        # Bigger than any disk, but it must still read as a size.
+        assert filesystem._human_bytes(1024 ** 6).endswith("PiB")
+
+    def test_nothing_known_shows_as_nothing(self):
+        from datum.panels import filesystem
+
+        assert filesystem._human_bytes(None) == ""
+        assert filesystem._human_bytes("") == ""
+        assert filesystem._human_bytes("not a number") == ""
+
+    def test_a_string_of_digits_is_still_a_size(self):
+        from datum.panels import filesystem
+
+        # ODBC hands back numbers as strings often enough.
+        assert filesystem._human_bytes("1073741824") == "1.0 GiB"
