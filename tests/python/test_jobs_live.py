@@ -1528,3 +1528,109 @@ class TestALargeScriptSurvives:
         script = "    SET NOCOUNT ON;\n\nSELECT 1;\n\n"
         self._job_with_script(cursor, driver, script)
         assert steps.get_step(cursor, JOB, "1")["command"] == script
+
+
+class TestAFormOpensOnWhatIsStored:
+    """Every choice a form opens on must be one its menu can match.
+
+    msdb hands these back as numbers while the choices are named by
+    string, and the client matches them as written -- so a mismatch here
+    is a menu the user cannot read their own setting from.
+    """
+
+    BASE = {"subsystem": "TSQL", "database_name": "master",
+            "command": "SELECT 1", "retry_attempts": "0",
+            "retry_interval": "0", "on_success_action": "1",
+            "on_success_step_id": "0", "on_fail_action": "2",
+            "on_fail_step_id": "0"}
+
+    def _job(self, cursor, driver):
+        from datum.panels import jobs
+        jobs.run_action(cursor, driver, "create-job", [_payload(
+            {"name": JOB, "enabled": True, "description": "",
+             "owner": "sa", "category": "[Uncategorized (Local)]",
+             "notify_eventlog": "0", "notify_email": "0",
+             "delete_level": "0"})])
+        jobs.run_action(cursor, driver, "create-step", [_payload(
+            dict(self.BASE, job_name=JOB, step_name="one"))])
+
+    def _form(self, captured):
+        panels = [a[0] for k, a in captured if k == "admin_panel"]
+        forms = [p for p in panels if p.get("sub_panel") == "form"]
+        assert forms, captured
+        return forms[-1]["form"]
+
+    def _unmatchable(self, form):
+        """Return the choice fields whose opening value names no choice."""
+        bad = []
+        for field in form["fields"]:
+            if field.get("type") != "choice":
+                continue
+            value = form["values"].get(field["key"], field.get("default"))
+            if value is None:
+                continue
+            choices = [c[0] for c in (field.get("choices") or [])]
+            if choices and str(value) not in [str(c) for c in choices]:
+                bad.append((field["key"], value))
+        return bad
+
+    def test_the_step_editor_opens_on_matchable_choices(self, agent,
+                                                        captured):
+        from datum.panels import jobs
+
+        cursor, driver = agent
+        self._job(cursor, driver)
+        captured.clear()
+        jobs.run_action(cursor, driver, "edit-step", ["1", JOB])
+        form = self._form(captured)
+        assert self._unmatchable(form) == []
+
+    def test_the_schedule_editor_does_too(self, agent, captured):
+        from datum.panels import jobs, schedules
+
+        cursor, driver = agent
+        self._job(cursor, driver)
+        schedules.create_schedule(cursor, JOB, {
+            "name": "nightly", "enabled": "1", "freq_type": "4",
+            "freq_interval": "1", "freq_subday_type": "1",
+            "freq_subday_interval": "0", "active_start_time": "020000"})
+        captured.clear()
+        jobs.run_action(cursor, driver, "edit-schedule", ["nightly", JOB])
+        form = self._form(captured)
+        assert self._unmatchable(form) == []
+
+    def test_the_job_editor_does_too(self, agent, captured):
+        from datum.panels import jobs
+
+        cursor, driver = agent
+        self._job(cursor, driver)
+        captured.clear()
+        jobs.run_action(cursor, driver, "edit-job", [JOB])
+        form = self._form(captured)
+        assert self._unmatchable(form) == []
+
+    def test_saving_a_step_as_opened_changes_nothing(self, agent, captured):
+        from datum.panels import jobs, steps
+
+        cursor, driver = agent
+        self._job(cursor, driver)
+        # Something other than the defaults, so a reset would show.
+        opts = dict(steps.get_step(cursor, JOB, "1"))
+        opts["on_success_action"] = 2
+        opts["on_fail_action"] = 1
+        steps.update_step(cursor, JOB, opts)
+        before = steps.get_step(cursor, JOB, "1")
+
+        captured.clear()
+        jobs.run_action(cursor, driver, "edit-step", ["1", JOB])
+        form = self._form(captured)
+        # The menu holds every choice as text, which is what comes back.
+        sent = dict(form["values"])
+        for field in form["fields"]:
+            if field.get("type") == "choice":
+                sent[field["key"]] = str(
+                    sent.get(field["key"], field.get("default")))
+        captured.clear()
+        jobs.run_action(cursor, driver, "update-step", [_payload(sent)])
+        assert not [k for k, _ in captured if k == "error"], captured
+        assert steps.get_step(cursor, JOB, "1") == before

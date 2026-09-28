@@ -1416,6 +1416,14 @@ agree up to that newline; any other difference is a real edit, and then
 the widget is what the user is looking at.
 
 Choice fields render as =Value Menu=, the same control Customize uses.
+Both sides of a menu are compared as text.  A form opened on an existing
+row carries that row as the server holds it — a step's *On Success* is
+the number =1= in msdb — while the choices are named by string, and
+=menu-choice= matches with =equal=, so the menu read =invalid (1)= and
+the step's own setting could not be read without opening the menu.  The
+step and schedule editors both had it; a value that genuinely names no
+choice is still reported as invalid, which is the case the wording is
+for.
 Long lookups — MSSQL has over five thousand collations — are completing
 fields driven by =TAB= instead.  A password field is masked, and is
 never sent back out once set.  Labels and help text are read-only, so

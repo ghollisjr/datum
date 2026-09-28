@@ -3489,14 +3489,22 @@ a form rebuilt after browsing for a path comes back as the user left it."
       ;; Rendered the way Customize renders a `(choice ...)' type: the
       ;; "Value Menu" button makes it visible that this is a menu, rather
       ;; than a bare value that looks like static text.
+      ;;
+      ;; Both sides are compared as text.  A form opened on an existing
+      ;; row carries that row as the server holds it -- a step's On
+      ;; Success is the number 1 in msdb -- while the choices are named
+      ;; by string.  `menu-choice' matches with `equal', so 1 matched no
+      ;; item and the menu read "invalid (1)": the step's setting was
+      ;; unreadable until the menu was opened.
       (apply #'widget-create 'menu-choice
              :format "%[Value Menu%]: %v"
-             :value (or default "")
+             :value (format "%s" (or default ""))
              ;; `item' defaults to "%t\n", which leaves a blank line after
              ;; the chosen value.
              (or (mapcar (lambda (c)
                            (list 'item :format "%t"
-                                 :tag (nth 1 c) :value (nth 0 c)))
+                                 :tag (nth 1 c)
+                                 :value (format "%s" (nth 0 c))))
                          choices)
                  '((item :format "%t" :tag "(none)" :value "")))))
      ((equal type "password")

@@ -796,6 +796,74 @@
                                  (progn (sql-datum-form-edit-text) 'opened)
                                (user-error 'refused)))))
 
+(message "\n=== a menu shows the value it was opened on ===")
+
+;; A form opened on an existing row carries that row as the server holds
+;; it -- a step's On Success is the number 1 in msdb -- while the
+;; choices are named by string.  `menu-choice' matches with `equal', so
+;; the menu read "invalid (1)" and the step's setting could not be read
+;; without opening the menu.
+(defconst test-form-keys--from-the-server
+  (concat "[{\"key\":\"on_success_action\",\"label\":\"On Success\","
+          "\"type\":\"choice\",\"default\":\"1\","
+          "\"choices\":[[\"1\",\"Quit with success\"],"
+          "[\"2\",\"Quit with failure\"],"
+          "[\"3\",\"Go to the next step\"]]},"
+          "{\"key\":\"subsystem\",\"label\":\"Type\",\"type\":\"choice\","
+          "\"default\":\"TSQL\","
+          "\"choices\":[[\"TSQL\",\"T-SQL\"],"
+          "[\"CmdExec\",\"OS Command\"]]}]"))
+
+(defun test-form-keys--menu-form (values)
+  "Render the choice form with VALUES (a JSON object string)."
+  (sql-datum--admin-show-form
+   (sql-datum--admin-denull-alist
+    (json-parse-string
+     (concat "{\"panel\":\"jobs\",\"form\":{\"fields\":"
+             test-form-keys--from-the-server ",\"values\":" values
+             ",\"submit_action\":\"update-step\","
+             "\"submit_label\":\"Save\",\"notes\":[]}}")
+     :object-type 'alist :array-type 'list))
+   nil)
+  (get-buffer "*datum-admin:jobs-form*"))
+
+(defun test-form-keys--shown (label)
+  "Return the text the menu for LABEL displays."
+  (with-current-buffer "*datum-admin:jobs-form*"
+    (save-excursion
+      (goto-char (point-min))
+      (when (re-search-forward (concat "^" (regexp-quote label) " *Value Menu: \\(.*\\)$") nil t)
+        (string-trim (match-string 1))))))
+
+;; msdb hands these back as numbers.
+(test-form-keys--menu-form "{\"on_success_action\":2,\"subsystem\":\"CmdExec\"}")
+(test-form-keys-assert "a number from the server reads as its label"
+                       (equal (test-form-keys--shown "On Success")
+                              "Quit with failure"))
+(test-form-keys-assert "not as \"invalid\""
+                       (not (string-match-p
+                             "invalid" (test-form-keys--shown "On Success"))))
+(test-form-keys-assert "and a string still reads as its label"
+                       (equal (test-form-keys--shown "Type") "OS Command"))
+(test-form-keys-assert "what is submitted is the value, not the label"
+                       (equal (cdr (assoc 'on_success_action
+                                          (sql-datum--form-collect-values
+                                           sql-datum--form-widgets nil)))
+                              "2"))
+
+;; With nothing supplied the field's own default decides, as before.
+(test-form-keys--menu-form "{}")
+(test-form-keys-assert "the default is shown when the row says nothing"
+                       (equal (test-form-keys--shown "On Success")
+                              "Quit with success"))
+
+;; A value that names no choice is still reported as such, rather than
+;; being quietly shown as something it is not.
+(test-form-keys--menu-form "{\"on_success_action\":9}")
+(test-form-keys-assert "a value matching no choice still says so"
+                       (string-match-p "invalid"
+                                       (test-form-keys--shown "On Success")))
+
 (message "\n%d passed, %d failed" test-form-keys--pass test-form-keys--fail)
 (when (> test-form-keys--fail 0)
   (kill-emacs 1))
