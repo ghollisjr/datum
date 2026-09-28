@@ -987,20 +987,25 @@ command it accompanies always belong to the same connection."
       (let ((found (sql-find-sqli-buffer 'datum)))
         (and found (get-buffer found)))))
 
-(defun sql-datum--admin-request-display (panel &optional sqli-buf)
-  "Note that PANEL has been asked for on a connection."
+(defun sql-datum--admin-request-display (panel &optional sqli-buf sub-panel)
+  "Note that PANEL, or its SUB-PANEL, has been asked for on a connection.
+
+The sub-panel is part of the request because a panel and its sub-panels
+share a name.  A jobs list refreshing on its timer would otherwise
+answer a request made for a job\='s tree — raising the list and leaving
+the tree, which is what was actually asked for, unshown."
   (let ((connection (sql-datum--admin-connection sqli-buf)))
     (when connection
       (with-current-buffer connection
-        (setq sql-datum--admin-display-request panel)))))
+        (setq sql-datum--admin-display-request (cons panel sub-panel))))))
 
-(defun sql-datum--admin-take-display-request (panel sqli-buf)
-  "Return non-nil if PANEL was asked for, clearing the request."
+(defun sql-datum--admin-take-display-request (panel sqli-buf &optional sub-panel)
+  "Return non-nil if PANEL\='s SUB-PANEL was asked for, clearing the request."
   (let ((connection (sql-datum--admin-connection sqli-buf)))
     (when (and connection
                (equal (buffer-local-value 'sql-datum--admin-display-request
                                           connection)
-                      panel))
+                      (cons panel sub-panel)))
       (with-current-buffer connection
         (setq sql-datum--admin-display-request nil))
       t)))
@@ -1276,7 +1281,8 @@ SQLI-BUF is the originating SQLi buffer."
     ;; Show the buffer on first creation, or when the user explicitly
     ;; asked for this panel.  A plain auto-refresh must not steal focus
     ;; or drag a buried panel back into a window.
-    (let ((requested (sql-datum--admin-take-display-request panel sqli-buf)))
+    (let ((requested (sql-datum--admin-take-display-request
+                      panel sqli-buf sub-panel)))
       (when (or initial requested)
         (pop-to-buffer buf)))))
 
@@ -1648,9 +1654,12 @@ Toggles direction if already sorting by this column."
           (insert "\n" (propertize "Press q to close" 'face 'font-lock-comment-face) "\n"))
         (special-mode)
         (goto-char (point-min)))
-      (display-buffer buf
-                      '((display-buffer-below-selected)
-                        (window-height . fit-window-to-buffer))))))
+      ;; Selected, because the buffer itself says "Press q to close" and
+      ;; q only closes the window the cursor is in.  Shown below the
+      ;; panel and fitted to its contents, as before.
+      (pop-to-buffer buf
+                     '((display-buffer-below-selected)
+                       (window-height . fit-window-to-buffer))))))
 
 (defun sql-datum--admin-show-detail (data sqli-buf)
   "Display a multi-section detail view from DATA.
@@ -1715,7 +1724,15 @@ SQLI-BUF is the originating SQLi buffer."
               (move-to-column saved-col))
           (goto-char (point-min))
           (forward-line 4))))
-    (display-buffer buf)))
+    ;; Selected, not merely shown: a job\='s tree is a place to go and
+    ;; work, and `display-buffer\=' left the cursor behind in the list, so
+    ;; the next key pressed went to the wrong buffer.  The rule is the
+    ;; tabular panels\=' rule — shown when asked for or when first built,
+    ;; left alone by a refresh nobody asked to see.
+    (let ((requested (sql-datum--admin-take-display-request
+                      panel sqli-buf sub-panel)))
+      (when (or initial requested)
+        (pop-to-buffer buf)))))
 
 ;; --- Admin mode ---
 
@@ -2167,9 +2184,11 @@ the answer."
     (unless id (user-error "No item at point"))
     (cond
      ((equal panel "jobs")
+      (sql-datum--admin-request-display "jobs" nil "detail")
       (sql-datum--admin-send-command
        (format ":admin jobs detail %s" id)))
      ((equal panel "ssis")
+      (sql-datum--admin-request-display "ssis" nil "executions")
       (sql-datum--admin-send-command
        (format ":admin ssis executions %s" id)))
      ((equal panel "filesystem")
@@ -2205,7 +2224,7 @@ its steps and schedules sit below and are edited the same way."
   (let ((name (or (sql-datum--admin-row-id-at-point)
                   (alist-get 'job_name sql-datum--admin-context))))
     (unless name (user-error "No job at point"))
-    (sql-datum--admin-request-display "jobs")
+    (sql-datum--admin-request-display "jobs" nil "form")
     (sql-datum--admin-send-command
      (format ":admin-action jobs drop-job-check %s" name))))
 
@@ -2216,6 +2235,7 @@ its steps and schedules sit below and are edited the same way."
     (user-error "History is only available in the jobs panel"))
   (let ((id (sql-datum--admin-row-id-at-point)))
     (unless id (user-error "No job at point"))
+    (sql-datum--admin-request-display "jobs" nil "history")
     (sql-datum--admin-send-command
      (format ":admin jobs history %s" id))))
 
@@ -2335,7 +2355,7 @@ from those sections"))
   (interactive)
   (let ((name (sql-datum--admin-row-id-at-point)))
     (unless name (user-error "No database at point"))
-    (sql-datum--admin-request-display "databases")
+    (sql-datum--admin-request-display "databases" nil "files")
     (sql-datum--admin-send-command
      (format ":admin-action databases files %s" name))))
 
@@ -2344,7 +2364,7 @@ from those sections"))
   (interactive)
   (let ((name (sql-datum--admin-row-id-at-point)))
     (unless name (user-error "No schema at point"))
-    (sql-datum--admin-request-display "schema")
+    (sql-datum--admin-request-display "schema" nil "tables")
     (sql-datum--admin-send-command
      (format ":admin-action schema tables %s" name))))
 
@@ -2400,7 +2420,7 @@ from those sections"))
   (interactive)
   (let ((name (sql-datum--admin-row-id-at-point)))
     (unless name (user-error "No database at point"))
-    (sql-datum--admin-request-display "databases")
+    (sql-datum--admin-request-display "databases" nil "backups")
     (sql-datum--admin-send-command
      (format ":admin-action databases backups %s" name))))
 
@@ -2494,7 +2514,7 @@ When point is on a recorded backup, its file is offered as the source."
   (interactive)
   (let ((name (sql-datum--admin-row-id-at-point)))
     (unless name (user-error "No login at point"))
-    (sql-datum--admin-request-display "security")
+    (sql-datum--admin-request-display "security" nil "user-mappings")
     (sql-datum--admin-send-command
      (format ":admin-action security mappings %s" name))))
 
@@ -2564,7 +2584,7 @@ and the row names the database."
   (interactive)
   (pcase-let ((`(,principal ,database)
                (sql-datum--admin-permission-context)))
-    (sql-datum--admin-request-display "security")
+    (sql-datum--admin-request-display "security" nil "permissions")
     (sql-datum--admin-send-command
      (format ":admin-action security permissions %s"
              (sql-datum--admin-payload
@@ -6368,9 +6388,9 @@ on this connection the name is free text."
                                               buf-obj))))
     (completing-read prompt principals)))
 
-(defun sql-datum--admin-request (panel cmd)
-  "Send CMD and let PANEL show itself when its data comes back."
-  (sql-datum--admin-request-display panel)
+(defun sql-datum--admin-request (panel cmd &optional sub-panel)
+  "Send CMD and let PANEL\='s SUB-PANEL show itself when its data comes back."
+  (sql-datum--admin-request-display panel nil sub-panel)
   (sql-datum--admin-send-command-to nil cmd))
 
 ;; --- Databases ---
@@ -6393,7 +6413,7 @@ Nothing is dropped until that panel is confirmed."
   (interactive (list (sql-datum--read-database "Drop database: ")))
   (sql-datum--admin-request
    "databases"
-   (format ":admin-action databases drop-check %s" database)))
+   (format ":admin-action databases drop-check %s" database) "form"))
 
 (defun sql-datum-backup-database (database)
   "Open the backup wizard for DATABASE."
@@ -6413,7 +6433,8 @@ Nothing is dropped until that panel is confirmed."
   "Show the files making up DATABASE."
   (interactive (list (sql-datum--read-database "Files of database: ")))
   (sql-datum--admin-request
-   "databases" (format ":admin-action databases files %s" database)))
+   "databases" (format ":admin-action databases files %s" database)
+   "files"))
 
 ;; --- Schemas ---
 
@@ -6428,7 +6449,7 @@ Nothing is dropped until that panel is confirmed."
   (when (string-empty-p (string-trim schema))
     (user-error "No schema given"))
   (sql-datum--admin-request
-   "schema" (format ":admin-action schema drop-schema %s" schema)))
+   "schema" (format ":admin-action schema drop-schema %s" schema) "form"))
 
 ;; --- Logins, roles and users ---
 
@@ -6449,20 +6470,23 @@ Nothing is dropped until that panel is confirmed."
 Nothing is dropped until that panel is confirmed."
   (interactive (list (sql-datum--read-principal "Drop login or role: ")))
   (sql-datum--admin-request
-   "security" (format ":admin-action security drop-check %s" name)))
+   "security" (format ":admin-action security drop-check %s" name)
+   "form"))
 
 (defun sql-datum-permissions (name)
   "Show what the login or role NAME may do."
   (interactive (list (sql-datum--read-principal "Permissions for: ")))
   (sql-datum--admin-request
    "security" (format ":admin-action security permissions %s"
-                      (sql-datum--admin-payload `((principal . ,name))))))
+                      (sql-datum--admin-payload `((principal . ,name))))
+   "permissions"))
 
 (defun sql-datum-user-mappings (name)
   "Show the databases the login NAME is a user in."
   (interactive (list (sql-datum--read-principal "Mappings for login: ")))
   (sql-datum--admin-request
-   "security" (format ":admin-action security mappings %s" name)))
+   "security" (format ":admin-action security mappings %s" name)
+   "user-mappings"))
 
 (defun sql-datum-pwd ()
   "Show current user, server, database, and version via :pwd."

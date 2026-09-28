@@ -161,7 +161,10 @@
     ;; The confirmation panel has to actually surface, or the drop
     ;; would look like it did nothing.
     (test-table-keys-assert "and asks for the panel to be shown"
-                            (equal request "databases"))
+                            ;; Named down to the sub-panel the check
+                            ;; comes back as, so the databases list
+                            ;; refreshing first cannot answer for it.
+                            (equal request '("databases" . "form")))
     (sql-datum-backup-database "payroll")
     (test-table-keys-assert "backup carries the database in its payload"
                             (equal (json-parse-string

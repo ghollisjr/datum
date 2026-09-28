@@ -141,8 +141,10 @@
        (not (test-admin-display--visible-p dev-panel)))
       (test-admin-display-assert
        "and leaves the asked-for panel still to come"
+       ;; A request names the sub-panel too, so that a list refreshing
+       ;; on its timer cannot answer a request made for a sub-panel.
        (equal (buffer-local-value 'sql-datum--admin-display-request prod)
-              "databases"))
+              '("databases")))
       (deliver prod "databases")
       (test-admin-display-assert "which surfaces when its own data arrives"
                                  (test-admin-display--visible-p prod-panel))
@@ -248,6 +250,91 @@
          (equal sent '(":admin jobs"))))))
   (dolist (b (list dev prod-panel dev-panel))
     (when (buffer-live-p b) (kill-buffer b))))
+
+(message "\n=== a detail view is somewhere to go and work ===")
+
+;; `display-buffer' showed a job's tree without selecting it, so the
+;; cursor stayed behind in the list and every key pressed next went to
+;; the wrong buffer.  It is selected now, under the same rule the
+;; tabular panels follow.
+
+(defun test-admin-display--tree ()
+  "Parsed panel data for a job's tree."
+  (sql-datum--admin-denull-alist
+   (json-parse-string
+    (concat "{\"panel\":\"jobs\",\"sub_panel\":\"detail\","
+            "\"title\":\"Job: nightly load\","
+            "\"sections\":[{\"title\":\"Steps\",\"headers\":[\"Step\"],"
+            "\"rows\":[[\"1\"]],\"row_id\":0,\"actions\":[]}],"
+            "\"info\":null,\"context\":{\"job_name\":\"nightly load\"}}")
+    :object-type 'alist :array-type 'list)))
+
+(defun test-admin-display--selected ()
+  "Return the name of the buffer the cursor is actually in."
+  (buffer-name (window-buffer (selected-window))))
+
+(let ((conn test-admin-display--connection)
+      (list-buf "*datum-admin:jobs [display-test]*")
+      (tree-buf "*datum-admin:jobs:detail [display-test]*"))
+  (dolist (name (list list-buf tree-buf))
+    (when (get-buffer name) (kill-buffer name)))
+  (with-current-buffer conn (setq sql-datum--admin-display-request nil))
+
+  (test-admin-display--show "jobs" t)
+  (switch-to-buffer list-buf)
+
+  ;; d on a job.
+  (sql-datum--admin-request-display "jobs" conn "detail")
+  (sql-datum--admin-show-detail (test-admin-display--tree) conn)
+  (test-admin-display-assert "opening a job's tree puts the cursor in it"
+                             (equal (test-admin-display--selected) tree-buf))
+
+  ;; A refresh nobody asked for must not drag the cursor away.
+  (switch-to-buffer list-buf)
+  (sql-datum--admin-show-detail (test-admin-display--tree) conn)
+  (test-admin-display-assert "a refresh of the tree leaves the cursor alone"
+                             (equal (test-admin-display--selected) list-buf))
+
+  ;; Asking again for a tree already built must show it again -- under
+  ;; the old rule it was only ever shown the first time.
+  (sql-datum--admin-request-display "jobs" conn "detail")
+  (sql-datum--admin-show-detail (test-admin-display--tree) conn)
+  (test-admin-display-assert "asking for it again shows it again"
+                             (equal (test-admin-display--selected) tree-buf))
+
+  ;; The list refreshes every few seconds; that must not answer for the
+  ;; tree and leave the thing actually asked for unshown.
+  (switch-to-buffer list-buf)
+  (sql-datum--admin-request-display "jobs" conn "detail")
+  (sql-datum--admin-show-panel (test-admin-display--panel "jobs") conn)
+  (test-admin-display-assert "the list's own refresh does not answer for it"
+                             (equal (test-admin-display--selected) list-buf))
+  (sql-datum--admin-show-detail (test-admin-display--tree) conn)
+  (test-admin-display-assert "and the tree still arrives and is selected"
+                             (equal (test-admin-display--selected) tree-buf))
+
+  ;; The request is spent either way.
+  (test-admin-display-assert "the request having been used up"
+                             (null (buffer-local-value
+                                    'sql-datum--admin-display-request conn))))
+
+;; Every entry point that deliberately opens a view has to say so, or
+;; pressing its key on an already-built buffer does nothing.
+(let ((conn test-admin-display--connection))
+  (dolist (probe '(("detail"  sql-datum-admin-detail       ("jobs" . "detail"))
+                   ("history" sql-datum-admin-job-history  ("jobs" . "history"))))
+    (with-current-buffer "*datum-admin:jobs [display-test]*"
+      (with-current-buffer conn (setq sql-datum--admin-display-request nil))
+      (goto-char (point-min))
+      (let ((pos (next-single-property-change (point-min) 'sql-datum-row-id)))
+        (when pos (goto-char pos)))
+      (cl-letf (((symbol-function 'sql-datum--admin-send-command)
+                 (lambda (_cmd) nil)))
+        (funcall (nth 1 probe)))
+      (test-admin-display-assert
+       (format "%s asks for what it opens" (nth 0 probe))
+       (equal (buffer-local-value 'sql-datum--admin-display-request conn)
+              (nth 2 probe))))))
 
 (message "\n%d passed, %d failed"
          test-admin-display--pass test-admin-display--fail)
