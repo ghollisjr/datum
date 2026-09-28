@@ -15,6 +15,15 @@ SUBSYSTEMS = {
     "SSIS": "SSIS",
 }
 
+# How to edit each subsystem's script: the major mode the client puts
+# the field's own buffer in.  SSIS steps are a package reference rather
+# than a script, so nothing is claimed for them.
+SUBSYSTEM_MODES = {
+    "TSQL": "sql",
+    "CmdExec": "shell",
+    "PowerShell": "powershell",
+}
+
 # Step action labels
 STEP_ACTIONS = {
     1: "Quit with success",
@@ -172,7 +181,16 @@ def step_options(cursor, current=None):
          "help": "for a T-SQL step"},
         {"key": "command", "label": "Command", "type": "text",
          "default": current.get("command", ""),
-         "help": "the script this step runs"},
+         # A step's script is the one field here that runs to hundreds
+         # of lines, so it can be taken out to a buffer of its own.  The
+         # language is the step's Type, which is a field of this same
+         # form and can be changed before the script is written, so the
+         # mode is named as a sibling to read rather than fixed here.
+         "mode": "sql",
+         "mode_field": "subsystem",
+         "modes": SUBSYSTEM_MODES,
+         "help": "the script this step runs; C-c ' edits it in its own "
+                 "buffer"},
         {"key": "retry_attempts", "label": "Retry Attempts", "type": "int",
          "default": current.get("retry_attempts", 0)},
         {"key": "retry_interval", "label": "Retry Interval (minutes)",

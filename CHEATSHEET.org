@@ -399,9 +399,14 @@ about capacity.  MSSQL only — PostgreSQL cannot enumerate drives.
 | =SPC=           | Toggle the checkbox at point       |
 | =M-TAB=         | Complete the field (where offered) |
 | =C-c C-f=       | Browse the server for a path       |
+| =C-c '=         | Edit the long field in its own buffer |
 | =C-c C-c=       | Submit                             |
 | =C-c C-k=       | Cancel                             |
 | =[INS]= / =[DEL]= | Add / remove a row in a list field |
+
+=C-c '= on a job step's command opens it in its own buffer, in the mode
+its Type calls for (T-SQL → =sql-mode=, OS Command → =sh-mode=); =C-c
+C-c= stores it back, =C-c C-k= discards it.
 
 Path browser:
 

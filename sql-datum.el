@@ -47,6 +47,7 @@
 (declare-function widget-forward  "wid-edit" (arg))
 (declare-function widget-backward "wid-edit" (arg))
 (declare-function widget-field-at "wid-edit" (pos))
+(declare-function widget-value-set "wid-edit" (widget value))
 (declare-function widget-at        "wid-edit" (&optional pos))
 (declare-function widget-button-press "wid-edit" (pos &optional event))
 (declare-function widget-field-start "wid-edit" (widget))
@@ -3231,6 +3232,8 @@ widget order."
     (define-key map (kbd "<backtab>") #'widget-backward)
     (define-key map (kbd "S-<tab>")   #'widget-backward)
     (define-key map (kbd "C-c C-f") #'sql-datum-form-browse)
+    ;; The same key org uses to take a block out to a buffer of its own.
+    (define-key map (kbd "C-c '")   #'sql-datum-form-edit-text)
     (define-key map (kbd "C-c C-c") #'sql-datum-form-submit)
     (define-key map (kbd "C-c C-k") #'sql-datum-form-cancel)
     map))
@@ -3291,6 +3294,37 @@ typing outside a field silently corrupts the form layout."
 (defvar-local sql-datum--form-spec nil
   "The `form' alist backing the wizard form in this buffer.")
 
+(defvar-local sql-datum--form-panel nil
+  "The panel this wizard form belongs to.")
+
+(defvar-local sql-datum--form-text-values nil
+  "Alist of field key to the exact text of a multi-line field.
+
+A `text' widget cannot hold a trailing newline: it takes the last one
+as the end of the field, so a script handed to it 42389 characters long
+reads back 42388.  Left alone, opening a step and saving it untouched
+would rewrite the stored script.  So the text is kept here beside the
+widget, and `sql-datum--form-text-value' decides which of the two is
+the one the user means.")
+
+(defun sql-datum--form-remember-text (key value)
+  "Record VALUE as the exact text of field KEY."
+  (setq sql-datum--form-text-values
+        (cons (cons key (format "%s" (or value "")))
+              (assoc-delete-all key sql-datum--form-text-values))))
+
+(defun sql-datum--form-text-value (key widget)
+  "Return what field KEY holds, preferring the remembered text.
+
+The remembered text wins only where the widget agrees with it up to
+the newline the widget cannot keep.  Any other difference is an edit,
+and then the widget is what the user is looking at."
+  (let ((shown (or (widget-value widget) ""))
+        (kept (cdr (assoc key sql-datum--form-text-values))))
+    (if (and kept (equal shown (string-trim-right kept "\n+")))
+        kept
+      shown)))
+
 (defun sql-datum--form-field-value (spec widget)
   "Return the submitted value for field SPEC read from WIDGET."
   (let ((type (or (alist-get 'type spec) "string"))
@@ -3317,6 +3351,9 @@ typing outside a field silently corrupts the form layout."
      ;; change a credential that legitimately has leading or trailing
      ;; whitespace.
      ((equal type "password") (or raw ""))
+     ;; Nor is a script something to tidy.  A job step is stored and run
+     ;; verbatim, and its first line may be indented on purpose.
+     ((equal type "text") (or raw ""))
      ((stringp raw) (string-trim raw))
      (t raw))))
 
@@ -3396,16 +3433,23 @@ into account as well."
                        (cl-mapcar #'cons item widths) " ")
             "\n")))
 
+(defun sql-datum--form-default (spec values)
+  "Return the value field SPEC starts out holding.
+
+VALUES are what the form was last submitted with, so that a form
+rebuilt after browsing for a path comes back as the user left it."
+  (let* ((key (alist-get 'key spec))
+         ;; Field keys are strings; parsed JSON values are keyed by
+         ;; symbol, and `assoc-string' matches across both.
+         (supplied (and values key (assoc-string key values))))
+    (if supplied (cdr supplied) (alist-get 'default spec))))
+
 (defun sql-datum--form-create-widget (spec &optional values)
   "Create and return the widget for field SPEC.
 A value for this field in VALUES wins over the descriptor's default, so
 a form rebuilt after browsing for a path comes back as the user left it."
   (let* ((type (or (alist-get 'type spec) "string"))
-         (key (alist-get 'key spec))
-         ;; Field keys are strings; parsed JSON values are keyed by
-         ;; symbol, and `assoc-string' matches across both.
-         (supplied (and values key (assoc-string key values)))
-         (default (if supplied (cdr supplied) (alist-get 'default spec)))
+         (default (sql-datum--form-default spec values))
          (choices (alist-get 'choices spec)))
     (cond
      ((equal type "bool")
@@ -3592,6 +3636,10 @@ with `fields', `values', `submit_action', and optional `notes',
             (push (cons (alist-get 'key spec)
                         (cons spec (sql-datum--form-create-widget spec values)))
                   widgets)
+            (when multiline
+              (sql-datum--form-remember-text
+               (alist-get 'key spec)
+               (sql-datum--form-default spec values)))
             ;; Paths name locations on the server, not on this machine, so
             ;; browsing has to go through the connection.
             (when (equal (alist-get 'type spec) "path")
@@ -3660,6 +3708,7 @@ with `fields', `values', `submit_action', and optional `notes',
                          sqli-buf field-key))))
         (setq-local sql-datum--form-widgets widgets)
         (setq-local sql-datum--form-spec form)
+        (setq-local sql-datum--form-panel panel)
         (setq-local sql-datum--admin-sqli-buf sqli-buf)
         ;; A form with many fields pushes its help below the fold too.
         (setq-local header-line-format
@@ -3734,14 +3783,163 @@ CONFIRM-WIDGET must match it.  OVERRIDE-ACTION replaces the submit action
 form field being filled, the form values to restore, and the action that
 rebuilds the form.")
 
+(defvar-local sql-datum--form-edit-origin nil
+  "The form buffer, field key and widget this edit buffer writes back to.")
+
+(defvar sql-datum--form-edit-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "C-c C-c") #'sql-datum-form-edit-store)
+    (define-key map (kbd "C-c '")   #'sql-datum-form-edit-store)
+    (define-key map (kbd "C-c C-k") #'sql-datum-form-edit-abandon)
+    map)
+  "Keymap for the buffer a form field is edited in.")
+
+(define-minor-mode sql-datum-form-edit-mode
+  "Minor mode for a buffer holding one field of a datum form.
+
+Layered over whatever major mode suits the text, so the script is
+edited with the indentation, font-lock and motion that mode provides
+rather than inside a widget."
+  :lighter " datum-field"
+  :keymap sql-datum--form-edit-mode-map)
+
+(defcustom sql-datum-form-edit-modes
+  '(("sql" . sql-mode)
+    ("shell" . sh-mode)
+    ("powershell" . powershell-mode)
+    ("text" . text-mode))
+  "Major mode to edit a form field in, by the name the server gives.
+A mode that is not installed is skipped, leaving the buffer in
+`fundamental-mode' rather than failing to open."
+  :type '(alist :key-type string :value-type symbol)
+  :group 'SQL)
+
+(defun sql-datum--form-edit-major-mode (spec)
+  "Return the major mode to edit the field SPEC describes in.
+
+A field may name a mode outright, or name a sibling field to read it
+from -- a job step's language is its Type, which is a field of the same
+form and can be changed before the script is written."
+  (let* ((from (alist-get 'mode_field spec))
+         (sibling (and from (assoc from sql-datum--form-widgets)))
+         ;; Where a sibling decides, it decides both ways: a value it
+         ;; lists no mode for is not a script in the field's usual
+         ;; language but something else entirely -- an SSIS step's
+         ;; command is a package path -- so it gets no mode at all
+         ;; rather than falling back to the language beside it.
+         (name (format "%s"
+                       (or (if sibling
+                               (cdr (assoc-string
+                                     (format "%s" (widget-value (cddr sibling)))
+                                     (alist-get 'modes spec)))
+                             (alist-get 'mode spec))
+                           "")))
+         (mode (cdr (assoc-string name sql-datum-form-edit-modes))))
+    (and mode (fboundp mode) mode)))
+
+(defun sql-datum--form-text-field-at-point ()
+  "Return the (KEY SPEC . WIDGET) entry of the multi-line field to edit.
+
+The one point is in, or -- since a form's long field is usually its
+only one -- the only one there is."
+  (let* ((multi (seq-filter
+                 (lambda (e) (equal (alist-get 'type (cadr e)) "text"))
+                 sql-datum--form-widgets))
+         (here (seq-find
+                (lambda (e)
+                  (let ((w (cddr e)))
+                    (and (>= (point) (widget-field-start w))
+                         (<= (point) (widget-field-end w)))))
+                multi)))
+    (or here (and (= (length multi) 1) (car multi)))))
+
+(defun sql-datum-form-edit-text ()
+  "Edit the multi-line field at point in a buffer of its own.
+
+A job step's command is a script, and a script of any size is miserable
+to edit inside a widget: TAB moves to the next field rather than
+indenting, there is no font-lock, and the fields below it sit past the
+end of the script.  So it is handed to a real buffer in a real major
+mode, and `C-c C-c' stores it back."
+  (interactive)
+  (unless sql-datum--form-widgets
+    (user-error "Not in a datum form"))
+  (let ((entry (sql-datum--form-text-field-at-point)))
+    (unless entry
+      (user-error "No multi-line field here"))
+    (let* ((key (car entry))
+           (spec (cadr entry))
+           (widget (cddr entry))
+           (mode (sql-datum--form-edit-major-mode spec))
+           (label (or (alist-get 'label spec) key))
+           (form-buf (current-buffer))
+           (text (sql-datum--form-text-value key widget))
+           ;; Named for the form it belongs to as well as the field, so
+           ;; two forms open at once do not fight over one buffer.
+           (buf (get-buffer-create
+                 (format "*datum-field:%s %s*"
+                         (or sql-datum--form-panel "form")
+                         label))))
+      (with-current-buffer buf
+        (let ((inhibit-read-only t)) (erase-buffer))
+        (insert text)
+        (goto-char (point-min))
+        (when mode (funcall mode))
+        (sql-datum-form-edit-mode 1)
+        (setq-local sql-datum--form-edit-origin (list form-buf key widget))
+        (setq header-line-format
+              (substitute-command-keys
+               (format "%s — \\[sql-datum-form-edit-store] stores it back, \\[sql-datum-form-edit-abandon] discards"
+                       label)))
+        (set-buffer-modified-p nil))
+      (pop-to-buffer buf))))
+
+(defun sql-datum-form-edit-store ()
+  "Store this buffer back into the form field it came from."
+  (interactive)
+  (unless sql-datum--form-edit-origin
+    (user-error "This buffer is not editing a form field"))
+  (pcase-let ((`(,form-buf ,key ,widget) sql-datum--form-edit-origin))
+    (unless (buffer-live-p form-buf)
+      ;; The text is the only copy there is, so it stays put.
+      (user-error "The form is gone; this buffer still holds the text"))
+    (let ((text (buffer-substring-no-properties (point-min) (point-max)))
+          (edit-buf (current-buffer)))
+      (with-current-buffer form-buf
+        (let ((inhibit-read-only t))
+          (widget-value-set widget text)
+          (widget-setup))
+        ;; Beside the widget, because the widget drops a trailing
+        ;; newline and a script is entitled to end with one.
+        (sql-datum--form-remember-text key text)
+        (sql-datum--form-protect-static-text))
+      (kill-buffer edit-buf)
+      (pop-to-buffer form-buf)
+      (message "datum: %s stored (%d character%s)"
+               key (length text) (if (= (length text) 1) "" "s")))))
+
+(defun sql-datum-form-edit-abandon ()
+  "Leave the form field as it was and close this buffer."
+  (interactive)
+  (unless sql-datum--form-edit-origin
+    (user-error "This buffer is not editing a form field"))
+  (when (or (not (buffer-modified-p))
+            (yes-or-no-p "Discard the edits in this buffer? "))
+    (let ((form-buf (car sql-datum--form-edit-origin)))
+      (kill-buffer (current-buffer))
+      (when (buffer-live-p form-buf) (pop-to-buffer form-buf)))))
+
 (defun sql-datum--form-collect-values (widgets extra)
   "Return an alist of the current WIDGETS values, merged over EXTRA."
   (let ((payload (copy-alist (or extra '()))))
     (dolist (entry widgets)
-      (let ((key (car entry)))
-        (push (cons (if (stringp key) (intern key) key)
-                    (sql-datum--form-field-value (cadr entry) (cddr entry)))
-              payload)))
+      (let* ((key (car entry))
+             (spec (cadr entry))
+             (widget (cddr entry))
+             (value (if (equal (alist-get 'type spec) "text")
+                        (sql-datum--form-text-value key widget)
+                      (sql-datum--form-field-value spec widget))))
+        (push (cons (if (stringp key) (intern key) key) value) payload)))
     payload))
 
 (defun sql-datum--admin-form-browse-path (panel form widgets values

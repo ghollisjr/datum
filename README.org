@@ -1362,8 +1362,37 @@ library =M-x customize= uses.
 | =SPC=           | Toggle the checkbox at point        |
 | =M-TAB=         | Complete the field (where offered)  |
 | =C-c C-f=       | Browse the server for a path        |
+| =C-c '=         | Edit the long field in its own buffer |
 | =C-c C-c=       | Submit                              |
 | =C-c C-k=       | Cancel                              |
+
+**** Editing a script
+
+A job step's command is the one field that runs to hundreds of lines,
+and a widget is a poor place for it: =TAB= moves to the next field
+rather than indenting, there is no font-lock, and the fields below the
+script sit past the end of it.
+
+=C-c '= takes it out to a buffer of its own — the key org uses for the
+same purpose — in a real major mode, where =C-c C-c= stores it back and
+=C-c C-k= discards it.  The mode follows the step's *Type*: a T-SQL step
+is edited in =sql-mode=, an OS Command step in =sh-mode=.  An SSIS step
+gets no mode, its command being a package path rather than a script.  A
+mode that is not installed is simply not used, so a PowerShell step
+opens in =fundamental-mode= rather than failing to open.
+
+The buffer is the only copy of what is in it, so storing into a form
+that has since been closed is refused and the buffer is left alone.
+
+A script is stored and run verbatim, so nothing about it is tidied: an
+indented first line and a trailing newline both survive the round trip.
+That last one takes the form's own bookkeeping.  A =text= widget reads
+the last newline of its value as the end of the field, so a 42,389
+character script handed to it reads back 42,388 — which meant opening a
+step and saving it untouched silently rewrote the stored script.  The
+form keeps the text beside the widget and prefers it wherever the two
+agree up to that newline; any other difference is a real edit, and then
+the widget is what the user is looking at.
 
 Choice fields render as =Value Menu=, the same control Customize uses.
 Long lookups — MSSQL has over five thousand collations — are completing

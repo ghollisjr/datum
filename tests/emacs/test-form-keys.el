@@ -640,6 +640,162 @@
     (test-form-keys-assert "and leaves the read-only label alone"
                            (equal before (buffer-string)))))
 
+(message "\n=== editing a long field in a buffer of its own ===")
+
+;; A job step's command is a script, and scripts run to hundreds of
+;; lines.  Inside the widget TAB moves to the next field rather than
+;; indenting, there is no font-lock, and the fields below the script sit
+;; past the end of it.
+(defconst test-form-keys--script
+  (concat "[{\"key\":\"step_name\",\"label\":\"Step Name\","
+          "\"type\":\"string\",\"default\":\"nightly\"},"
+          "{\"key\":\"subsystem\",\"label\":\"Type\",\"type\":\"choice\","
+          "\"default\":\"TSQL\",\"choices\":[[\"TSQL\",\"T-SQL\"],"
+          "[\"CmdExec\",\"OS Command\"],[\"SSIS\",\"SSIS\"]]},"
+          "{\"key\":\"command\",\"label\":\"Command\",\"type\":\"text\","
+          "\"default\":\"SELECT 1;\\nSELECT 2;\\n\",\"mode\":\"sql\","
+          "\"mode_field\":\"subsystem\","
+          "\"modes\":{\"TSQL\":\"sql\",\"CmdExec\":\"shell\"}},"
+          "{\"key\":\"retry_attempts\",\"label\":\"Retry\","
+          "\"type\":\"int\",\"default\":0}]"))
+
+(defconst test-form-keys--script-text "SELECT 1;\nSELECT 2;\n")
+
+(defun test-form-keys--command-value ()
+  "Return what the form would submit for the command field."
+  (with-current-buffer "*datum-admin:databases-form*"
+    (cdr (assoc 'command
+                (sql-datum--form-collect-values sql-datum--form-widgets nil)))))
+
+(defun test-form-keys--open-editor ()
+  "Open the command field's own buffer and return it."
+  (with-current-buffer (test-form-keys--form test-form-keys--script)
+    (goto-char (widget-field-start
+                (cddr (assoc "command" sql-datum--form-widgets))))
+    (sql-datum-form-edit-text))
+  (get-buffer "*datum-field:databases Command*"))
+
+;; The widget takes the last newline of its value as the end of the
+;; field, so a script handed to it comes back one character short.  Left
+;; alone, opening a step and saving it untouched rewrote the script.
+(test-form-keys--form test-form-keys--script)
+(test-form-keys-assert "an untouched script is submitted exactly as it came"
+                       (equal (test-form-keys--command-value)
+                              test-form-keys--script-text))
+
+;; Whether the widget keeps that last newline depends on what follows it
+;; in the buffer, so the rule is stated directly: the remembered text
+;; stands in only where the widget agrees with it up to the newline, and
+;; an actual edit always wins.
+(with-temp-buffer
+  (let ((w (widget-create 'text :format "%v" :value "SELECT 1;")))
+    (widget-setup)
+    (sql-datum--form-remember-text "command" "SELECT 1;\n")
+    (test-form-keys-assert "the newline the widget cannot hold is restored"
+                           (equal (sql-datum--form-text-value "command" w)
+                                  "SELECT 1;\n"))
+    (widget-value-set w "SELECT 2;")
+    (test-form-keys-assert "but any real difference is an edit"
+                           (equal (sql-datum--form-text-value "command" w)
+                                  "SELECT 2;"))
+    (test-form-keys-assert "and a field never remembered reads as it shows"
+                           (equal (sql-datum--form-text-value "other" w)
+                                  "SELECT 2;"))))
+
+;; Nor is a script something to tidy: a step is stored and run verbatim.
+(with-current-buffer (test-form-keys--form test-form-keys--script)
+  (widget-value-set (cddr (assoc "command" sql-datum--form-widgets))
+                    "    SELECT 1;")
+  (test-form-keys-assert "leading whitespace in a script is left alone"
+                         (equal (test-form-keys--command-value)
+                                "    SELECT 1;")))
+
+(let ((buf (test-form-keys--open-editor)))
+  (test-form-keys-assert "the script opens in a buffer of its own"
+                         (buffer-live-p buf))
+  (with-current-buffer buf
+    (test-form-keys-assert "holding the whole script"
+                           (equal (buffer-string) test-form-keys--script-text))
+    (test-form-keys-assert "in the major mode the field asks for"
+                           (eq major-mode 'sql-mode))
+    (test-form-keys-assert "where TAB indents instead of leaving the field"
+                           (eq (key-binding (kbd "TAB"))
+                               'indent-for-tab-command))
+    (test-form-keys-assert "and C-c C-c stores it back"
+                           (eq (key-binding (kbd "C-c C-c"))
+                               'sql-datum-form-edit-store))
+    ;; An edit ending in a newline survives, which is the case the
+    ;; widget cannot hold on its own.
+    (goto-char (point-max))
+    (insert "SELECT 3;\n")
+    (sql-datum-form-edit-store))
+  (test-form-keys-assert "storing closes the buffer"
+                         (not (buffer-live-p buf)))
+  (test-form-keys-assert "and the field holds what was written"
+                         (equal (test-form-keys--command-value)
+                                "SELECT 1;\nSELECT 2;\nSELECT 3;\n")))
+
+;; Editing inside the widget afterwards still wins: the remembered text
+;; must not shadow what the user is looking at.
+(with-current-buffer (test-form-keys--form test-form-keys--script)
+  (widget-value-set (cddr (assoc "command" sql-datum--form-widgets))
+                    "DROP TABLE t;")
+  (test-form-keys-assert "an edit in the widget is what gets submitted"
+                         (equal (test-form-keys--command-value)
+                                "DROP TABLE t;")))
+
+(let ((buf (test-form-keys--open-editor)))
+  (with-current-buffer buf
+    (erase-buffer)
+    (insert "thrown away")
+    (cl-letf (((symbol-function 'yes-or-no-p) (lambda (_) t)))
+      (sql-datum-form-edit-abandon)))
+  (test-form-keys-assert "abandoning leaves the field as it was"
+                         (equal (test-form-keys--command-value)
+                                test-form-keys--script-text)))
+
+;; The text in the edit buffer may be the only copy there is.
+(let ((buf (test-form-keys--open-editor)))
+  (kill-buffer "*datum-admin:databases-form*")
+  (with-current-buffer buf
+    (test-form-keys-assert "storing into a form that is gone is refused"
+                           (eq 'refused
+                               (condition-case nil
+                                   (progn (sql-datum-form-edit-store) 'stored)
+                                 (user-error 'refused))))
+    (test-form-keys-assert "and the text is still in the buffer"
+                           (equal (buffer-string) test-form-keys--script-text)))
+  (kill-buffer buf))
+
+;; The language is the step's Type, which is a field of the same form.
+(with-current-buffer (test-form-keys--form test-form-keys--script)
+  (let ((spec (cadr (assoc "command" sql-datum--form-widgets))))
+    (dolist (probe '(("TSQL" sql-mode) ("CmdExec" sh-mode)))
+      (widget-value-set (cddr (assoc "subsystem" sql-datum--form-widgets))
+                        (nth 0 probe))
+      (test-form-keys-assert
+       (format "a %s step is edited in %s" (nth 0 probe) (nth 1 probe))
+       (eq (sql-datum--form-edit-major-mode spec) (nth 1 probe))))
+    ;; An SSIS step's command is a package path, not a script, so the
+    ;; sibling listing no mode for it means no mode -- not the language
+    ;; named beside it.
+    (widget-value-set (cddr (assoc "subsystem" sql-datum--form-widgets)) "SSIS")
+    (test-form-keys-assert "a type with no language named gets no mode"
+                           (null (sql-datum--form-edit-major-mode spec)))))
+
+(test-form-keys-assert "a mode that is not installed is simply not used"
+                       (null (sql-datum--form-edit-major-mode
+                              '((mode . "powershell-that-is-not-here")))))
+
+;; A form with no long field has nothing to take out to a buffer.
+(with-current-buffer (test-form-keys--form test-form-keys--one-path)
+  (goto-char (point-min))
+  (test-form-keys-assert "C-c ' on a form with no long field says so"
+                         (eq 'refused
+                             (condition-case nil
+                                 (progn (sql-datum-form-edit-text) 'opened)
+                               (user-error 'refused)))))
+
 (message "\n%d passed, %d failed" test-form-keys--pass test-form-keys--fail)
 (when (> test-form-keys--fail 0)
   (kill-emacs 1))

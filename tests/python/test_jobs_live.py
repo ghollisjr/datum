@@ -1446,3 +1446,85 @@ class TestStartingDoesNotOpenTheTree:
             {"job_name": JOB, "step_id": "2", "from": "detail"})])
         panels = [a[0] for k, a in captured if k == "admin_panel"]
         assert panels and panels[-1].get("sub_panel") == "detail", captured
+
+
+class TestALargeScriptSurvives:
+    """A step's command is a script, and scripts get long.
+
+    The pty carries 4095 bytes a line, so the form chunks its payload;
+    what matters here is that the server stores and returns what it was
+    given, byte for byte, trailing newline included.
+    """
+
+    BASE = {"subsystem": "TSQL", "database_name": "master",
+            "retry_attempts": "0", "retry_interval": "0",
+            "on_success_action": "1", "on_success_step_id": "0",
+            "on_fail_action": "2", "on_fail_step_id": "0"}
+
+    SCRIPT = "\n".join(
+        f"-- section {i}\nINSERT INTO dbo.staging_{i} (id, name)\n"
+        f"SELECT s.id, s.name FROM dbo.source_{i} s\n"
+        f"WHERE s.status IN ('A','B');\n"
+        for i in range(240))
+
+    def _job_with_script(self, cursor, driver, script):
+        from datum.panels import jobs
+        jobs.run_action(cursor, driver, "create-job", [_payload(
+            {"name": JOB, "enabled": True, "description": "",
+             "owner": "sa", "category": "[Uncategorized (Local)]",
+             "notify_eventlog": "0", "notify_email": "0",
+             "delete_level": "0"})])
+        jobs.run_action(cursor, driver, "create-step", [_payload(
+            dict(self.BASE, job_name=JOB, step_name="big",
+                 command=script))])
+
+    def test_a_long_script_is_stored_whole(self, agent, captured):
+        from datum.panels import steps
+
+        cursor, driver = agent
+        # Several times over the 4095 bytes a pty carries in one line,
+        # which is what the form's payload chunking exists for.
+        assert len(self.SCRIPT) > 5 * 4095
+        self._job_with_script(cursor, driver, self.SCRIPT)
+        stored = steps.get_step(cursor, JOB, "1")["command"]
+        assert stored == self.SCRIPT
+        assert stored.endswith(";\n")
+
+    def test_editing_it_hands_back_what_is_stored(self, agent, captured):
+        from datum.panels import jobs
+
+        cursor, driver = agent
+        self._job_with_script(cursor, driver, self.SCRIPT)
+        captured.clear()
+        jobs.run_action(cursor, driver, "edit-step", ["1", JOB])
+        form = [a[0] for k, a in captured if k == "admin_panel"][-1]["form"]
+        field = [f for f in form["fields"] if f["key"] == "command"][0]
+        # Not truncated, and not tidied: the form opens on the script as
+        # the server holds it.
+        assert field["default"] == self.SCRIPT
+
+    def test_the_script_field_says_how_to_edit_it(self, agent, captured):
+        from datum.panels import jobs
+
+        cursor, driver = agent
+        self._job_with_script(cursor, driver, "SELECT 1;")
+        captured.clear()
+        jobs.run_action(cursor, driver, "edit-step", ["1", JOB])
+        form = [a[0] for k, a in captured if k == "admin_panel"][-1]["form"]
+        field = [f for f in form["fields"] if f["key"] == "command"][0]
+        # The language is the step's Type, which is a field of this same
+        # form, so it is named as a sibling to read rather than fixed.
+        assert field["mode_field"] == "subsystem"
+        assert field["modes"]["TSQL"] == "sql"
+        # An SSIS step's command is a package path, not a script.
+        assert "SSIS" not in field["modes"]
+
+    def test_a_script_is_stored_as_written(self, agent, captured):
+        from datum.panels import steps
+
+        cursor, driver = agent
+        # Indented first line, blank lines, trailing newline: a step is
+        # run verbatim, so none of it is the client's to tidy.
+        script = "    SET NOCOUNT ON;\n\nSELECT 1;\n\n"
+        self._job_with_script(cursor, driver, script)
+        assert steps.get_step(cursor, JOB, "1")["command"] == script
