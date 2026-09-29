@@ -336,6 +336,61 @@
        (equal (buffer-local-value 'sql-datum--admin-display-request conn)
               (nth 2 probe))))))
 
+(message "\n=== a panel dispatches to its own connection ===")
+
+;; `sql-find-sqli-buffer' prefers the current buffer's own connection and
+;; falls back to sql.el's global default -- the connection opened most
+;; recently.  An admin panel has no `sql-buffer' of its own, so opening
+;; one panel from another went to whichever server was connected to
+;; last: press the filesystem key in prod's jobs panel and browse dev.
+
+(let ((prod (get-buffer-create "*SQL: dispatch-prod*"))
+      (dev  (get-buffer-create "*SQL: dispatch-dev*")))
+  (dolist (b (list prod dev))
+    (with-current-buffer b
+      (setq-local sql-datum--meta (make-hash-table :test #'equal))
+      (puthash "server" (if (eq b prod) "prod-sql-01" "dev-sql-09")
+               sql-datum--meta)))
+  ;; dev was connected last, so it is what sql.el answers with.
+  (cl-letf (((symbol-function 'sql-find-sqli-buffer)
+             (lambda (&rest _) (buffer-name dev)))
+            ((symbol-function 'get-buffer-process) (lambda (b) (and b t))))
+    (let (sent)
+      (cl-letf (((symbol-function 'sql-datum--enqueue-one)
+                 (lambda (cmd &rest _) (push (cons (buffer-name) cmd) sent))))
+        ;; A panel of prod's, asking for something with no connection
+        ;; named -- which is how the panel entry points send.
+        (sql-datum--admin-show-panel (test-admin-display--panel "jobs") prod)
+        (with-current-buffer (sql-datum--admin-buffer-name "jobs" nil prod)
+          (setq sent nil)
+          (sql-datum--admin-send-command-to nil ":admin filesystem")
+          (test-admin-display-assert
+           "a panel's own connection answers, not the newest one"
+           (equal (car (car sent)) (buffer-name prod)))
+          (test-admin-display-assert
+           "and it is the connection the request was filed against"
+           (eq (sql-datum--admin-connection nil) prod)))
+
+        ;; Away from any panel there is nothing better than sql.el's
+        ;; answer, and that is what is used.
+        (with-temp-buffer
+          (setq sent nil)
+          (sql-datum--admin-send-command-to nil ":admin filesystem")
+          (test-admin-display-assert
+           "elsewhere, sql.el still decides"
+           (equal (car (car sent)) (buffer-name dev))))
+
+        ;; A connection named outright always wins.
+        (with-current-buffer (sql-datum--admin-buffer-name "jobs" nil prod)
+          (setq sent nil)
+          (sql-datum--admin-send-command-to dev ":admin filesystem")
+          (test-admin-display-assert
+           "a named connection is used as given"
+           (equal (car (car sent)) (buffer-name dev)))))))
+  (dolist (b (list prod dev (get-buffer (sql-datum--admin-buffer-name
+                                         "jobs" nil prod))))
+    (when (buffer-live-p b) (kill-buffer b))))
+
 (message "\n%d passed, %d failed"
          test-admin-display--pass test-admin-display--fail)
 (when (> test-admin-display--fail 0)

@@ -4346,12 +4346,17 @@ SQLI-BUF is the originating SQLi buffer."
   (sql-datum--admin-send-command-to sql-datum--admin-sqli-buf cmd))
 
 (defun sql-datum--admin-send-command-to (sqli-buf cmd)
-  "Send CMD to the datum process in SQLI-BUF."
-  (let ((buf (or (and sqli-buf
-                      (buffer-live-p sqli-buf)
-                      sqli-buf)
-                 (let ((b (sql-find-sqli-buffer 'datum)))
-                   (and b (get-buffer b))))))
+  "Send CMD to the datum process in SQLI-BUF.
+
+With no SQLI-BUF, the panel this is being sent from decides.  Without
+that step it fell to `sql-find-sqli-buffer\=', which prefers the current
+buffer\='s own connection — and a panel has none, so it took the global
+default instead: the connection opened most recently.  Opening the
+filesystem panel from another panel therefore browsed whichever server
+was connected to last, not the one being looked at, and the request to
+display it was filed against the panel\='s own connection while the
+command went somewhere else."
+  (let ((buf (sql-datum--admin-connection sqli-buf)))
     (if (and buf (get-buffer-process buf))
         (with-current-buffer buf
           (sql-datum--enqueue-one cmd :silent t :priority :low))
@@ -6140,7 +6145,13 @@ If the SQLi buffer is not currently visible, display it.
 The command is echoed at the process mark so it appears in the
 buffer history, making saved sessions easier to follow.
 When SILENT is non-nil, skip the echo and buffer display."
-  (let ((buf (sql-find-sqli-buffer 'datum)))
+  (let ((buf (or
+              ;; An admin panel knows its own connection; sql.el does
+              ;; not, and would answer with the most recent one.
+              (and (buffer-live-p sql-datum--admin-sqli-buf)
+                   (get-buffer-process sql-datum--admin-sqli-buf)
+                   (buffer-name sql-datum--admin-sqli-buf))
+              (sql-find-sqli-buffer 'datum))))
     (unless buf
       (user-error "No active datum buffer found"))
     (let* ((buf-obj (get-buffer buf))

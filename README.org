@@ -785,6 +785,20 @@ history with =H=, is going somewhere to work, and leaving the cursor
 behind in the list meant the next key pressed went to the wrong buffer.
 A refresh nobody asked for still leaves the cursor where it is.
 
+A panel sends to its *own* connection.  Where no connection is named,
+=sql-find-sqli-buffer= decides, and it prefers the current buffer's own
+=sql-buffer= — which an admin panel does not have, so it fell through to
+sql.el's global default: the connection opened most recently.  Opening
+the filesystem panel from another panel therefore browsed whichever
+server was connected to last rather than the one being looked at.
+
+Away from a panel there is nothing better to go on, so the same global
+default still applies: a =sql-mode= buffer keeps the connection it was
+started from, and any other buffer — dired, a scratch buffer, a file in
+another language — gets the newest one.  =C-c C-b= (=sql-set-sqli-buffer=)
+binds a =sql-mode= buffer to a particular connection, and the =on= line
+under a panel's title says which server it actually reached.
+
 The request names the sub-panel as well as the panel, because the two
 share a name.  A jobs list refreshing on its timer would otherwise
 answer a request made for a job's tree, raising the list and leaving the
