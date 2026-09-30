@@ -189,7 +189,55 @@ need special bcp flags, e.g. to trust a self-signed certificate:
 Nil for databases without schemas.  Set from the default-schema
 meta envelope at connect time.")
 
-(defvar-local sql-datum--meta (make-hash-table :test #'equal)
+(defconst sql-datum--per-connection-tables
+  '(sql-datum--meta sql-datum--columns sql-datum--column-details
+    sql-datum--columns-pending sql-datum--routine-signatures
+    sql-datum--routine-types sql-datum--xdb-cache
+    sql-datum--columns-fetched)
+  "Hash tables that belong to one connection and must not be shared.
+
+Each was declared with `defvar-local\=' and a `make-hash-table\=' initial
+value, which puts a single table in the variable\='s *default* value —
+one table shared by every buffer that never rebinds it, and none of
+them did.  So two connections wrote their metadata into the same table
+and the second overwrote the first: a panel on server one read the
+name of whichever server connected last.  The completion caches went
+the same way, offering one server\='s columns while talking to another.")
+
+(defun sql-datum--init-connection-tables ()
+  "Give this buffer its own copy of each per-connection hash table."
+  (dolist (symbol sql-datum--per-connection-tables)
+    (set (make-local-variable symbol) (make-hash-table :test #'equal))))
+
+(defun sql-datum--ensure-connection-tables ()
+  "Give this buffer its own tables unless it already has them."
+  (unless (local-variable-p 'sql-datum--meta)
+    (sql-datum--init-connection-tables)))
+
+(defvar sql-datum--no-connection-tables (make-hash-table :test #'equal)
+  "Stand-in for a connection that has none of its own yet.
+
+Read from, never written to: a reader outside the connection\='s buffer
+has nothing to record.  It exists so that looking something up before
+the first envelope arrives answers \"nothing known\" instead of failing
+on nil.")
+
+(defun sql-datum--connection-hash (symbol buf)
+  "Return BUF\='s own hash table for SYMBOL.
+
+Never nil, and never BUF\='s neighbour\='s: the completion code runs in
+the SQL buffer and reaches across into the connection, so this is the
+one way it should get there.  A live BUF that has no tables yet is
+given them, so that what is read back is the same table a later write
+will reach.  Only with no buffer at all is the empty stand-in used."
+  (cond
+   ((not (and buf (buffer-live-p buf))) sql-datum--no-connection-tables)
+   ((local-variable-p symbol buf) (buffer-local-value symbol buf))
+   (t (with-current-buffer buf
+        (sql-datum--init-connection-tables)
+        (symbol-value symbol)))))
+
+(defvar-local sql-datum--meta nil
   "Metadata for this datum buffer: server, database, user, version.")
 
 (defvar-local sql-datum--tables nil
@@ -211,33 +259,33 @@ which is what the C-c g keys complete against.")
 (defvar-local sql-datum--routines nil
   "List of routine names populated by :routines introspection.")
 
-(defvar-local sql-datum--columns (make-hash-table :test #'equal)
+(defvar-local sql-datum--columns nil
   "Hash table mapping downcased table name to list of column name strings.
 Keys are always downcased, optionally schema-qualified: \"users\" or
 \"dbo.users\".  Always downcase lookup keys before calling gethash.
 The consistent keying is load-bearing — do not reintroduce maphash
 scans here without first breaking the normalization invariant.")
 
-(defvar-local sql-datum--column-details (make-hash-table :test #'equal)
+(defvar-local sql-datum--column-details nil
   "Hash table mapping downcased table name to full column metadata rows.
 Each value is a list of [col_name type nullable default] vectors.
 Keys follow the same downcased convention as `sql-datum--columns'.")
 
-(defvar-local sql-datum--columns-pending (make-hash-table :test #'equal)
+(defvar-local sql-datum--columns-pending nil
   "Hash table tracking in-flight silent column fetches.
 Keys are downcased table names, values are t.  Prevents duplicate fetch requests.")
 
-(defvar-local sql-datum--routine-signatures (make-hash-table :test #'equal)
+(defvar-local sql-datum--routine-signatures nil
   "Hash table mapping downcased routine name to parameter signature string.
 Keys are always downcased for consistent lookup.
 Populated by the routine-sigs introspect envelope.")
 
-(defvar-local sql-datum--routine-types (make-hash-table :test #'equal)
+(defvar-local sql-datum--routine-types nil
   "Hash table mapping downcased routine name to type string.
 Values are \"FUNCTION\" or \"PROCEDURE\".  Keys are always downcased
 for consistent lookup.  Populated by the routine-types introspect envelope.")
 
-(defvar-local sql-datum--xdb-cache (make-hash-table :test #'equal)
+(defvar-local sql-datum--xdb-cache nil
   "Cross-database completion cache.
 Hash: database name -> plist with keys :tables :schemas :routines
 :routine-types :routine-sigs :pending.
@@ -248,7 +296,7 @@ three-part names are synthesized from the main cache for all dialects.")
   "Non-nil when the Python process is idle and ready for a command.
 Set by the `ready' envelope, cleared when a command is sent.")
 
-(defvar-local sql-datum--columns-fetched (make-hash-table :test #'equal)
+(defvar-local sql-datum--columns-fetched nil
   "Set of table keys (downcased) for which column fetching has been attempted.
 Prevents repeated fetch attempts for the same table across capf invocations.
 Cleared on `sql-datum-refresh'.")
@@ -590,6 +638,10 @@ Handles partial envelope lines split across multiple filter calls."
 
 (defun sql-datum--handle-envelope (type payload)
   "Dispatch on envelope TYPE with PAYLOAD."
+  ;; Envelopes arrive in the connection's own buffer, which is where
+  ;; these tables belong; a buffer that shared them reported another
+  ;; connection's server and completed another connection's columns.
+  (sql-datum--ensure-connection-tables)
   (pcase type
     ("info"
      (message "datum: %s" payload))
@@ -1339,7 +1391,7 @@ panel read `on dev-sql-09'."
                       sql-datum--admin-sqli-buf))))
     (when buf
       (let ((server (gethash "server"
-                             (buffer-local-value 'sql-datum--meta buf) "")))
+                             (sql-datum--connection-hash 'sql-datum--meta buf) "")))
         (and (stringp server) (not (string-empty-p server)) server)))))
 
 (defun sql-datum--admin-insert-table (headers rows row-id &optional shown)
@@ -5181,7 +5233,7 @@ tables).  For completion-time fetches, prefer the synchronous
 `sql-datum--fetch-columns-sync' which blocks briefly with timeout."
   ;; All cache keys are downcased — normalize the lookup key.
   (let ((key (downcase table))
-        (fetched-hash (buffer-local-value 'sql-datum--columns-fetched buf)))
+        (fetched-hash (sql-datum--connection-hash 'sql-datum--columns-fetched buf)))
     (sql-datum--trace "fetch-columns-async: table=%s key=%s cached=%s pending=%s ready=%s"
                       table key
                       (if (gethash key col-hash) "yes" "no")
@@ -5215,9 +5267,9 @@ cached or `sql-datum-column-fetch-timeout' expires.
 Tables already in `sql-datum--columns-fetched' are skipped to prevent
 repeated fetch attempts across capf invocations."
   (let* ((proc (get-buffer-process buf))
-         (col-hash (buffer-local-value 'sql-datum--columns buf))
-         (pending-hash (buffer-local-value 'sql-datum--columns-pending buf))
-         (fetched-hash (buffer-local-value 'sql-datum--columns-fetched buf)))
+         (col-hash (sql-datum--connection-hash 'sql-datum--columns buf))
+         (pending-hash (sql-datum--connection-hash 'sql-datum--columns-pending buf))
+         (fetched-hash (sql-datum--connection-hash 'sql-datum--columns-fetched buf)))
     (when (and proc col-hash pending-hash)
       (let ((needed nil))
         ;; Enqueue fetches for uncached tables via the normal queue path.
@@ -5312,7 +5364,7 @@ Returns a completion spec or nil if PREFIX is not a known database."
                               db-part dbs))))
          (current-db (and db-match buf
                           (gethash "database"
-                                   (buffer-local-value 'sql-datum--meta buf)
+                                   (sql-datum--connection-hash 'sql-datum--meta buf)
                                    ""))))
     (when db-match
       (if (string-equal-ignore-case db-match current-db)
@@ -5322,8 +5374,8 @@ Returns a completion spec or nil if PREFIX is not a known database."
                  (db-pfx   (concat db-match "."))
                  (all-cands (mapcar (lambda (c) (concat db-pfx c))
                                     (append tables routines)))
-                 (cur-rtypes (buffer-local-value 'sql-datum--routine-types buf))
-                 (cur-sigs   (buffer-local-value 'sql-datum--routine-signatures buf))
+                 (cur-rtypes (sql-datum--connection-hash 'sql-datum--routine-types buf))
+                 (cur-sigs   (sql-datum--connection-hash 'sql-datum--routine-signatures buf))
                  ;; Capture for closures
                  (the-dialect dialect)
                  (the-tables  (mapcar (lambda (c) (concat db-pfx c)) tables))
@@ -5423,9 +5475,9 @@ Completing a FUNCTION name auto-inserts parentheses."
     (let* ((buf (or (and (derived-mode-p 'sql-interactive-mode) (current-buffer))
                     (let ((b (sql-find-sqli-buffer 'datum)))
                       (and b (get-buffer b)))))
-           (sigs     (and buf (buffer-local-value 'sql-datum--routine-signatures buf)))
-           (rtypes   (and buf (buffer-local-value 'sql-datum--routine-types buf)))
-           (col-hash (and buf (buffer-local-value 'sql-datum--columns  buf)))
+           (sigs     (and buf (sql-datum--connection-hash 'sql-datum--routine-signatures buf)))
+           (rtypes   (and buf (sql-datum--connection-hash 'sql-datum--routine-types buf)))
+           (col-hash (and buf (sql-datum--connection-hash 'sql-datum--columns buf)))
            (dialect (and buf (buffer-local-value 'sql-datum--dialect buf)))
            (routine-ctx (sql-datum--find-param-routine sigs))
            (in-parens (nth 1 (syntax-ppss))))
@@ -5481,7 +5533,7 @@ Completing a FUNCTION name auto-inserts parentheses."
                ;; Strip quotes from prefix so it matches bare candidates
                (dialect (and buf (buffer-local-value 'sql-datum--dialect buf)))
                (dbs     (and buf (buffer-local-value 'sql-datum--databases buf)))
-               (xdb-cache (and buf (buffer-local-value 'sql-datum--xdb-cache buf)))
+               (xdb-cache (and buf (sql-datum--connection-hash 'sql-datum--xdb-cache buf)))
                ;; Check for database-qualified prefix (any dialect).
                ;; Use raw-prefix so trailing dots are preserved
                ;; (e.g. "CDW_NEW." keeps the dot for db-part extraction).
@@ -5516,8 +5568,7 @@ Completing a FUNCTION name auto-inserts parentheses."
                   ;; completion (TAB) to avoid freezing on idle typing.
                   ;; Clear the fetched guard for the target table so that
                   ;; qualified column completion always gets a fresh attempt.
-                  (let ((fetched-hash (and buf (buffer-local-value
-                                                'sql-datum--columns-fetched buf)))
+                  (let ((fetched-hash (and buf (sql-datum--connection-hash 'sql-datum--columns-fetched buf)))
                         (all-tables (cons resolved
                                          (cl-remove resolved
                                                     (mapcar #'cdr aliases)
@@ -5529,16 +5580,14 @@ Completing a FUNCTION name auto-inserts parentheses."
                       (dolist (tbl all-tables)
                         (sql-datum--fetch-columns-async
                          tbl buf col-hash
-                         (buffer-local-value
-                          'sql-datum--columns-pending buf)))))
+                         (sql-datum--connection-hash 'sql-datum--columns-pending buf)))))
                   ;; Only return column completion when columns are
                   ;; actually cached; otherwise fall through to normal
                   ;; completion so the user still gets useful candidates.
                   (when (gethash resolved-key col-hash)
                     (list start end
                           (lambda (string pred action)
-                            (let* ((cur-col-hash (and buf (buffer-local-value
-                                                           'sql-datum--columns buf)))
+                            (let* ((cur-col-hash (and buf (sql-datum--connection-hash 'sql-datum--columns buf)))
                                    (tbl-cols (when cur-col-hash
                                                (gethash resolved-key cur-col-hash)))
                                    (qualified (when tbl-cols
@@ -5550,8 +5599,7 @@ Completing a FUNCTION name auto-inserts parentheses."
                           :exclusive t
                           :annotation-function
                           (lambda (cand)
-                            (let* ((cur-details (and buf (buffer-local-value
-                                                          'sql-datum--column-details buf)))
+                            (let* ((cur-details (and buf (sql-datum--connection-hash 'sql-datum--column-details buf)))
                                    (detail-rows (when cur-details
                                                   (gethash resolved-key cur-details)))
                                    (col-name (and (string-match-p "\\." cand)
@@ -5615,7 +5663,7 @@ Completing a FUNCTION name auto-inserts parentheses."
                           (let* ((cur-tables (and buf (buffer-local-value 'sql-datum--tables buf)))
                                  (cur-schemas (and buf (buffer-local-value 'sql-datum--schemas buf)))
                                  (cur-routines (and buf (buffer-local-value 'sql-datum--routines buf)))
-                                 (cur-col-hash (and buf (buffer-local-value 'sql-datum--columns buf)))
+                                 (cur-col-hash (and buf (sql-datum--connection-hash 'sql-datum--columns buf)))
                                  (cur-col-count (when cur-col-hash (hash-table-count cur-col-hash)))
                                  (cur-dbs (and buf (buffer-local-value 'sql-datum--databases buf)))
                                  (stale (or (not (eq cur-tables cache--tables))
@@ -5652,8 +5700,7 @@ Completing a FUNCTION name auto-inserts parentheses."
                                                             (push (substring r (length ds-prefix)) result)))
                                                         (nreverse result))))
                                      ;; Re-check for async-fetched columns
-                                     (cur-pending (and buf (buffer-local-value
-                                                             'sql-datum--columns-pending buf)))
+                                     (cur-pending (and buf (sql-datum--connection-hash 'sql-datum--columns-pending buf)))
                                      (ctx-columns
                                       (when (and stmt-tables cur-col-hash)
                                         (let (result)
@@ -5730,8 +5777,7 @@ Completing a FUNCTION name auto-inserts parentheses."
                             (sql-datum--maybe-quote-completed
                              cand comp-start dialect)
                             ;; Resolve bare→qualified for routine paren check
-                            (let* ((cur-rtypes (and buf (buffer-local-value
-                                                          'sql-datum--routine-types buf)))
+                            (let* ((cur-rtypes (and buf (sql-datum--connection-hash 'sql-datum--routine-types buf)))
                                    (cur-dialect (and buf (buffer-local-value
                                                            'sql-datum--dialect buf)))
                                    (resolved-cand (if (and ds-prefix
@@ -5794,7 +5840,7 @@ inside parentheses), searches backward to find the routine name."
     (let* ((buf (or (and (derived-mode-p 'sql-interactive-mode) (current-buffer))
                     (let ((b (sql-find-sqli-buffer 'datum)))
                       (and b (get-buffer b)))))
-           (sigs (and buf (buffer-local-value 'sql-datum--routine-signatures buf))))
+           (sigs (and buf (sql-datum--connection-hash 'sql-datum--routine-signatures buf))))
       (when (and sigs (> (hash-table-count sigs) 0))
         (or (sql-datum--lookup-signature (sql-datum--identifier-at-point) sigs)
             (sql-datum--eldoc-search-backward sigs))))))
@@ -6184,7 +6230,7 @@ in the candidate list."
   (let* ((buf (sql-find-sqli-buffer 'datum))
          (buf-obj (and buf (get-buffer buf)))
          (tables (and buf-obj (buffer-local-value 'sql-datum--tables buf-obj)))
-         (xdb-cache (and buf-obj (buffer-local-value 'sql-datum--xdb-cache buf-obj)))
+         (xdb-cache (and buf-obj (sql-datum--connection-hash 'sql-datum--xdb-cache buf-obj)))
          ;; Collect cross-database tables (already stored as db.schema.table).
          (xdb-tables
           (when (and xdb-cache (> (hash-table-count xdb-cache) 0))
@@ -6518,8 +6564,7 @@ With a prefix argument, prompt for a filter pattern."
   (interactive (list (sql-datum--read-table "Columns for table: ")))
   (let* ((buf (sql-find-sqli-buffer 'datum))
          (database (and buf (gethash "database"
-                                     (buffer-local-value 'sql-datum--meta
-                                                         (get-buffer buf))
+                                     (sql-datum--connection-hash 'sql-datum--meta (get-buffer buf))
                                      ""))))
     (sql-datum--send-command (format ":columns %s" table))
     (message "datum: columns for %s%s"
@@ -6617,6 +6662,7 @@ it is offered as the default."
     (when buf
       (with-current-buffer (get-buffer buf)
         ;; Clear cross-database cache — context has changed
+        (sql-datum--ensure-connection-tables)
         (clrhash sql-datum--xdb-cache)
         (letrec ((watcher
                   (lambda (output)
@@ -6744,12 +6790,12 @@ Also re-fetches any cross-database caches built during this session."
                        (current-buffer))
                   (let ((b (sql-find-sqli-buffer 'datum)))
                     (and b (get-buffer b)))))
-         (xdb-cache (and buf (buffer-local-value
-                              'sql-datum--xdb-cache buf))))
+         (xdb-cache (and buf (sql-datum--connection-hash 'sql-datum--xdb-cache buf))))
     (when buf
       (sql-datum--refresh-async buf)
       ;; Clear column fetch tracking so new completions re-fetch
       (with-current-buffer buf
+        (sql-datum--ensure-connection-tables)
         (clrhash sql-datum--columns-fetched)))
     ;; Re-fetch any previously introspected cross-databases
     (when xdb-cache
@@ -6758,6 +6804,7 @@ Also re-fetches any cross-database caches built during this session."
                  xdb-cache)
         (when dbs-to-refresh
           (with-current-buffer buf
+            (sql-datum--ensure-connection-tables)
             (clrhash sql-datum--xdb-cache)
             ;; Each refresh-db is one additional bg task
             (cl-incf sql-datum--bg-pending (length dbs-to-refresh))
@@ -6871,8 +6918,8 @@ by the time the user presses TAB."
   (let* ((buf (sql-find-sqli-buffer 'datum))
          (buf-obj (and buf (get-buffer buf))))
     (when buf-obj
-      (let ((col-hash (buffer-local-value 'sql-datum--columns buf-obj))
-            (pending  (buffer-local-value 'sql-datum--columns-pending buf-obj)))
+      (let ((col-hash (sql-datum--connection-hash 'sql-datum--columns buf-obj))
+            (pending  (sql-datum--connection-hash 'sql-datum--columns-pending buf-obj)))
         (when (and col-hash pending)
           (sql-datum--fetch-columns-async table buf-obj col-hash pending))))))
 
@@ -6919,8 +6966,7 @@ If columns are cached for the table, includes them in the template."
   (interactive)
   (let* ((table (sql-datum--read-table "Insert into table: "))
          (buf (sql-find-sqli-buffer 'datum))
-         (col-hash (and buf (buffer-local-value 'sql-datum--columns
-                                                (get-buffer buf))))
+         (col-hash (and buf (sql-datum--connection-hash 'sql-datum--columns (get-buffer buf))))
          (cols (and col-hash (gethash (downcase table) col-hash))))
     (unless cols (sql-datum--prefetch-columns table))
     (if cols

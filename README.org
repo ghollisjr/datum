@@ -806,6 +806,21 @@ tree — the thing actually asked for — unshown.  For the same reason each
 entry point names what it opens; without that, pressing =d= on a tree
 that had been built once and then buried did nothing at all.
 
+Per-connection state is the connection buffer's own.  The metadata a
+connection reports — server, database, user, version — and the
+completion caches built from it live in hash tables declared
+=defvar-local=, which puts a single table in the variable's *default*
+value: one table shared by every buffer that never rebinds it, and none
+of them did.  So a second connection's metadata overwrote the first's in
+the same table, and a panel on server one reported the name of whichever
+server connected last; the completion caches went the same way, offering
+one server's columns while talking to another.  Each connection is given
+its own tables when its first envelope arrives, and the defaults are
+=nil= so that a missed one fails loudly rather than silently sharing
+again.  Code that reaches across from a SQL buffer into its connection
+goes through =sql-datum--connection-hash=, which answers with that
+connection's table or an empty stand-in, never a neighbour's.
+
 Every panel names the server it is on, under its title, and carries the
 connection in its buffer name — =*datum-admin:databases [prod]*=.  Both
 matter once more than one connection is open: a listing or a database

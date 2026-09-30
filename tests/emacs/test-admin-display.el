@@ -391,6 +391,67 @@
                                          "jobs" nil prod))))
     (when (buffer-live-p b) (kill-buffer b))))
 
+(message "\n=== each connection keeps its own metadata ===")
+
+;; `defvar-local' with a `make-hash-table' initial value puts ONE table
+;; in the variable's default, shared by every buffer that never rebinds
+;; it -- and none did.  So two connections wrote their metadata into the
+;; same table, the second overwrote the first, and a panel on server one
+;; read the name of whichever server connected last.
+
+(let ((one (get-buffer-create "*SQL: meta-one*"))
+      (two (get-buffer-create "*SQL: meta-two*")))
+  ;; Exactly how it happens: each connection reports in its own buffer.
+  (with-current-buffer one
+    (sql-datum--handle-envelope "meta" "server:server-ONE"))
+  (with-current-buffer two
+    (sql-datum--handle-envelope "meta" "server:server-TWO"))
+
+  (test-admin-display-assert
+   "the two connections do not share one table"
+   (not (eq (buffer-local-value 'sql-datum--meta one)
+            (buffer-local-value 'sql-datum--meta two))))
+  (test-admin-display-assert
+   "the first connection still knows its own server"
+   (equal (sql-datum--admin-connected-to one) "server-ONE"))
+  (test-admin-display-assert
+   "and the second knows its own"
+   (equal (sql-datum--admin-connected-to two) "server-TWO"))
+
+  ;; The completion caches were shared the same way, which offered one
+  ;; server's columns while talking to another.
+  (puthash "dbo.orders" '("id" "total")
+           (sql-datum--connection-hash 'sql-datum--columns one))
+  (test-admin-display-assert
+   "one connection's columns do not leak into another"
+   (null (gethash "dbo.orders"
+                  (sql-datum--connection-hash 'sql-datum--columns two))))
+  (test-admin-display-assert
+   "while its own are still there"
+   (equal (gethash "dbo.orders"
+                   (sql-datum--connection-hash 'sql-datum--columns one))
+          '("id" "total")))
+
+  ;; Reading before a connection has said anything must answer "nothing
+  ;; known", not fail and not hand back a table someone else writes to.
+  (let ((fresh (get-buffer-create "plain.sql")))
+    (test-admin-display-assert
+     "a buffer that has not connected reads as empty"
+     (null (gethash "dbo.orders"
+                    (sql-datum--connection-hash 'sql-datum--columns fresh))))
+    (test-admin-display-assert
+     "and with no buffer at all, likewise"
+     (hash-table-p (sql-datum--connection-hash 'sql-datum--columns nil)))
+    (kill-buffer fresh))
+
+  ;; Every one of them, not just the two that were noticed.
+  (dolist (symbol sql-datum--per-connection-tables)
+    (test-admin-display-assert
+     (format "%s is the connection's own" symbol)
+     (not (eq (buffer-local-value symbol one)
+              (buffer-local-value symbol two)))))
+  (dolist (b (list one two)) (kill-buffer b)))
+
 (message "\n%d passed, %d failed"
          test-admin-display--pass test-admin-display--fail)
 (when (> test-admin-display--fail 0)
