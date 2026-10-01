@@ -7080,6 +7080,54 @@ With prefix ARG, prompts for join type (LEFT, RIGHT, etc.)."
 
 ;; Override buffer display behavior after connecting, controlled by
 ;; `sql-datum-connect-buffer-display'.  sql-product-interactive calls
+(defcustom sql-datum-connect-adopts-existing t
+  "Whether connecting to a connection already open switches to it.
+
+`sql-connect\=' displays an already-running session and stops there: the
+buffer it was called from goes on sending to whatever it sent to
+before.  Nothing reports this, so asking to connect to a server you are
+already connected to looks like it worked and changes nothing.  With
+this on, that case does what \[sql-set-sqli-buffer] would have done,
+which is what was meant by asking.
+
+Only `sql-mode\=' buffers are repointed, the same restriction
+`sql-product-interactive\=' puts on the case where it does start a new
+session."
+  :type 'boolean
+  :group 'SQL)
+
+;; `sql-product-interactive' has two paths.  Starting a session sets
+;; `sql-buffer' in the buffer it was called from and the global default;
+;; finding one already running calls `sql-display-buffer' and does
+;; neither, so the connection is shown without being adopted.
+(define-advice sql-product-interactive (:around (orig-fn &optional product new-name)
+                                                sql-datum--adopt-existing)
+  "Adopt a connection that was already open instead of only showing it."
+  (let* ((start (current-buffer))
+         (before (and (buffer-live-p start)
+                      (buffer-local-value 'sql-buffer start)))
+         (result (funcall orig-fn product new-name)))
+    (when (and sql-datum-connect-adopts-existing
+               (buffer-live-p start)
+               (with-current-buffer start (derived-mode-p 'sql-mode)))
+      (with-current-buffer start
+        ;; Unchanged means the session was found rather than started.
+        ;; Which one it is comes from the connection just asked for, the
+        ;; same question `sql-product-interactive' asked to find it.
+        (when (equal sql-buffer before)
+          (let ((found (sql-find-sqli-buffer (or (and (assoc product
+                                                             sql-product-alist)
+                                                      product)
+                                                 sql-product)
+                                             sql-connection)))
+            (when (and found (not (equal found sql-buffer)))
+              (setq sql-buffer found)
+              (setq-default sql-buffer found)
+              (run-hooks 'sql-set-sqli-hook)
+              (message "datum: already connected — this buffer now sends to %s"
+                       found))))))
+    result))
+
 ;; sql-display-buffer which uses pop-to-buffer; we intercept it to
 ;; support staying in the current buffer.
 (define-advice sql-display-buffer (:around (orig-fn buf)

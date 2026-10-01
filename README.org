@@ -557,6 +557,32 @@ The final key in each sequence also works with Control held (e.g.
 =C-c C-x C-c= is equivalent to =C-c C-x c=), following the SLIME
 convention.
 
+**** Connecting to something already connected
+
+=C-c C-x c= on a connection that is already open switches to it.  That
+is not sql.el's behaviour: =sql-product-interactive= has two paths, and
+only one of them adopts the session.  Starting a new one points
+=sql-buffer= in the buffer you called from at it and updates the global
+default; *finding* one already running calls =sql-display-buffer= and
+does neither.  So reconnecting showed the right session, reported no
+error, and left the buffer sending where it sent before:
+
+: before: work.sql sends to *SQL: <two>*
+: sql-connect reported no error; it displayed: "*SQL: <one>*"
+: after:  work.sql sends to *SQL: <two>*
+
+Which is easy to walk into once there are more than two connections open
+and no reason to remember which: nothing says anything, so the next
+statement runs on the wrong server.  Datum fills in the missing half,
+doing what =C-c C-x n= would have done and saying so:
+
+: datum: already connected — this buffer now sends to *SQL: <one>*
+
+Only =sql-mode= buffers are repointed, the same restriction sql.el puts
+on the path where it does start a session.  Starting a genuinely new
+connection is untouched.  Set =sql-datum-connect-adopts-existing= to
+=nil= for sql.el's behaviour.
+
 *** Query templates (=C-c i=)
 
 | Key       | Command                             | Description                                      |

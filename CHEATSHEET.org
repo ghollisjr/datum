@@ -106,10 +106,14 @@ and =M-,= your way back through the stack.
 
 | Key           | Action                                     |
 |---------------+--------------------------------------------|
-| =C-c C-x c=   | Connect to a named connection              |
+| =C-c C-x c=   | Connect, or switch to it if already open   |
 | =C-c C-x n=   | Switch active SQLi buffer                  |
 | =C-c C-x s=   | Open scratch SQL buffer (=C-u= for extra)  |
 | =C-c C-x d=   | Disconnect session                         |
+
+=C-c C-x c= on a connection already open switches this buffer to it —
+sql.el would show it and leave you sending to the old one.  Set
+=sql-datum-connect-adopts-existing= to nil for sql.el's behaviour.
 
 ** Query Templates (=C-c i=)
 
