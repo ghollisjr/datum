@@ -110,10 +110,16 @@ and =M-,= your way back through the stack.
 | =C-c C-x n=   | Switch active SQLi buffer                  |
 | =C-c C-x s=   | Open scratch SQL buffer (=C-u= for extra)  |
 | =C-c C-x d=   | Disconnect session                         |
+| =C-c C-x r=   | Reconnect (restart the session in place)   |
 
 =C-c C-x c= on a connection already open switches this buffer to it —
 sql.el would show it and leave you sending to the old one.  Set
 =sql-datum-connect-adopts-existing= to nil for sql.el's behaviour.
+
+A session can go stale while its process stays alive (network drop), and
+sql.el then has nothing to restart.  =C-c C-x r= restarts it in place,
+keeping the buffer name so scratch buffers and panels stay attached;
+=C-c C-x c= on the connection you are already on offers the same.
 
 ** Query Templates (=C-c i=)
 

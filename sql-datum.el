@@ -7056,6 +7056,8 @@ With prefix ARG, prompts for join type (LEFT, RIGHT, etc.)."
   (define-key sql-mode-map (kbd "C-c C-x C-s") #'sql-datum-scratch)
   (define-key sql-mode-map (kbd "C-c C-x d")   #'sql-datum-disconnect)
   (define-key sql-mode-map (kbd "C-c C-x C-d") #'sql-datum-disconnect)
+  (define-key sql-mode-map (kbd "C-c C-x r")   #'sql-datum-reconnect)
+  (define-key sql-mode-map (kbd "C-c C-x C-r") #'sql-datum-reconnect)
   ;; C-c s w: copy last result (w = kill-ring-save convention)
   (define-key sql-mode-map (kbd "C-c s w") #'sql-datum-copy-last-result)
   ;; C-c i: query templates
@@ -7080,6 +7082,82 @@ With prefix ARG, prompts for join type (LEFT, RIGHT, etc.)."
 
 ;; Override buffer display behavior after connecting, controlled by
 ;; `sql-datum-connect-buffer-display'.  sql-product-interactive calls
+(defvar sql-datum--reconnecting nil
+  "Bound while `sql-datum-reconnect\=' is restarting a session.
+It reconnects by connecting again, which would otherwise come back
+through the connect advice and be offered a reconnect of its own.")
+
+(defun sql-datum--session-buffer ()
+  "Return the datum session buffer this buffer belongs to, or nil."
+  (let ((name (cond
+               ((and (derived-mode-p 'sql-mode) sql-buffer) sql-buffer)
+               ((derived-mode-p 'sql-interactive-mode) (buffer-name))
+               (t (sql-find-sqli-buffer 'datum)))))
+    (and name (get-buffer name))))
+
+(defun sql-datum--session-busy-p (buf)
+  "Return non-nil if BUF has a command in flight."
+  (and (buffer-live-p buf)
+       (with-current-buffer buf
+         (or sql-datum--queue-current sql-datum--command-queue))))
+
+(defun sql-datum-reconnect (&optional buf)
+  "Restart the datum session in BUF, keeping its buffer.
+
+A session can go stale without its process dying: the network drops, or
+the server closes the connection, and the ODBC handle inside a perfectly
+healthy Python process is no longer good for anything.  sql.el sees a
+live process and so `sql-connect\=' only shows the session again, which
+left killing the buffer by hand as the only way back.
+
+Restarting in place is better than that: the buffer keeps its name, so
+every scratch buffer and admin panel pointed at this session stays
+pointed at it, where killing the buffer detaches them all."
+  (interactive)
+  (let ((buf (or buf (sql-datum--session-buffer)))
+        (sql-datum--reconnecting t))
+    (unless (buffer-live-p buf)
+      (user-error "No datum session to reconnect"))
+    (let ((connection (buffer-local-value 'sql-connection buf))
+          (name (buffer-name buf)))
+      (when (and (sql-datum--session-busy-p buf)
+                 (not (yes-or-no-p
+                       (format "%s has a command in flight; reconnect anyway? "
+                               name))))
+        (user-error "Left alone"))
+      ;; The queue describes a process that is about to be gone.
+      (with-current-buffer buf
+        (setq sql-datum--command-queue nil
+              sql-datum--queue-current nil
+              sql-datum--queue-remaining nil
+              sql-datum--ready nil))
+      (let ((proc (get-buffer-process buf)))
+        (when (and proc (process-live-p proc))
+          (ignore-errors (comint-send-string proc ":exit\n"))
+          (sit-for 0.2)
+          (when (process-live-p proc) (delete-process proc))))
+      ;; With no live process the buffer's own name is free again, so
+      ;; sql.el starts the new session in it rather than beside it.
+      (if connection
+          (sql-connect connection)
+        ;; Nothing names what this session was: the login parameters are
+        ;; whatever is current, which is why a named connection is worth
+        ;; having.
+        (message "datum: %s was not opened from a named connection; \
+reconnecting with the current login parameters" name)
+        (sql-product-interactive 'datum name))
+      (message "datum: reconnected %s" name))))
+
+(defun sql-datum--offer-reconnect (name)
+  "Offer to restart the session called NAME, which is already current.
+
+Asking to connect to the connection this buffer is already on cannot
+mean \"take me there\" -- it is already there.  What it does mean, when
+a session has gone stale behind a live process, is this."
+  (when (yes-or-no-p (format "Already connected to %s; restart the session? "
+                             name))
+    (sql-datum-reconnect (get-buffer name))))
+
 (defcustom sql-datum-connect-adopts-existing t
   "Whether connecting to a connection already open switches to it.
 
@@ -7096,6 +7174,22 @@ session."
   :type 'boolean
   :group 'SQL)
 
+(defun sql-datum--would-reuse-session (product new-name)
+  "Return the session `sql-product-interactive\=' would show rather than start.
+
+This is sql.el\='s own condition, asked before the call so that the two
+paths can be told apart afterwards.  Asking afterwards does not work:
+restarting a session whose process had died reuses the buffer, and so
+reuses its name, which makes \"the name did not change\" true of both
+paths."
+  (let* ((prod (or (and (assoc product sql-product-alist) product) sql-product))
+         (existing (sql-find-sqli-buffer prod sql-connection)))
+    (and existing
+         (or (not new-name)
+             (and (stringp new-name)
+                  (string-match-p (regexp-quote new-name) existing)))
+         existing)))
+
 ;; `sql-product-interactive' has two paths.  Starting a session sets
 ;; `sql-buffer' in the buffer it was called from and the global default;
 ;; finding one already running calls `sql-display-buffer' and does
@@ -7104,28 +7198,26 @@ session."
                                                 sql-datum--adopt-existing)
   "Adopt a connection that was already open instead of only showing it."
   (let* ((start (current-buffer))
-         (before (and (buffer-live-p start)
-                      (buffer-local-value 'sql-buffer start)))
+         (reuse (and sql-datum-connect-adopts-existing
+                     (not sql-datum--reconnecting)
+                     (derived-mode-p 'sql-mode)
+                     (sql-datum--would-reuse-session product new-name)))
          (result (funcall orig-fn product new-name)))
-    (when (and sql-datum-connect-adopts-existing
-               (buffer-live-p start)
-               (with-current-buffer start (derived-mode-p 'sql-mode)))
+    (when (and reuse (buffer-live-p start))
       (with-current-buffer start
-        ;; Unchanged means the session was found rather than started.
-        ;; Which one it is comes from the connection just asked for, the
-        ;; same question `sql-product-interactive' asked to find it.
-        (when (equal sql-buffer before)
-          (let ((found (sql-find-sqli-buffer (or (and (assoc product
-                                                             sql-product-alist)
-                                                      product)
-                                                 sql-product)
-                                             sql-connection)))
-            (when (and found (not (equal found sql-buffer)))
-              (setq sql-buffer found)
-              (setq-default sql-buffer found)
-              (run-hooks 'sql-set-sqli-hook)
-              (message "datum: already connected — this buffer now sends to %s"
-                       found))))))
+        (cond
+         ((not (equal reuse sql-buffer))
+          (setq sql-buffer reuse)
+          (setq-default sql-buffer reuse)
+          (run-hooks 'sql-set-sqli-hook)
+          (message "datum: already connected — this buffer now sends to %s%s"
+                   reuse
+                   (if (sql-datum--session-busy-p (get-buffer reuse))
+                       " (waiting on a command; C-c C-x r reconnects)"
+                     "")))
+         ;; Already pointed at it, so there is nowhere to switch to and
+         ;; connecting would otherwise do nothing at all.
+         (t (sql-datum--offer-reconnect reuse)))))
     result))
 
 ;; sql-display-buffer which uses pop-to-buffer; we intercept it to

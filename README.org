@@ -552,6 +552,7 @@ dialect-aware: they use =TOP= / =NEWID()= / =OBJECT_ID()= on MSSQL and
 | =C-c C-x n=     | =sql-set-sqli-buffer=    | Switch active SQLi buffer            |
 | =C-c C-x s=     | =sql-datum-scratch=      | Open scratch SQL buffer (=C-u= for additional) |
 | =C-c C-x d=     | =sql-datum-disconnect=   | Disconnect session (scratch buffers kept)        |
+| =C-c C-x r=     | =sql-datum-reconnect=    | Restart the session in place                     |
 
 The final key in each sequence also works with Control held (e.g.
 =C-c C-x C-c= is equivalent to =C-c C-x c=), following the SLIME
@@ -582,6 +583,44 @@ Only =sql-mode= buffers are repointed, the same restriction sql.el puts
 on the path where it does start a session.  Starting a genuinely new
 connection is untouched.  Set =sql-datum-connect-adopts-existing= to
 =nil= for sql.el's behaviour.
+
+**** Reconnecting a session that has gone stale
+
+A session can go stale without its process dying: the network drops, or
+the server closes the connection, and the ODBC handle inside a perfectly
+healthy Python process is no longer good for anything.  Measured against
+the three states a session can be in:
+
+| State                              | =C-c C-x c= did               |
+|------------------------------------+-------------------------------|
+| alive and healthy                  | showed it (now switches to it) |
+| process died                       | restarted it in place         |
+| process alive, connection stale     | *nothing*                     |
+
+The middle row is sql.el's own doing and already worked —
+=sql-generate-unique-sqli-buffer-name= reuses the name of a SQLi buffer
+whose process is gone, so the session comes back in the same buffer.
+The last row is the one with no answer: sql.el sees a live process,
+takes the path that only shows the session, and there is nothing it
+could check that would tell it otherwise.
+
+=C-c C-x r= (=sql-datum-reconnect=) restarts a session in place.  That is
+better than killing the buffer and connecting again, which was the only
+way before: the buffer keeps its name, so every scratch buffer and admin
+panel pointed at this session stays pointed at it, where killing it
+detaches them all.  A session with a command in flight is asked about
+first — it may be a long query rather than a dead link.
+
+=C-c C-x c= on the connection the buffer is *already* on offers the same
+thing, since switching there is a no-op and so connecting could only
+have meant this.  Asking for a connection you are not on still simply
+switches, and mentions the reconnect key if that session is waiting on
+something.
+
+A session opened from =sql-connection-alist= reconnects with the
+connection's own parameters.  One opened by hand has nothing naming what
+it was, so it reconnects with whatever login parameters are current —
+which is a reason to use named connections.
 
 *** Query templates (=C-c i=)
 
