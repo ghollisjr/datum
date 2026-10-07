@@ -452,6 +452,132 @@
               (buffer-local-value symbol two)))))
   (dolist (b (list one two)) (kill-buffer b)))
 
+(message "\n=== q closes a panel for good ===")
+
+;; `q\=' stops the panel's timer and kills its buffer, but a refresh the
+;; timer had already sent is on its way regardless.  It arrives to find
+;; no buffer, which the display code reads as a panel being opened for
+;; the first time -- and pops it up again.  So quitting a panel while it
+;; was refreshing closed it and then reopened it.
+
+(defun test-admin-display--panels ()
+  "Return the admin panel buffers that exist."
+  (seq-filter (lambda (n) (string-prefix-p "*datum-admin:" n))
+              (mapcar #'buffer-name (buffer-list))))
+
+(defun test-admin-display--arrive (json conn)
+  "Deliver JSON on CONN the way the process filter does.
+
+Through the envelope handler, not straight into the renderer: a
+refresh arriving after `q\=' is turned away there, which is the only
+place that can tell an answer nobody is waiting for from a redraw."
+  (with-current-buffer conn (sql-datum--handle-admin-panel json))
+  (sit-for 0.05))
+
+(defun test-admin-display--activity-json ()
+  (concat "{\"panel\":\"activity\",\"headers\":[\"A\",\"B\"],"
+          "\"rows\":[[\"1\",\"x\"]],\"row_id\":0,"
+          "\"actions\":[],\"info\":null}"))
+
+(defun test-admin-display--tree-json ()
+  (concat "{\"panel\":\"jobs\",\"sub_panel\":\"detail\","
+          "\"title\":\"Job: nightly load\","
+          "\"sections\":[{\"title\":\"Steps\",\"headers\":[\"Step\"],"
+          "\"rows\":[[\"1\"]],\"row_id\":0,\"actions\":[]}],"
+          "\"info\":null,\"context\":{\"job_name\":\"nightly load\"}}"))
+
+(let ((conn test-admin-display--connection)
+      (panel "*datum-admin:activity [display-test]*"))
+  (dolist (n (test-admin-display--panels)) (kill-buffer n))
+  (with-current-buffer conn
+    (setq sql-datum--admin-display-request nil
+          sql-datum--admin-quit-requests nil))
+
+  (test-admin-display--show "activity" t)
+  (test-admin-display-assert "the panel is open and polling"
+                             (and (get-buffer panel)
+                                  (buffer-local-value 'sql-datum--admin-timer
+                                                      (get-buffer panel))))
+  (with-current-buffer panel
+    (switch-to-buffer (current-buffer))
+    (sql-datum-admin-quit))
+  (test-admin-display-assert "q closes it" (null (get-buffer panel)))
+
+  ;; The refresh that was already in flight.
+  (test-admin-display--arrive (test-admin-display--activity-json) conn)
+  (test-admin-display-assert "a refresh already in flight does not reopen it"
+                             (null (get-buffer panel)))
+  ;; However many were in flight.
+  (test-admin-display--arrive (test-admin-display--activity-json) conn)
+  (test-admin-display-assert "nor does a second one"
+                             (null (get-buffer panel)))
+
+  ;; Asking for it again is a different matter.
+  (test-admin-display--show "activity" t)
+  (test-admin-display-assert "asking for it again opens it"
+                             (and (get-buffer panel) t))
+
+  ;; One panel quit must not silence another, nor the same panel on
+  ;; another connection.
+  (with-current-buffer panel
+    (switch-to-buffer (current-buffer))
+    (sql-datum-admin-quit))
+  (test-admin-display--show "jobs" t)
+  (test-admin-display-assert "quitting one panel does not silence another"
+                             (and (get-buffer
+                                   "*datum-admin:jobs [display-test]*") t))
+  (let ((other (test-admin-display--connect "quit-other" "other-sql")))
+    (sql-datum--admin-request-display "activity" other)
+    (test-admin-display--arrive (test-admin-display--activity-json) other)
+    (test-admin-display-assert
+     "nor the same panel on another connection"
+     (and (get-buffer (sql-datum--admin-buffer-name "activity" nil other)) t))
+    (dolist (n (list (sql-datum--admin-buffer-name "activity" nil other)))
+      (when (get-buffer n) (kill-buffer n)))
+    (kill-buffer other))
+
+  ;; A sub-panel is its own key: quitting a job's tree must not turn away
+  ;; the list it was opened from.
+  (with-current-buffer conn
+    (setq sql-datum--admin-quit-requests nil))
+  (sql-datum--admin-request-display "jobs" conn "detail")
+  (sql-datum--admin-show-detail (test-admin-display--tree) conn)
+  (let ((tree "*datum-admin:jobs:detail [display-test]*"))
+    (with-current-buffer tree
+      (switch-to-buffer (current-buffer))
+      (sql-datum-admin-quit))
+    (test-admin-display-assert "quitting the tree closes the tree"
+                               (null (get-buffer tree)))
+    (test-admin-display--show "jobs" t)
+    (test-admin-display-assert "and leaves the list alone"
+                               (and (get-buffer
+                                     "*datum-admin:jobs [display-test]*") t))
+    (test-admin-display--arrive (test-admin-display--tree-json) conn)
+    (test-admin-display-assert "the tree's own refresh is still turned away"
+                               (null (get-buffer tree))))
+
+  ;; A wizard form is an answer to something asked for a moment ago,
+  ;; never to a timer, so it is never turned away -- otherwise quitting
+  ;; a panel would quietly swallow the next wizard opened on it.
+  (with-current-buffer conn (setq sql-datum--admin-quit-requests nil))
+  (test-admin-display--show "activity" t)
+  (with-current-buffer panel
+    (switch-to-buffer (current-buffer))
+    (sql-datum-admin-quit))
+  (test-admin-display--arrive
+   (concat "{\"panel\":\"activity\",\"sub_panel\":\"form\","
+           "\"title\":\"t\",\"form\":{\"fields\":[{\"key\":\"n\","
+           "\"label\":\"N\",\"type\":\"string\",\"default\":\"\"}],"
+           "\"values\":{},\"submit_action\":\"x\",\"notes\":[]}}")
+   conn)
+  (test-admin-display-assert "a wizard still opens after its panel was quit"
+                             (and (get-buffer "*datum-admin:activity-form*") t))
+
+  (dolist (n (test-admin-display--panels)) (kill-buffer n))
+  (with-current-buffer conn
+    (setq sql-datum--admin-quit-requests nil
+          sql-datum--admin-display-request nil)))
+
 (message "\n%d passed, %d failed"
          test-admin-display--pass test-admin-display--fail)
 (when (> test-admin-display--fail 0)

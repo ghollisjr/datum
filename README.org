@@ -917,6 +917,20 @@ connection is gone the name no longer matches, and sorting such a panel
 used to open a second, untagged one while the panel on screen stayed as
 it was.
 
+=q= closes a panel for good.  Stopping its timer is not enough on its
+own: a refresh the timer had already sent is on its way regardless, and
+arrives to find no buffer — which the display code reads as a panel
+being opened for the first time, and so pops it up again.  Quitting a
+panel while it was refreshing therefore closed it and then reopened it,
+looking for all the world as though the query had come back and decided
+to show itself.  So a quit is noted on the connection, beside the
+display request and keyed the same way, and an answer for a panel that
+was quit and not asked for since is turned away before any renderer
+sees it.  Asking for the panel again clears the note.
+
+Wizard forms, path browsers, file views and downloads are never turned
+away: those answer something asked for a moment ago, never a timer.
+
 The keys available in a panel are shown in its *header line*, which stays
 visible however far the contents scroll.  Panel-specific actions come
 first, followed by the common keys below.  Top-level panels auto-refresh

@@ -1046,6 +1046,7 @@ The sub-panel is part of the request because a panel and its sub-panels
 share a name.  A jobs list refreshing on its timer would otherwise
 answer a request made for a job\='s tree — raising the list and leaving
 the tree, which is what was actually asked for, unshown."
+  (sql-datum--admin-clear-quit panel sub-panel sqli-buf)
   (let ((connection (sql-datum--admin-connection sqli-buf)))
     (when connection
       (with-current-buffer connection
@@ -1062,8 +1063,50 @@ the tree, which is what was actually asked for, unshown."
         (setq sql-datum--admin-display-request nil))
       t)))
 
-(defvar-local sql-datum--admin-quit-flag nil
-  "Non-nil when the user has explicitly quit this admin buffer.")
+(defvar-local sql-datum--admin-quit-requests nil
+  "Panels quit on this connection whose answers may still be coming.
+
+Each entry is a (PANEL . SUB-PANEL) pair, the same key a display
+request uses.  `q\=' stops the panel\='s timer and kills its buffer, but a
+refresh the timer had already sent is on its way regardless, and
+arrives to find no buffer -- which the display code reads as a panel
+being opened for the first time, and so pops it up again.  Quitting a
+panel while it was refreshing therefore closed it and then reopened it.
+
+It lives in the connection\='s buffer, beside the display request, for
+the same reason: held in one place, quitting a panel on one connection
+would swallow another connection\='s answer.")
+
+(defun sql-datum--admin-note-quit (panel sub-panel sqli-buf)
+  "Note that PANEL\='s SUB-PANEL has been quit on SQLI-BUF\='s connection.
+
+Only this panel\='s own connection is noted.  Falling back to whichever
+connection is current would silence a panel on another server that
+nobody closed, and a connection that has gone has no answer in flight
+to turn away in any case."
+  (let ((connection (and sqli-buf (buffer-live-p sqli-buf) sqli-buf)))
+    (when (and connection panel)
+      (with-current-buffer connection
+        (cl-pushnew (cons panel sub-panel) sql-datum--admin-quit-requests
+                    :test #'equal)))))
+
+(defun sql-datum--admin-quit-pending-p (panel sub-panel sqli-buf)
+  "Return non-nil if PANEL\='s SUB-PANEL was quit and not asked for since."
+  (let ((connection (sql-datum--admin-connection sqli-buf)))
+    (and connection
+         (member (cons panel sub-panel)
+                 (buffer-local-value 'sql-datum--admin-quit-requests
+                                     connection))
+         t)))
+
+(defun sql-datum--admin-clear-quit (panel sub-panel sqli-buf)
+  "Forget that PANEL\='s SUB-PANEL was quit, because it is wanted again."
+  (let ((connection (sql-datum--admin-connection sqli-buf)))
+    (when connection
+      (with-current-buffer connection
+        (setq sql-datum--admin-quit-requests
+              (delete (cons panel sub-panel)
+                      sql-datum--admin-quit-requests))))))
 
 (defvar-local sql-datum--admin-context nil
   "Context data for sub-panels (e.g., job_name for detail views).")
@@ -1138,6 +1181,15 @@ worse than confusing."
              (sub-panel (alist-get 'sub_panel data))
              (sqli-buf (current-buffer)))
         (cond
+         ;; A panel the user has closed does not come back on its own.
+         ;; Wizard forms and file views are answers to something asked
+         ;; for just now, never to a timer, so they are never turned
+         ;; away.
+         ((and (not (member sub-panel '("form" "path-browser" "downloaded"
+                                        "file")))
+               (sql-datum--admin-quit-pending-p (alist-get 'panel data)
+                                                sub-panel sqli-buf))
+          nil)
          ;; Generic wizard form (databases, security, backup, schema)
          ((equal sub-panel "form")
           (run-at-time 0 nil #'sql-datum--admin-show-form
@@ -1880,7 +1932,14 @@ SQLI-BUF is the originating SQLi buffer."
   "Stop auto-refresh and close the admin panel buffer."
   (interactive)
   (sql-datum--admin-stop-timer (current-buffer))
-  (setq sql-datum--admin-quit-flag t)
+  ;; Noted on the connection, not here: this buffer is about to be
+  ;; killed, and the answer that has to be turned away arrives after
+  ;; that.  Stopping the timer is not enough on its own -- what it sent
+  ;; a moment ago is already on its way.
+  (sql-datum--admin-note-quit
+   sql-datum--admin-panel-name
+   (alist-get 'sub_panel sql-datum--admin-panel-data)
+   sql-datum--admin-sqli-buf)
   (quit-window t))
 
 (defun sql-datum-admin-refresh ()
