@@ -44,3 +44,19 @@ def split_identifier(raw):
                 current.append(ch)
     parts.append(''.join(current))
     return parts
+
+
+def completion_sort_key(name):
+    """Return the key NAME should sort under in a completion list.
+
+    The quote characters are not part of what the user types, so they
+    must not be part of what the list is ordered by.  A quoted name
+    sorted as written comes out ahead of every unquoted one -- `"' is
+    ASCII 34, `[' is 91 and `` ` `` is 96, all below the letters -- so
+    one table called "test table" sorted ahead of test, test2 and
+    test3, and the shortest match was offered last.
+
+    Dots are kept as separators so that a schema-qualified name still
+    sorts beside its siblings.
+    """
+    return ".".join(split_identifier(name)) if name else name

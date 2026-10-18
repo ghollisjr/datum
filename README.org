@@ -682,6 +682,27 @@ is populated automatically on connect — no need to run =:tables= or
 =:routines= manually.  You can also run =:refresh= at any time to silently
 update the completion data.
 
+*** Names that need quoting
+
+A name containing a space or a dot is sent quoted for the dialect —
+="test table"=, =[test table]=, =`test table`= — and that quoting is not
+part of what you type, so it is kept out of both the ordering and the
+prefix expansion.  Sorted as written, a quoted name leads every unquoted
+one: ="= is ASCII 34, =[= is 91 and =`= is 96, all below the letters.  So
+with tables =test=, =test2=, =test3= and ="test table"=, typing =tes= put
+the quoted one first and offered the shortest match last.
+
+Worse, prefix expansion stopped working for all of them.  The common
+prefix of ="test table"= and =test= is empty, so =TAB= on =tes= inserted
+nothing at all where it would otherwise have expanded to =test= — one
+awkwardly named table degrading completion for its neighbours.  Both the
+candidate order and the common prefix are now computed over the bare
+names.
+
+A common prefix completes unquoted, since it is something to go on
+typing; a single match completes to the quoted name, since that is a
+finished identifier and usable as SQL.
+
 *** Contextual column completion
 
 Column completion is context-aware: when the current SQL statement

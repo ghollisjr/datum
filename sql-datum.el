@@ -4950,6 +4950,24 @@ that start with DS-PREFIX — their bare forms are already in the list."
                         (sql-datum--unquote-part after-dot)
                         t)))))))))
 
+(defun sql-datum--common-typed-prefix (matches)
+  "Return the longest prefix MATCHES share as the user would type them.
+
+Quoted and unquoted candidates are compared by their bare names, so a
+set like (\"test table\" test test2 test3) yields \"test\" rather than the
+empty string.  The result is returned unquoted: it is a prefix to go
+on typing, not a finished identifier, and completing the whole name
+still inserts the candidate with its quotes."
+  (let* ((bare (mapcar #'sql-datum--unquote-identifier matches))
+         (common (try-completion "" bare)))
+    (cond
+     ;; `try-completion' answers t when every candidate is the same
+     ;; string, which after unquoting two spellings of one name it can
+     ;; be; the name itself is the prefix then.
+     ((eq common t) (car bare))
+     ((stringp common) common)
+     (t ""))))
+
 (defun sql-datum--make-completion-table (candidates &optional sort-fn ds-prefix)
   "Build a completion table that also matches bare table name portions.
 For a prefix without a dot, a candidate like \"rempat.fmreport\" matches
@@ -4987,7 +5005,13 @@ bare forms are already in CANDIDATES."
                               (car matches))
                     t
                   (car matches)))
-               (t (try-completion "" matches)))))
+               ;; Over the unquoted forms.  The quote characters are not
+               ;; part of what was typed, so a quoted candidate among
+               ;; the matches shares no prefix with the unquoted ones and
+               ;; the common prefix comes out empty -- TAB then inserted
+               ;; nothing at all.  One table called "test table" stopped
+               ;; `tes' expanding to `test' for test, test2 and test3.
+               (t (sql-datum--common-typed-prefix matches)))))
       ('lambda  ;; test-completion
        (member (sql-datum--strip-leading-quotes string) candidates))
       (_ nil))))

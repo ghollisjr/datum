@@ -2182,3 +2182,58 @@ class TestReadableSizes:
 
         # ODBC hands back numbers as strings often enough.
         assert filesystem._human_bytes("1073741824") == "1.0 GiB"
+
+
+class TestCompletionOrdering:
+    """A candidate list is ordered by what the user types.
+
+    The quote characters are not part of that, and sorting with them in
+    place put a quoted name ahead of every unquoted one: `"' is ASCII
+    34, `[' is 91 and `` ` `` is 96, all below the letters.  One table
+    called "test table" therefore sorted ahead of test, test2 and
+    test3, and the shortest match was offered last.
+    """
+
+    def test_a_quoted_name_sorts_by_its_bare_name(self):
+        from datum.utils import completion_sort_key
+
+        names = ['public."test table"', "public.test", "public.test2",
+                 "public.test3"]
+        assert sorted(names, key=completion_sort_key) == [
+            "public.test", 'public."test table"', "public.test2",
+            "public.test3"]
+
+    def test_every_dialect_quotes_below_the_letters(self):
+        from datum.utils import completion_sort_key
+
+        for quoted in ('dbo."test table"', "dbo.[test table]",
+                       "dbo.`test table`"):
+            names = [quoted, "dbo.test", "dbo.test2"]
+            # Unsorted by the written form, the quoted one leads.
+            assert sorted(names)[0] == quoted
+            # By the typed form, it falls where its name belongs.
+            assert sorted(names, key=completion_sort_key)[0] == "dbo.test"
+
+    def test_the_key_keeps_the_schema_separator(self):
+        from datum.utils import completion_sort_key
+
+        # Still beside its siblings, not sorted as one run-together word.
+        assert completion_sort_key('public."test table"') == "public.test table"
+        assert completion_sort_key("public.test") == "public.test"
+
+    def test_an_unquoted_name_is_its_own_key(self):
+        from datum.utils import completion_sort_key
+
+        assert completion_sort_key("dbo.users") == "dbo.users"
+        assert completion_sort_key("") == ""
+
+    def test_the_candidate_lists_are_sorted_with_it(self):
+        import inspect
+
+        from datum import commands
+
+        # Every list built for completion goes through the same key;
+        # three of them were separate sorted() calls.
+        source = inspect.getsource(commands)
+        assert "sorted(set(items))" not in source
+        assert source.count("key=_completion_sort_key") >= 6

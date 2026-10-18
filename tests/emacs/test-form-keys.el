@@ -864,6 +864,57 @@
                        (string-match-p "invalid"
                                        (test-form-keys--shown "On Success")))
 
+(message "\n=== TAB expands past an awkwardly quoted name ===")
+
+;; A table called "test table" beside test, test2 and test3 shares no
+;; prefix with them as written, because of the leading quote -- so the
+;; common prefix came out empty and TAB inserted nothing at all.  One
+;; oddly named table stopped `tes' expanding to `test' for all of them.
+(defconst test-form-keys--tables
+  '("test" "\"test table\"" "test2" "test3"))
+
+(defun test-form-keys--try (prefix candidates)
+  (try-completion prefix (sql-datum--make-completion-table candidates)))
+
+(test-form-keys-assert "TAB expands to the prefix they share when typed"
+                       (equal (test-form-keys--try
+                               "tes" test-form-keys--tables)
+                              "test"))
+(test-form-keys-assert "which is what it does without the quoted one"
+                       (equal (test-form-keys--try
+                               "tes" '("test" "test2" "test3"))
+                              "test"))
+(test-form-keys-assert "a quoted name still matches an unquoted prefix"
+                       (member "\"test table\""
+                               (all-completions
+                                "tes" (sql-datum--make-completion-table
+                                       test-form-keys--tables))))
+
+;; The two cases return different things on purpose.  A common prefix
+;; is something to go on typing, so it comes back bare; a sole match is
+;; a finished identifier, so it comes back quoted and usable as SQL.
+(test-form-keys-assert "a sole quoted match completes to the quoted name"
+                       (equal (test-form-keys--try
+                               "test t" test-form-keys--tables)
+                              "\"test table\""))
+
+;; Two spellings of one name unquote to the same string, which is what
+;; `try-completion' answers t for; the name itself is the prefix then.
+(test-form-keys-assert "two spellings of one name yield that name"
+                       (equal (sql-datum--common-typed-prefix
+                               '("\"users\"" "users"))
+                              "users"))
+(test-form-keys-assert "and nothing in common yields nothing"
+                       (equal (sql-datum--common-typed-prefix
+                               '("alpha" "beta"))
+                              ""))
+
+;; Unquoted candidates are untouched by any of this.
+(test-form-keys-assert "ordinary names expand as they always did"
+                       (equal (test-form-keys--try
+                               "us" '("users" "user_roles"))
+                              "user"))
+
 (message "\n%d passed, %d failed" test-form-keys--pass test-form-keys--fail)
 (when (> test-form-keys--fail 0)
   (kill-emacs 1))

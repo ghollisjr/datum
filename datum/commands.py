@@ -54,6 +54,7 @@ def _quote_name(name):
 
 
 from .utils import split_identifier as _split_identifier
+from .utils import completion_sort_key as _completion_sort_key
 
 _help_text = """
 --Available commands--
@@ -527,7 +528,7 @@ def tables(args):
         # Inject ANSI standard INFORMATION_SCHEMA views.
         schema_items = []
         _inject_ansi_objects(schema_items, items)
-        envelope.introspect("tables", sorted(set(items)))
+        envelope.introspect("tables", sorted(set(items), key=_completion_sort_key))
     except Exception as err:
         print(f"Error running tables query: {err}")
 
@@ -566,7 +567,7 @@ def routines(args):
                     items.append(qname)
             else:
                 items.append(qname)
-        envelope.introspect("routines", sorted(set(items)))
+        envelope.introspect("routines", sorted(set(items), key=_completion_sort_key))
         # Send routine types (FUNCTION vs PROCEDURE) for completion behavior
         type_pairs = []
         for row in rows:
@@ -980,7 +981,7 @@ def refresh_db(args, conn=None):
                 schema = str(row[0])
                 table_name = str(row[1])
                 items.append(f"{database}.{schema}.{_quote_name(table_name)}")
-            envelope.introspect(f"xdb:{database}:tables", sorted(set(items)))
+            envelope.introspect(f"xdb:{database}:tables", sorted(set(items), key=_completion_sort_key))
     except Exception:
         pass
 
@@ -999,7 +1000,7 @@ def refresh_db(args, conn=None):
                 qualified = f"{database}.{schema}.{_quote_name(routine_name)}"
                 items.append(qualified)
                 type_pairs.append([qualified, routine_type])
-            envelope.introspect(f"xdb:{database}:routines", sorted(set(items)))
+            envelope.introspect(f"xdb:{database}:routines", sorted(set(items), key=_completion_sort_key))
             envelope.introspect(f"xdb:{database}:routine-types", type_pairs)
             # Signatures (best-effort)
             try:
@@ -1093,7 +1094,7 @@ def refresh_tables(args, conn=None):
         # Inject ANSI standard INFORMATION_SCHEMA views.
         schema_items = []
         _inject_ansi_objects(schema_items, items)
-        envelope.introspect("tables", sorted(set(items)))
+        envelope.introspect("tables", sorted(set(items), key=_completion_sort_key))
     except Exception:
         pass
     return ""
@@ -1123,7 +1124,7 @@ def refresh_routines(args, conn=None):
                         items.append(qname)
                 else:
                     items.append(qname)
-            envelope.introspect("routines", sorted(set(items)))
+            envelope.introspect("routines", sorted(set(items), key=_completion_sort_key))
             # Routine types (best-effort)
             type_pairs = []
             for row in rows:
