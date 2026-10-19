@@ -223,7 +223,7 @@ Files view (=F=):
 | =N= | Add a data or log file            |
 | =E= | Change size / growth / max size   |
 | =D= | Remove file (emptied first)       |
-| =S= | Shrink file                       |
+| =S= | Shrink a file: smallest fit (default), truncate, MB or % |
 
 Backups view (=K=, MSSQL):
 

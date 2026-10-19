@@ -2013,7 +2013,7 @@ class MSSQLDriver(BaseDriver):
         db = self.quote_ddl_identifier(name)
         cursor.execute(f"""
             SELECT df.name, df.type_desc, fg.name,
-                   df.size * 8 / 1024,
+                   df.size / 128.0,
                    CASE WHEN df.is_percent_growth = 1 THEN df.growth
                         ELSE df.growth * 8 / 1024 END,
                    CASE WHEN df.is_percent_growth = 1 THEN '%' ELSE 'MB' END,
@@ -2025,10 +2025,59 @@ class MSSQLDriver(BaseDriver):
                 ON fg.data_space_id = df.data_space_id
             ORDER BY df.type, df.file_id
         """)
-        return [{"logical": r[0], "type": r[1], "filegroup": r[2] or "",
-                 "size_mb": int(r[3] or 0), "growth": int(r[4] or 0),
-                 "growth_unit": r[5], "max_mb": int(r[6] or 0), "path": r[7]}
-                for r in cursor.fetchall()]
+        files = [{"logical": r[0], "type": r[1], "filegroup": r[2] or "",
+                  "size_mb": float(r[3] or 0), "growth": int(r[4] or 0),
+                  "growth_unit": r[5], "max_mb": int(r[6] or 0),
+                  "path": r[7], "used_mb": None}
+                 for r in cursor.fetchall()]
+        return self._with_used_space(cursor, name, files)
+
+    def _with_used_space(self, cursor, name, files):
+        """Fill in each file's `used_mb', where it can be read.
+
+        FILEPROPERTY answers only about the current database -- asked
+        from anywhere else it returns NULL for every file, with no error
+        -- so the query runs inside the target, which is also the only
+        way to ask about a database the session is not in.  A database
+        that cannot be entered at all (offline, restoring, not ours)
+        leaves the column empty rather than failing the listing: knowing
+        the files is still worth something without knowing the fill.
+        """
+        try:
+            cursor.execute(self._in_database(name, """
+                SELECT df.name,
+                       CAST(FILEPROPERTY(df.name, 'SpaceUsed') AS BIGINT)
+                         / 128.0
+                FROM sys.database_files df
+            """))
+            used = {r[0]: (float(r[1]) if r[1] is not None else None)
+                    for r in cursor.fetchall()}
+        except Exception:
+            return files
+        for entry in files:
+            entry["used_mb"] = used.get(entry["logical"])
+        return files
+
+    def shrink_floor(self, cursor, name, logical):
+        """Return the smallest size in MB that would hold the data.
+
+        The used space, rounded up.  It is an achievable target rather
+        than the true floor: SQL Server also refuses to take a file
+        below the size it was created at, and compacting the pages
+        frees more than the figure suggests -- a file reading 31.7 MB
+        used came out of a shrink to 32 MB holding 15.1 MB.  Asking for
+        less than the floor is not an error, DBCC simply stops there, so
+        a default that is merely achievable is the safe one.
+        """
+        for entry in self.database_files(cursor, name):
+            if entry["logical"].lower() == logical.lower():
+                used = entry.get("used_mb")
+                if used is None:
+                    return None
+                import math
+
+                return max(1, int(math.ceil(used)))
+        return None
 
     def database_filegroups(self, cursor, name):
         db = self.quote_ddl_identifier(name)
@@ -2142,14 +2191,18 @@ class MSSQLDriver(BaseDriver):
                      f"REMOVE FILE {self.quote_ddl_identifier(logical)}")
         return stmts
 
-    def sql_shrink_file(self, name, logical, target_mb):
+    def sql_shrink_file(self, name, logical, target_mb, truncate_only=False):
         # DBCC SHRINKFILE only acts on the current database, so it is run
         # through sp_executesql in the target's own context rather than
         # issuing a USE that would move the shared session.
         self.validate_identifier(name)
         self.validate_identifier(logical)
+        # TRUNCATEONLY releases the free space at the end of the file and
+        # moves no pages, so it neither fragments indexes nor takes long;
+        # it also cannot reach free space that sits before data.
+        size = "TRUNCATEONLY" if truncate_only else str(int(target_mb))
         inner = (f"DBCC SHRINKFILE ("
-                 f"{self.quote_ddl_literal(logical)}, {int(target_mb)})")
+                 f"{self.quote_ddl_literal(logical)}, {size})")
         return [f"EXEC {self.quote_ddl_identifier(name)}..sp_executesql "
                 f"N{self.quote_ddl_literal(inner)}"]
 

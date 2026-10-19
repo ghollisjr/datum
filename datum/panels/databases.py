@@ -559,18 +559,23 @@ def _files_panel(cursor, driver, args):
     rows = [[f["logical"],
              f["type"],
              f["filegroup"],
-             f"{f['size_mb']} MB",
+             _mb(f["size_mb"]),
+             _mb(f.get("used_mb")),
+             _free_mb(f),
+             _free_pct(f),
              (f"{f['growth']} {f['growth_unit']}" if f["growth"] else "none"),
              (f"{f['max_mb']} MB" if f["max_mb"] else "unlimited"),
              f["path"]]
             for f in files]
+    reclaimable = sum(max(0.0, f["size_mb"] - f["used_mb"])
+                      for f in files if f.get("used_mb") is not None)
 
     envelope.admin_panel({
         "panel": "databases",
         "sub_panel": "files",
         "title": f"Files: {name}",
-        "headers": ["Logical Name", "Type", "Filegroup", "Size",
-                    "Autogrowth", "Max Size", "Path"],
+        "headers": ["Logical Name", "Type", "Filegroup", "Size", "Used",
+                    "Free", "Free %", "Autogrowth", "Max Size", "Path"],
         "rows": rows,
         "row_id": 0,  # logical name
         "actions": [
@@ -579,10 +584,39 @@ def _files_panel(cursor, driver, args):
             {"key": "D", "label": "Remove file", "command": "remove-file"},
             {"key": "S", "label": "Shrink file", "command": "shrink-file"},
         ],
-        "info": f"Files of {name}",
+        # The number the question is really about: shrinking can give
+        # back the free space and nothing else.
+        "info": (f"Files of {name}"
+                 + (f" — {reclaimable:,.0f} MB free across "
+                    f"{len(files)} file{'' if len(files) == 1 else 's'}"
+                    if any(f.get("used_mb") is not None for f in files)
+                    else " — fill unknown; the database could not be read "
+                         "into")),
         "parent_panel": "databases",
         "context": {"database": name},
     })
+
+
+def _mb(value):
+    """Return VALUE as a size in MB, or "" when it is not known."""
+    if value is None:
+        return ""
+    return f"{float(value):,.1f} MB"
+
+
+def _free_mb(entry):
+    used = entry.get("used_mb")
+    if used is None:
+        return ""
+    return _mb(max(0.0, entry["size_mb"] - used))
+
+
+def _free_pct(entry):
+    used = entry.get("used_mb")
+    size = entry["size_mb"]
+    if used is None or not size:
+        return ""
+    return f"{max(0.0, (size - used) / size) * 100:.0f}%"
 
 
 def _find_file(driver, cursor, database, logical):
@@ -741,23 +775,70 @@ def _shrink_form(cursor, driver, args):
         envelope.error(f"File not found in {database}: {logical}")
         return
 
+    size = float(current["size_mb"])
+    used = current.get("used_mb")
+    floor = driver.shrink_floor(cursor, database, logical)
+    # Everything the user would otherwise work out on paper.
+    notes = [f"File:          {current['path']}",
+             f"              ({current['type']}"
+             + (f", filegroup {current['filegroup']}"
+                if current["filegroup"] else "") + ")",
+             f"Current size:  {_mb(size)}"]
+    if used is None:
+        notes.append("Used:          unknown — the database could not be "
+                     "read into, so there is no default to offer")
+    else:
+        free = max(0.0, size - used)
+        notes += [
+            f"Used:          {_mb(used)}",
+            f"Free:          {_mb(free)}"
+            + (f"  ({free / size * 100:.0f}% of the file)" if size else ""),
+            f"Smallest fit:  {floor} MB — the default below",
+        ]
+        if size:
+            notes.append(
+                f"               which is {floor / size * 100:.0f}% of the "
+                f"current size, giving back {_mb(size - floor)}")
+    notes += [
+        "",
+        "A file never goes below the size it was created at, whatever is "
+        "asked; DBCC stops there rather than failing.",
+        "Compacting frees more than the figures suggest — a file reading "
+        "31.7 MB used came out of a shrink holding 15.1 MB — so running "
+        "it twice can reclaim more.",
+        "Moving pages fragments indexes and is slow on large files; "
+        "releasing the free end does neither.",
+    ]
     envelope.admin_panel({
         "panel": "databases",
         "sub_panel": "form",
         "title": f"Shrink File: {logical}",
         "form": {
             "fields": [
-                {"key": "target_mb", "label": "Target Size", "type": "int",
-                 "default": current["size_mb"],
-                 "help": "MB; shrinking below the used space has no effect"},
+                {"key": "method", "label": "Shrink to", "type": "choice",
+                 "default": "fit" if floor else "mb",
+                 "choices": [
+                     ["fit", f"The smallest size that fits the data"
+                             f"{f' ({floor} MB)' if floor else ''}"],
+                     ["truncate", "Just release the free end "
+                                  "(fast, no fragmenting)"],
+                     ["mb", "A size I give in MB"],
+                     ["percent", "A percentage of the current size"],
+                 ]},
+                {"key": "target_mb", "label": "Size (MB)", "type": "int",
+                 "default": floor or int(size),
+                 "help": "used when the method is a size in MB"},
+                {"key": "percent", "label": "Percent of current",
+                 "type": "int",
+                 "default": (max(1, int(floor / size * 100))
+                             if floor and size else 100),
+                 "help": "used when the method is a percentage; 80 means "
+                         "shrink to 80% of the current size"},
             ],
             "values": {"database": database, "logical": logical},
             "submit_action": "do-shrink-file",
             "submit_label": "Shrink File",
-            "notes": [f"File:         {current['path']}",
-                      f"Current size: {current['size_mb']} MB",
-                      "Shrinking fragments indexes and is slow on large "
-                      "files."],
+            "notes": notes,
         },
         "headers": [],
         "rows": [],
@@ -780,20 +861,80 @@ def _do_shrink(cursor, driver, args):
     if not (database and logical):
         envelope.error("the form did not say which file to shrink")
         return
+    before = _find_file(driver, cursor, database, logical)
+    if not before:
+        envelope.error(f"File not found in {database}: {logical}")
+        return
     try:
-        target = int(opts.get("target_mb") or 0)
-    except (TypeError, ValueError):
-        envelope.error(f"Target size must be a number "
-                       f"(got {opts.get('target_mb')!r})")
+        target, truncate_only = _shrink_target(cursor, driver, database,
+                                               logical, before, opts)
+    except ValueError as err:
+        envelope.error(str(err))
         return
 
-    for sql in driver.sql_shrink_file(database, logical, target):
+    for sql in driver.sql_shrink_file(database, logical, target,
+                                      truncate_only=truncate_only):
         cursor.execute(sql)
         _commit(cursor)
     after = _find_file(driver, cursor, database, logical)
-    size = f"{after['size_mb']} MB" if after else "unknown"
-    envelope.info(f"Shrank {logical} in {database} — now {size}")
+    # What it was and what it became, because the number asked for is
+    # a request and not a promise: a file stops at its own floor, and
+    # compacting can take it further than the figure suggested.
+    if after:
+        freed = float(before["size_mb"]) - float(after["size_mb"])
+        envelope.info(
+            f"Shrank {logical} in {database}: "
+            f"{_mb(before['size_mb'])} → {_mb(after['size_mb'])}"
+            + (f", {_mb(freed)} given back" if freed > 0 else
+               ", which it was already at or below"))
+    else:
+        envelope.info(f"Shrank {logical} in {database}")
     _refresh_files(cursor, driver, database)
+
+
+def _shrink_target(cursor, driver, database, logical, current, opts):
+    """Return (TARGET_MB, TRUNCATE_ONLY) for the submitted form.
+
+    The arithmetic belongs here rather than in the user's head: the
+    point of offering a fit, a size and a percentage is that two of
+    them are computed.
+    """
+    method = (opts.get("method") or "mb").strip()
+    size = float(current["size_mb"])
+
+    if method == "truncate":
+        return 0, True
+
+    if method == "fit":
+        floor = driver.shrink_floor(cursor, database, logical)
+        if floor is None:
+            raise ValueError(
+                f"How full {logical} is cannot be read, so there is no "
+                f"size to fit to — give a size in MB instead")
+        return floor, False
+
+    if method == "percent":
+        try:
+            percent = float(opts.get("percent") or 0)
+        except (TypeError, ValueError):
+            raise ValueError(f"Percent must be a number "
+                             f"(got {opts.get('percent')!r})")
+        if not 1 <= percent <= 100:
+            raise ValueError(
+                f"Percent must be between 1 and 100 (got {percent:g}); "
+                f"a file cannot be shrunk to more than it is")
+        import math
+
+        return max(1, int(math.floor(size * percent / 100.0))), False
+
+    try:
+        target = int(opts.get("target_mb") or 0)
+    except (TypeError, ValueError):
+        raise ValueError(f"Target size must be a number "
+                         f"(got {opts.get('target_mb')!r})")
+    if target <= 0:
+        raise ValueError("Target size must be at least 1 MB")
+    return target, False
 
 
 def _settings_context(cursor, driver, args):

@@ -1031,3 +1031,234 @@ class TestBackupAndRestoreLeaveTheSessionUsable:
         _run_backup(cursor, driver, name)
         # Same behaviour, only blocking, which beats not working.
         assert "error" not in _kinds(captured), captured
+
+
+class TestFreeSpaceAndShrink:
+    """How full a file is, and shrinking without doing the arithmetic.
+
+    The form used to ask only for a target size in MB, with the used
+    space nowhere on screen -- so choosing a number meant going and
+    finding it first.  FILEPROPERTY answers only about the current
+    database, which is why the fill is read inside the target.
+    """
+
+    @pytest.fixture
+    def filled_db(self):
+        conn = _connect(MS_DSN, "MSSQL")
+        cursor, driver = conn.cursor(), MSSQLDriver()
+        name = "datum_wiz_shrink"
+
+        def cleanup():
+            try:
+                for stmt in driver.sql_drop_database(name, force=True):
+                    cursor.execute(stmt)
+            except Exception:
+                pass
+
+        cleanup()
+        cursor.execute(f"CREATE DATABASE [{name}]")
+        cursor.execute(f"ALTER DATABASE [{name}] MODIFY FILE "
+                       f"(NAME='{name}', SIZE=100MB)")
+        yield name, cursor, driver
+        cleanup()
+        conn.close()
+
+    def test_the_listing_says_how_full_each_file_is(self, filled_db,
+                                                    captured):
+        from datum.panels import databases
+
+        name, cursor, driver = filled_db
+        databases.run_action(cursor, driver, "files", [name])
+        panel = captured[0][1][0]
+        for column in ("Size", "Used", "Free", "Free %"):
+            assert column in panel["headers"], panel["headers"]
+        used = panel["headers"].index("Used")
+        free = panel["headers"].index("Free")
+        pct = panel["headers"].index("Free %")
+        for row in panel["rows"]:
+            # Read from inside the database; asked from outside,
+            # FILEPROPERTY returns NULL for every file and says nothing.
+            assert row[used].endswith("MB"), row
+            assert row[free].endswith("MB"), row
+            assert row[pct].endswith("%"), row
+        assert "free across" in panel["info"], panel["info"]
+
+    def test_used_never_exceeds_size(self, filled_db, captured):
+        from datum.panels import databases
+
+        name, cursor, driver = filled_db
+        databases.run_action(cursor, driver, "files", [name])
+        panel = captured[0][1][0]
+        size = panel["headers"].index("Size")
+        used = panel["headers"].index("Used")
+
+        def mb(cell):
+            return float(cell.replace(" MB", "").replace(",", ""))
+
+        for row in panel["rows"]:
+            # Both are the same kind of number now; a truncated size
+            # against an exact fill made a full file read 15.0 holding
+            # 15.1.
+            assert mb(row[used]) <= mb(row[size]) + 0.01, row
+
+    def test_the_floor_is_the_used_space_rounded_up(self, filled_db):
+        name, cursor, driver = filled_db
+        entry = next(f for f in driver.database_files(cursor, name)
+                     if f["type"] == "ROWS")
+        floor = driver.shrink_floor(cursor, name, entry["logical"])
+        assert floor >= 1
+        assert floor >= entry["used_mb"]
+        assert floor < entry["used_mb"] + 1
+
+    def test_the_form_computes_what_was_done_by_hand(self, filled_db,
+                                                     captured):
+        from datum.panels import databases
+
+        name, cursor, driver = filled_db
+        logical = name
+        databases.run_action(cursor, driver, "shrink-file",
+                             [_payload({"database": name,
+                                        "logical": logical})])
+        form = captured[0][1][0]["form"]
+        notes = "\n".join(form["notes"])
+        for shown in ("Current size:", "Used:", "Free:", "Smallest fit:"):
+            assert shown in notes, notes
+        fields = {f["key"]: f for f in form["fields"]}
+        assert set(fields) == {"method", "target_mb", "percent"}
+        assert fields["method"]["default"] == "fit"
+        methods = {c[0] for c in fields["method"]["choices"]}
+        assert methods == {"fit", "truncate", "mb", "percent"}
+        # The default is achievable rather than merely small.
+        floor = driver.shrink_floor(cursor, name, logical)
+        assert fields["target_mb"]["default"] == floor
+
+    @pytest.mark.parametrize("opts,expected", [
+        ({"method": "fit"}, "floor"),
+        ({"method": "truncate"}, (0, True)),
+        ({"method": "mb", "target_mb": 40}, (40, False)),
+        ({"method": "percent", "percent": 50}, "half"),
+    ])
+    def test_each_method_resolves(self, filled_db, opts, expected):
+        from datum.panels import databases
+
+        name, cursor, driver = filled_db
+        current = next(f for f in driver.database_files(cursor, name)
+                       if f["type"] == "ROWS")
+        got = databases._shrink_target(cursor, driver, name,
+                                      current["logical"], current, opts)
+        if expected == "floor":
+            assert got == (driver.shrink_floor(cursor, name,
+                                              current["logical"]), False)
+        elif expected == "half":
+            assert got == (int(current["size_mb"] * 0.5), False)
+        else:
+            assert got == expected
+
+    @pytest.mark.parametrize("opts,complaint", [
+        ({"method": "percent", "percent": 150}, "between 1 and 100"),
+        ({"method": "percent", "percent": 0}, "between 1 and 100"),
+        ({"method": "percent", "percent": "many"}, "must be a number"),
+        ({"method": "mb", "target_mb": "abc"}, "must be a number"),
+        ({"method": "mb", "target_mb": 0}, "at least 1 MB"),
+    ])
+    def test_nonsense_is_refused_with_the_reason(self, filled_db, opts,
+                                                 complaint):
+        from datum.panels import databases
+
+        name, cursor, driver = filled_db
+        current = next(f for f in driver.database_files(cursor, name)
+                       if f["type"] == "ROWS")
+        with pytest.raises(ValueError) as caught:
+            databases._shrink_target(cursor, driver, name,
+                                     current["logical"], current, opts)
+        assert complaint in str(caught.value)
+
+    def test_a_shrink_reports_what_it_achieved(self, filled_db, captured):
+        from datum.panels import databases
+
+        name, cursor, driver = filled_db
+        before = next(f for f in driver.database_files(cursor, name)
+                      if f["type"] == "ROWS")
+        captured.clear()
+        databases.run_action(cursor, driver, "do-shrink-file",
+                             [_payload({"database": name, "logical": name,
+                                        "method": "fit"})])
+        kinds = _kinds(captured)
+        assert "error" not in kinds, captured
+        said = [a[0] for k, a in captured if k == "info"][-1]
+        # The size asked for is a request, not a promise: a file stops at
+        # its own floor, and compacting can go further than the figure.
+        assert "→" in said, said
+        after = next(f for f in driver.database_files(cursor, name)
+                     if f["type"] == "ROWS")
+        assert after["size_mb"] < before["size_mb"]
+
+    def test_truncateonly_gives_back_the_free_end(self, filled_db, captured):
+        from datum.panels import databases
+
+        name, cursor, driver = filled_db
+        before = next(f for f in driver.database_files(cursor, name)
+                      if f["type"] == "ROWS")
+        captured.clear()
+        databases.run_action(cursor, driver, "do-shrink-file",
+                             [_payload({"database": name, "logical": name,
+                                        "method": "truncate"})])
+        assert "error" not in _kinds(captured), captured
+        after = next(f for f in driver.database_files(cursor, name)
+                     if f["type"] == "ROWS")
+        assert after["size_mb"] < before["size_mb"]
+
+    def test_an_unreadable_fill_leaves_the_rest_of_the_listing(self):
+        """The catalogue read and the fill read fail separately.
+
+        A database that cannot be entered at all -- offline, restoring --
+        fails the catalogue read too, and the panel says so loudly, which
+        is right.  What this covers is the narrower case where the files
+        are listable but FILEPROPERTY is not answerable: the fill goes
+        missing and the paths, sizes and growth settings do not.
+        """
+        class RefusesTheInnerQuery:
+            def __init__(self):
+                self.calls = 0
+
+            def execute(self, sql, *args):
+                self.calls += 1
+                if "FILEPROPERTY" in sql:
+                    raise RuntimeError("cannot be opened")
+                return self
+
+            def fetchall(self):
+                return [("db", "ROWS", "PRIMARY", 100.0, 64, "MB", 0,
+                         "/data/db.mdf")]
+
+        driver = MSSQLDriver()
+        files = driver.database_files(RefusesTheInnerQuery(), "somedb")
+        assert len(files) == 1
+        assert files[0]["used_mb"] is None
+        # Everything that did not depend on the fill survives.
+        assert files[0]["path"] == "/data/db.mdf"
+        assert files[0]["size_mb"] == 100.0
+        assert files[0]["logical"] == "db"
+
+    def test_fitting_is_refused_when_the_fill_is_unknown(self, filled_db):
+        from datum.panels import databases
+
+        name, cursor, driver = filled_db
+        current = dict(next(f for f in driver.database_files(cursor, name)
+                            if f["type"] == "ROWS"))
+        current["used_mb"] = None
+
+        class NoFill(MSSQLDriver):
+            def shrink_floor(self, *_args):
+                return None
+
+        with pytest.raises(ValueError) as caught:
+            databases._shrink_target(cursor, NoFill(), name,
+                                     current["logical"], current,
+                                     {"method": "fit"})
+        assert "cannot be read" in str(caught.value)
+        # A size in MB still works, which is the escape hatch the
+        # message points at.
+        assert databases._shrink_target(
+            cursor, NoFill(), name, current["logical"], current,
+            {"method": "mb", "target_mb": 50}) == (50, False)

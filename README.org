@@ -1023,7 +1023,51 @@ there are server-level rather than per-database.
 | =N= | Add a data or log file                    |
 | =E= | Change size, autogrowth and max size      |
 | =D= | Remove the file (emptied first)           |
-| =S= | Shrink the file to a target size          |
+| =S= | Shrink the file (fit, truncate, MB or %)  |
+
+The listing says how full each file is — *Size*, *Used*, *Free* and
+*Free %* — with the total reclaimable space in the info line, because
+shrinking can give back the free space and nothing else, so that is the
+number the question is actually about.  The fill comes from
+=FILEPROPERTY=, which answers only about the *current* database: asked
+from anywhere else it returns NULL for every file and reports no error,
+so the query runs inside the target.  Where the files list but the fill
+cannot be read, the three columns are empty and the rest of the row is
+not.
+
+**** Shrinking without doing the arithmetic
+
+=S= used to ask for a target size in MB with the used space nowhere on
+screen, so choosing a number meant going to find it first.  It now shows
+the arithmetic and offers four ways to say what you want:
+
+| Method                | Means                                           |
+|-----------------------+-------------------------------------------------|
+| Smallest fit          | the used space, rounded up — the default        |
+| Release the free end  | =TRUNCATEONLY=: fast, moves no pages            |
+| A size in MB          | as before                                       |
+| A percentage          | 80 means 80% of the current size                |
+
+and the form states the numbers so none of them need working out:
+
+: Current size:  200.0 MB
+: Used:          31.7 MB
+: Free:          168.3 MB  (84% of the file)
+: Smallest fit:  32 MB — the default below
+:                which is 16% of the current size, giving back 168.0 MB
+
+Three things about shrinking are worth knowing, and the form says all
+three.  A file never goes below the size it was *created* at, whatever
+is asked — =DBCC= stops there rather than failing.  Compacting frees
+more than the figures suggest: a file reading 31.7 MB used came out of a
+shrink to 32 MB holding 15.1 MB, so a second pass reclaims more.  And
+moving pages fragments indexes and is slow on large files, where
+releasing the free end does neither.
+
+Because the size asked for is a request rather than a promise, the
+result reports what actually happened — =72.0 MB → 44.7 MB, 27.3 MB
+given back= for a log that stopped at a VLF boundary short of the 36 MB
+it was asked for.
 
 Editing a file offers only its size limits: a file's name, path, type
 and filegroup are fixed once it exists.  Removing one runs =DBCC

@@ -786,6 +786,10 @@ class BaseDriver(ABC):
 
     supports_file_management = False
 
+    def shrink_floor(self, cursor, name, logical):
+        """Return the smallest size in MB a file could be shrunk to."""
+        return None
+
     def database_files(self, cursor, name):
         """Return the files making up database NAME.
 
