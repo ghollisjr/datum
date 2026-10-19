@@ -21,6 +21,9 @@ _DOWNLOAD_LIMIT = 256 * 1024 * 1024
 _CHUNK = 4 * 1024 * 1024
 
 
+from ..utils import human_bytes as _human_bytes
+
+
 def _db_error(err):
     """Return the useful part of a driver error."""
     text = str(err)
@@ -61,31 +64,6 @@ def _start_path(cursor, driver):
     if driver.supports_drive_list:
         return driver.DRIVES_PATH
     return "/"
-
-
-def _human_bytes(value):
-    """Return VALUE as a short binary size, or "" if it is not known.
-
-    A disk is the one place raw bytes stop being readable: a drive's
-    free space runs to twelve digits, and nobody reads that as a size.
-    Directory listings keep their byte counts, where the numbers are
-    small enough to mean something and sorting wants them bare.
-    """
-    if value is None or value == "":
-        return ""
-    try:
-        size = float(value)
-    except (TypeError, ValueError):
-        return ""
-    if size < 1024:
-        return f"{int(size)} B"
-    for unit in ("KiB", "MiB", "GiB", "TiB", "PiB"):
-        size /= 1024.0
-        if size < 1024 or unit == "PiB":
-            # One decimal reads as a size; three read as a measurement
-            # the server is not actually making.
-            return f"{size:.1f} {unit}"
-    return ""
 
 
 def _drives_panel(cursor, driver):

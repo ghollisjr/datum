@@ -131,7 +131,7 @@ class TestSchemas:
         result = schema.get_data(cursor, driver, [])
         assert result["headers"][0] == "Schema"
         assert {a["command"] for a in result["actions"]} == \
-            {"new-schema", "tables", "drop-schema"}
+            {"new-schema", "tables", "sizes", "drop-schema"}
 
         schema.run_action(cursor, driver, "create-schema",
                           [_payload({"name": SCHEMA})])
@@ -497,3 +497,221 @@ class TestRenameGuidance:
         notes = " ".join(captured[0][1][0]["form"]["notes"])
         assert "DROPPED" in notes
         assert "rename" not in notes.lower()
+
+
+class TestTableSizes:
+    """Which tables are taking up the room.
+
+    The old per-schema listing got both numbers wrong in ways that
+    mattered for exactly this question: it joined sys.partitions to
+    sys.allocation_units and summed p.rows across the join, so a table
+    with LOB data counted its rows once per allocation unit, and it
+    joined only index_id IN (0, 1), so every nonclustered index was left
+    out of the size -- a 9 MB table read as 4.4 MB, which is the wrong
+    direction to be wrong in when you are deciding what to drop.
+    """
+
+    @staticmethod
+    def _fixture(dialect, cursor):
+        """A heap, a table whose bulk is an index, and a table with LOB."""
+        TestTableSizes._drop(dialect, cursor)
+        if dialect == "mssql":
+            cursor.execute(f"CREATE SCHEMA [{SCHEMA}]")
+            cursor.execute(f"CREATE TABLE [{SCHEMA}].sz_plain "
+                           f"(a int, pad char(200))")
+            cursor.execute(f"CREATE TABLE [{SCHEMA}].sz_indexed "
+                           f"(a int PRIMARY KEY, b int, pad char(200))")
+            cursor.execute(f"CREATE INDEX ix_sz ON [{SCHEMA}].sz_indexed "
+                           f"(b, pad)")
+            cursor.execute(f"CREATE TABLE [{SCHEMA}].sz_lob "
+                           f"(a int PRIMARY KEY, doc nvarchar(max))")
+            rows = ("WITH n AS (SELECT TOP 5000 ROW_NUMBER() OVER "
+                    "(ORDER BY (SELECT 1)) i FROM sys.all_columns a "
+                    "CROSS JOIN sys.all_columns b) ")
+            cursor.execute(rows + f"INSERT [{SCHEMA}].sz_plain (a, pad) "
+                           f"SELECT i, 'x' FROM n")
+            cursor.execute(rows + f"INSERT [{SCHEMA}].sz_indexed (a, b, pad) "
+                           f"SELECT i, i, 'y' FROM n")
+            cursor.execute(
+                "WITH n AS (SELECT TOP 500 ROW_NUMBER() OVER "
+                "(ORDER BY (SELECT 1)) i FROM sys.all_columns) "
+                f"INSERT [{SCHEMA}].sz_lob (a, doc) SELECT i, "
+                "REPLICATE(CAST('z' AS nvarchar(max)), 4000) FROM n")
+        else:
+            cursor.execute(f'CREATE SCHEMA "{SCHEMA}"')
+            cursor.execute(f'CREATE TABLE "{SCHEMA}".sz_plain '
+                           f"(a int, pad char(200))")
+            cursor.execute(f'CREATE TABLE "{SCHEMA}".sz_indexed '
+                           f"(a int PRIMARY KEY, b int, pad char(200))")
+            cursor.execute(f'CREATE INDEX ix_sz ON "{SCHEMA}".sz_indexed '
+                           f"(b, pad)")
+            cursor.execute(f'CREATE TABLE "{SCHEMA}".sz_lob '
+                           f"(a int PRIMARY KEY, doc text)")
+            cursor.execute(f'INSERT INTO "{SCHEMA}".sz_plain '
+                           "SELECT i, 'x' FROM generate_series(1,5000) i")
+            cursor.execute(f'INSERT INTO "{SCHEMA}".sz_indexed '
+                           "SELECT i, i, 'y' FROM generate_series(1,5000) i")
+            cursor.execute(f'INSERT INTO "{SCHEMA}".sz_lob SELECT i, '
+                           "repeat('z', 8000) FROM generate_series(1,500) i")
+            cursor.execute(f'ANALYZE "{SCHEMA}".sz_plain')
+            cursor.execute(f'ANALYZE "{SCHEMA}".sz_indexed')
+            cursor.execute(f'ANALYZE "{SCHEMA}".sz_lob')
+
+    @staticmethod
+    def _drop(dialect, cursor):
+        for t in ("sz_plain", "sz_indexed", "sz_lob"):
+            for stmt in ([f'DROP TABLE IF EXISTS "{SCHEMA}".{t}']
+                         if dialect == "pg" else
+                         [f"DROP TABLE [{SCHEMA}].{t}"]):
+                try:
+                    cursor.execute(stmt)
+                except Exception:
+                    pass
+
+    @staticmethod
+    def _by_name(headers, rows):
+        name = headers.index("Table")
+        return {r[name]: dict(zip(headers, r)) for r in rows}
+
+    def test_largest_first(self, env):
+        from datum.utils import parse_human_bytes
+
+        dialect, cursor, driver = env
+        self._fixture(dialect, cursor)
+        try:
+            headers, rows = driver.list_table_sizes(cursor, SCHEMA)
+            totals = [parse_human_bytes(r[headers.index("Total")])
+                      for r in rows]
+            assert totals == sorted(totals, reverse=True), rows
+            assert len(rows) == 3, rows
+        finally:
+            self._drop(dialect, cursor)
+
+    def test_index_space_is_counted(self, env):
+        from datum.utils import parse_human_bytes
+
+        dialect, cursor, driver = env
+        self._fixture(dialect, cursor)
+        try:
+            headers, rows = driver.list_table_sizes(cursor, SCHEMA)
+            by = self._by_name(headers, rows)
+            indexed = by["sz_indexed"]
+            plain = by["sz_plain"]
+            # The index is most of this table; leaving it out made the
+            # table look smaller than the heap with no index at all.
+            assert (parse_human_bytes(indexed["Index"])
+                    > parse_human_bytes(plain["Index"]))
+            assert (parse_human_bytes(indexed["Total"])
+                    > parse_human_bytes(plain["Total"])), by
+        finally:
+            self._drop(dialect, cursor)
+
+    def test_the_parts_do_not_exceed_the_total(self, env):
+        from datum.utils import parse_human_bytes
+
+        dialect, cursor, driver = env
+        self._fixture(dialect, cursor)
+        try:
+            headers, rows = driver.list_table_sizes(cursor, SCHEMA)
+            for row in rows:
+                cells = dict(zip(headers, row))
+                parts = sum(parse_human_bytes(cells[k])
+                            for k in headers
+                            if k not in ("Schema", "Table", "Rows",
+                                         "Rows (est)", "Total"))
+                total = parse_human_bytes(cells["Total"])
+                # Rounding to one decimal can move either way, so this
+                # is an agreement check rather than an equality.
+                assert abs(parts - total) <= 0.2 * total + 1024, cells
+        finally:
+            self._drop(dialect, cursor)
+
+    def test_the_whole_database_is_covered(self, env):
+        dialect, cursor, driver = env
+        self._fixture(dialect, cursor)
+        try:
+            _h, scoped = driver.list_table_sizes(cursor, SCHEMA)
+            headers, everything = driver.list_table_sizes(cursor)
+            assert len(everything) >= len(scoped)
+            names = {r[headers.index("Table")] for r in everything}
+            assert {"sz_plain", "sz_indexed", "sz_lob"} <= names
+            # Each row says which schema it is in, because there is no
+            # one schema for the panel to be about.
+            assert all(r[headers.index("Schema")] for r in everything)
+        finally:
+            self._drop(dialect, cursor)
+
+
+class TestMssqlSizesAgreeWithSpSpaceused:
+    """sp_spaceused is the number people check against."""
+
+    def test_every_column_matches(self, env):
+        from datum.utils import human_bytes
+
+        dialect, cursor, driver = env
+        if dialect != "mssql":
+            pytest.skip("sp_spaceused is MSSQL's")
+        TestTableSizes._fixture(dialect, cursor)
+        try:
+            headers, rows = driver.list_table_sizes(cursor, SCHEMA)
+            for row in rows:
+                cells = dict(zip(headers, row))
+                cursor.execute(f"EXEC sp_spaceused '{SCHEMA}.{cells['Table']}'")
+                truth = cursor.fetchone()
+                expected = {
+                    "Rows": int(str(truth[1]).strip()),
+                    "Total": int(str(truth[2]).split()[0]) * 1024,
+                    "Data": int(str(truth[3]).split()[0]) * 1024,
+                    "Index": int(str(truth[4]).split()[0]) * 1024,
+                    "Unused": int(str(truth[5]).split()[0]) * 1024,
+                }
+                assert int(cells["Rows"].replace(",", "")) == expected["Rows"]
+                # Compared as written rather than as parsed: the cell
+                # carries one decimal, so parsing it back is only ever
+                # accurate to that, and the contract being tested is
+                # that the panel shows sp_spaceused's number -- not that
+                # it agrees to the byte after a round trip.
+                for column in ("Total", "Data", "Index", "Unused"):
+                    assert cells[column] == human_bytes(expected[column]), (
+                        f"{cells['Table']} {column}: {cells[column]} "
+                        f"vs sp_spaceused {human_bytes(expected[column])}")
+        finally:
+            TestTableSizes._drop(dialect, cursor)
+
+    def test_a_lob_table_does_not_double_count_its_rows(self, env):
+        dialect, cursor, driver = env
+        if dialect != "mssql":
+            pytest.skip("the fan-out was in the MSSQL query")
+        TestTableSizes._fixture(dialect, cursor)
+        try:
+            headers, rows = driver.list_table_sizes(cursor, SCHEMA)
+            by = TestTableSizes._by_name(headers, rows)
+            # 500 rows, counted once -- not once per allocation unit.
+            assert by["sz_lob"]["Rows"] == "500", by["sz_lob"]
+            # And the per-schema listing, which had the same fan-out.
+            headers, rows = driver.list_tables_detail(cursor, SCHEMA)
+            detail = {r[0]: r[1] for r in rows}
+            assert detail["sz_lob"] == "500", detail
+        finally:
+            TestTableSizes._drop(dialect, cursor)
+
+
+class TestHumanBytesRoundTrip:
+    """`parse_human_bytes' is only asked about what `human_bytes' writes."""
+
+    def test_it_inverts_the_formatter(self):
+        from datum.utils import human_bytes, parse_human_bytes
+
+        for value in (0, 512, 1024, 1536, 1024 ** 2, 4232 * 1024,
+                      21648 * 1024, 1024 ** 3, 1024 ** 4):
+            written = human_bytes(value)
+            back = parse_human_bytes(written)
+            assert back is not None, written
+            assert abs(back - value) <= 0.05 * value + 1
+
+    def test_anything_else_is_not_a_size(self):
+        from datum.utils import parse_human_bytes
+
+        for text in ("", None, "unknown", "12", "12 parsecs", "MiB",
+                     "1 2 MiB", 1024):
+            assert parse_human_bytes(text) is None, text

@@ -79,6 +79,8 @@ def get_data(cursor, driver, args):
         }
     if args and args[0] == "tables" and len(args) >= 2:
         return _tables_panel(cursor, driver, " ".join(args[1:]))
+    if args and args[0] == "sizes":
+        return _sizes_panel(cursor, driver, " ".join(args[1:]) or None)
     return _schema_list(cursor, driver)
 
 
@@ -103,6 +105,9 @@ def run_action(cursor, driver, action_name, args):
         elif action_name == "tables":
             envelope.admin_panel(
                 _tables_panel(cursor, driver, " ".join(args)))
+        elif action_name == "sizes":
+            envelope.admin_panel(
+                _sizes_panel(cursor, driver, " ".join(args) or None))
         elif action_name == "new-table":
             _table_form(cursor, driver, args)
         elif action_name in ("create-table", "preview-table"):
@@ -136,6 +141,7 @@ def _schema_list(cursor, driver):
         "actions": [
             {"key": "N", "label": "New schema", "command": "new-schema"},
             {"key": "T", "label": "Tables", "command": "tables"},
+            {"key": "Z", "label": "Table sizes", "command": "sizes"},
             {"key": "D", "label": "Drop schema", "command": "drop-schema"},
         ],
         "info": (f"Schemas in {database}" if database else None),
@@ -268,6 +274,7 @@ def _tables_panel(cursor, driver, schema):
         "actions": [
             {"key": "N", "label": "New table", "command": "new-table"},
             {"key": "E", "label": "Alter columns", "command": "edit-table"},
+            {"key": "Z", "label": "Table sizes", "command": "sizes"},
             {"key": "D", "label": "Drop table", "command": "drop-table"},
         ],
         "info": (f"Tables in {schema}" if rows
@@ -275,6 +282,83 @@ def _tables_panel(cursor, driver, schema):
         "parent_panel": "schema",
         "context": {"schema": schema},
     }
+
+
+def _sizes_panel(cursor, driver, schema=None):
+    """Return the tables of the database by size, largest first.
+
+    Database-wide unless SCHEMA is given, because "what is taking up the
+    room" is not a question about one schema -- and ordered biggest
+    first because that is the order it is asked in.  Every row carries
+    its own schema, so dropping works from here without going by way of
+    the schema it belongs to.
+    """
+    schema = (schema or "").strip() or None
+    if schema:
+        driver.validate_identifier(schema)
+    headers, rows = driver.list_table_sizes(cursor, schema)
+    if not headers:
+        return {
+            "panel": "schema",
+            "sub_panel": "sizes",
+            "title": "Table sizes",
+            "headers": ["note"],
+            "rows": [[f"Table sizes are not available on "
+                      f"{driver.dialect_name}"]],
+            "row_id": None,
+            "actions": [],
+            "info": None,
+            "parent_panel": "schema",
+            "context": {},
+        }
+    where = f"{schema}" if schema else _current_database(cursor, driver)
+    total = _total_of(headers, rows, "Total")
+    return {
+        "panel": "schema",
+        "sub_panel": "sizes",
+        "title": f"Table sizes: {where}",
+        "headers": headers,
+        # The table name, with the schema taken from its own row.
+        "row_id": headers.index("Table"),
+        "actions": [
+            {"key": "E", "label": "Alter columns", "command": "edit-table"},
+            {"key": "D", "label": "Drop table", "command": "drop-table"},
+            {"key": "T", "label": "Tables in this schema",
+             "command": "tables"},
+        ],
+        "rows": rows,
+        "info": (f"{len(rows)} table{'' if len(rows) == 1 else 's'}"
+                 f"{', ' + total if total else ''}"
+                 " — largest first; o re-sorts"
+                 if rows else f"No tables in {where}"),
+        "parent_panel": "schema",
+        "context": {"schema": schema} if schema else {},
+    }
+
+
+def _total_of(headers, rows, column):
+    """Return the summed SIZE column as a size, or "" if it cannot be."""
+    from ..utils import human_bytes, parse_human_bytes
+
+    if column not in headers:
+        return ""
+    index = headers.index(column)
+    total = 0
+    for row in rows:
+        parsed = parse_human_bytes(row[index])
+        if parsed is None:
+            return ""
+        total += parsed
+    return f"{human_bytes(total)} in total"
+
+
+def _refresh_sizes(cursor, driver, schema=None):
+    from .. import envelope
+
+    try:
+        envelope.admin_panel(_sizes_panel(cursor, driver, schema))
+    except Exception:
+        pass
 
 
 def _refresh_tables(cursor, driver, schema):

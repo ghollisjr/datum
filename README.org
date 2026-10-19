@@ -1501,6 +1501,45 @@ else, which is reported rather than raised.  On PostgreSQL, listing a
 directory needs superuser or membership of =pg_read_server_files=; a
 plain role gets a permission error from =pg_ls_dir=.
 
+*** Table sizes
+
+=Z= in the schema panel lists the database's tables by size, largest
+first — which is the order the question gets asked in, when the question
+is which tables to drop before shrinking a database.  Pressed on a
+schema row it scopes to that schema; pressed inside a schema's table
+listing it stays there.
+
+: Table sizes: payroll
+: Schema  Table    Rows    Total     Data      Index     Unused
+: dbo     big      2,000   21.1 MiB  21.0 MiB  16.0 KiB  136.0 KiB
+: audit   middling 20,000  9.0 MiB   4.2 MiB   4.5 MiB   304.0 KiB
+: dbo     small    20,000  4.1 MiB   4.1 MiB   8.0 KiB   8.0 KiB
+
+The breakdown is there because *Total* alone does not say what to do
+about it: a table that is mostly *Index* may want an index dropped
+rather than the table, and a large *Unused* is what a rebuild would
+reclaim without losing anything.  On MSSQL the four columns are
+=sp_spaceused='s own decomposition, read from
+=sys.dm_db_partition_stats= in one query for the whole database; on
+PostgreSQL they come from =pg_total_relation_size= and its parts, and
+the row count is the planner's estimate, shown as =unknown= for a table
+that has never been analysed.
+
+Every row carries its own schema, so =D= drops the table named on the
+row rather than going by way of the panel's own schema — a listing that
+spans the database has no one schema to be about.  =E= alters columns
+from here too.  Sizes are written as sizes rather than byte counts, and
+=o= re-sorts them by reading the unit.
+
+A note on what the numbers used to say, since anyone with an older
+datum is looking at them: the per-schema listing counted rows by joining
+=sys.partitions= to =sys.allocation_units=, which yields one row per
+allocation unit, so a table with LOB data counted its rows once per unit
+— 2,000 rows read as 4,000.  And it joined only =index_id IN (0, 1)=, so
+nonclustered indexes were left out of the size: a 9 MB table read as 4.4
+MB.  Both are now read from the DMV, which is asked per partition per
+index and so does not fan out.
+
 *** SSIS panel
 
 Lists SSIS packages from the Integration Services catalog.

@@ -277,7 +277,14 @@ fault says so under its title.
 |-----+-----------------------|
 | =N= | New schema            |
 | =T= | Tables in this schema |
+| =Z= | Table sizes, largest first |
 | =D= | Drop schema           |
+
+=Z= lists the database's tables by size, largest first, with the
+breakdown (Data / Index / Unused) that says what to do about a big one.
+Each row carries its own schema, so =D= and =E= act on the table named
+on the row.  MSSQL reads sp_spaceused's decomposition from
+=sys.dm_db_partition_stats=; PostgreSQL from =pg_total_relation_size=.
 
 Tables view (=T=):
 

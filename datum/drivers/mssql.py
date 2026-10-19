@@ -1491,25 +1491,88 @@ class MSSQLDriver(BaseDriver):
         return [f"DROP SCHEMA {self.quote_ddl_identifier(name)}"]
 
     def list_tables_detail(self, cursor, schema):
+        """Return (headers, rows) describing the tables in SCHEMA.
+
+        Counted from `sys.dm_db_partition_stats\' rather than by joining
+        sys.partitions to sys.allocation_units.  That join produced one
+        row per allocation unit, so SUM(p.rows) counted a table's rows
+        once per unit -- a 2,000 row table with a LOB column read as
+        4,000 -- and it joined only index_id IN (0, 1), which left every
+        nonclustered index out of the size: a 9 MB table read as 4.4 MB,
+        which is the wrong direction to be wrong in when the question is
+        which table to drop.
+        """
+        from ..utils import human_bytes
+
         cursor.execute("""
             SELECT t.name,
-                   CAST(ISNULL(SUM(p.rows), 0) AS VARCHAR),
-                   CAST(CAST(ISNULL(SUM(a.total_pages), 0) * 8 / 1024.0
-                             AS DECIMAL(18,1)) AS VARCHAR),
+                   SUM(CASE WHEN ps.index_id IN (0, 1)
+                            THEN ps.row_count ELSE 0 END),
+                   SUM(ps.reserved_page_count) * 8192,
                    CONVERT(VARCHAR(19), t.create_date, 120)
-            FROM sys.tables t
+            FROM sys.dm_db_partition_stats ps
+            JOIN sys.tables t ON t.object_id = ps.object_id
             JOIN sys.schemas s ON s.schema_id = t.schema_id
-            LEFT JOIN sys.partitions p
-              ON p.object_id = t.object_id AND p.index_id IN (0, 1)
-            LEFT JOIN sys.allocation_units a
-              ON a.container_id = p.partition_id
             WHERE s.name = ?
             GROUP BY t.name, t.create_date
             ORDER BY t.name
         """, [schema])
-        return (["Table", "Rows", "Size MB", "Created"],
-                [[str(v) if v is not None else "" for v in row]
-                 for row in cursor.fetchall()])
+        return (["Table", "Rows", "Size", "Created"],
+                [[str(r[0]), f"{int(r[1]):,}", human_bytes(r[2]),
+                  str(r[3]) if r[3] is not None else ""]
+                 for r in cursor.fetchall()])
+
+    # sp_spaceused's own decomposition, from the one DMV that carries
+    # it: reserved is the whole allocation, data is the in-row plus LOB
+    # plus row-overflow pages of the base table (and the LOB and
+    # overflow pages of each index), and what is left of the used pages
+    # is index.  Asked per partition per index, so nothing fans out.
+    _SIZE_SELECT = """
+        SELECT s.name AS [Schema],
+               t.name AS [Table],
+               SUM(CASE WHEN ps.index_id IN (0, 1)
+                        THEN ps.row_count ELSE 0 END)   AS row_count,
+               SUM(ps.reserved_page_count) * 8192       AS reserved_bytes,
+               SUM(CASE WHEN ps.index_id IN (0, 1)
+                        THEN ps.in_row_data_page_count
+                             + ps.lob_used_page_count
+                             + ps.row_overflow_used_page_count
+                        ELSE ps.lob_used_page_count
+                             + ps.row_overflow_used_page_count
+                   END) * 8192                          AS data_bytes,
+               (SUM(ps.used_page_count)
+                - SUM(CASE WHEN ps.index_id IN (0, 1)
+                           THEN ps.in_row_data_page_count
+                                + ps.lob_used_page_count
+                                + ps.row_overflow_used_page_count
+                           ELSE ps.lob_used_page_count
+                                + ps.row_overflow_used_page_count
+                      END)) * 8192                      AS index_bytes,
+               (SUM(ps.reserved_page_count)
+                - SUM(ps.used_page_count)) * 8192       AS unused_bytes
+        FROM sys.dm_db_partition_stats ps
+        JOIN sys.tables t ON t.object_id = ps.object_id
+        JOIN sys.schemas s ON s.schema_id = t.schema_id
+    """
+
+    def list_table_sizes(self, cursor, schema=None):
+        from ..utils import human_bytes
+
+        sql = self._SIZE_SELECT
+        params = []
+        if schema:
+            sql += " WHERE s.name = ?"
+            params = [schema]
+        sql += (" GROUP BY s.name, t.name "
+                " ORDER BY SUM(ps.reserved_page_count) DESC, t.name")
+        cursor.execute(sql, params) if params else cursor.execute(sql)
+        rows = []
+        for r in cursor.fetchall():
+            rows.append([str(r[0]), str(r[1]), f"{int(r[2]):,}",
+                         human_bytes(r[3]), human_bytes(r[4]),
+                         human_bytes(r[5]), human_bytes(r[6])])
+        return (["Schema", "Table", "Rows", "Total", "Data", "Index",
+                 "Unused"], rows)
 
     def table_options(self, cursor, schema):
         return [

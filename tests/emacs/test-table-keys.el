@@ -679,4 +679,130 @@
                                    'utf-8)
                                   :object-type 'alist)))))
 
+(message "\n=== table sizes across the database ===")
+
+;; The question "what is taking up the room" is not about one schema, so
+;; the panel spans the database and every row carries its own schema.
+;; Dropping used to take the schema from the panel's context, which in a
+;; database-wide listing is the wrong schema for most rows.
+(defconst test-table-keys--sizes
+  (sql-datum--admin-denull-alist
+   (json-parse-string
+    (concat "{\"panel\":\"schema\",\"sub_panel\":\"sizes\","
+            "\"title\":\"Table sizes: payroll\","
+            "\"headers\":[\"Schema\",\"Table\",\"Rows\",\"Total\","
+            "\"Data\",\"Index\",\"Unused\"],"
+            "\"rows\":[[\"dbo\",\"big\",\"2,000\",\"21.1 MiB\","
+            "\"21.0 MiB\",\"16.0 KiB\",\"136.0 KiB\"],"
+            "[\"audit\",\"middling\",\"20,000\",\"9.0 MiB\","
+            "\"4.2 MiB\",\"4.5 MiB\",\"304.0 KiB\"],"
+            "[\"dbo\",\"small\",\"20,000\",\"4.1 MiB\",\"4.1 MiB\","
+            "\"8.0 KiB\",\"8.0 KiB\"]],"
+            "\"row_id\":1,\"actions\":[],\"info\":null,"
+            "\"parent_panel\":\"schema\",\"context\":{}}")
+    :object-type 'alist :array-type 'list)))
+
+(defun test-table-keys--on-size-row (table fn)
+  "Run FN with point on TABLE's row of the sizes panel."
+  (with-temp-buffer
+    (setq-local sql-datum--admin-panel-name "schema")
+    (setq-local sql-datum--admin-panel-data test-table-keys--sizes)
+    (setq-local sql-datum--admin-context nil)
+    (dolist (row (alist-get 'rows test-table-keys--sizes))
+      (let ((start (point)))
+        (insert (mapconcat #'identity row "  ") "\n")
+        (put-text-property start (point) 'sql-datum-row-id (nth 1 row))))
+    (goto-char (point-min))
+    (search-forward table)
+    (beginning-of-line)
+    (funcall fn)))
+
+(let (sent)
+  (test-table-keys--on-size-row
+   "middling"
+   (lambda ()
+     (cl-letf (((symbol-function 'sql-datum--admin-send-command)
+                (lambda (c) (setq sent c)))
+               ((symbol-function 'yes-or-no-p) (lambda (_) t)))
+       (sql-datum-admin-drop-table))))
+  (let ((payload (json-parse-string
+                  (decode-coding-string
+                   (base64-decode-string (car (last (split-string sent " "))))
+                   'utf-8)
+                  :object-type 'alist)))
+    (test-table-keys-assert "drop names the schema on the row, not the panel's"
+                            (equal (alist-get 'schema payload) "audit"))
+    (test-table-keys-assert "and the table on the row"
+                            (equal (alist-get 'table payload) "middling"))))
+
+;; A row with no Schema column still falls back to the panel's context,
+;; which is how the per-schema listing works.
+(let (sent)
+  (with-temp-buffer
+    (setq-local sql-datum--admin-panel-name "schema")
+    (setq-local sql-datum--admin-panel-data
+                (sql-datum--admin-denull-alist
+                 (json-parse-string
+                  (concat "{\"panel\":\"schema\",\"sub_panel\":\"tables\","
+                          "\"headers\":[\"Table\",\"Rows\",\"Size\"],"
+                          "\"rows\":[[\"orders\",\"5\",\"1.0 MiB\"]],"
+                          "\"row_id\":0,\"actions\":[],\"info\":null}")
+                  :object-type 'alist :array-type 'list)))
+    (setq-local sql-datum--admin-context '((schema . "dbo")))
+    (insert "orders  5  1.0 MiB\n")
+    (put-text-property (point-min) (point-max) 'sql-datum-row-id "orders")
+    (goto-char (point-min))
+    (cl-letf (((symbol-function 'sql-datum--admin-send-command)
+               (lambda (c) (setq sent c)))
+              ((symbol-function 'yes-or-no-p) (lambda (_) t)))
+      (sql-datum-admin-drop-table)))
+  (test-table-keys-assert "without a Schema column the context still serves"
+                          (equal (alist-get
+                                  'schema
+                                  (json-parse-string
+                                   (decode-coding-string
+                                    (base64-decode-string
+                                     (car (last (split-string sent " "))))
+                                    'utf-8)
+                                   :object-type 'alist))
+                                 "dbo")))
+
+;; The size columns are written as sizes, so re-sorting them reads the
+;; unit rather than the leading digit.
+(test-table-keys-assert "sorting by size reads the unit"
+                        (equal (mapcar (lambda (r) (nth 3 r))
+                                       (sql-datum--admin-sort-rows
+                                        (alist-get 'rows
+                                                   test-table-keys--sizes)
+                                        3 t))
+                               '("4.1 MiB" "9.0 MiB" "21.1 MiB")))
+
+;; Z asks for the database from the schema list, and for the one schema
+;; from inside it.
+(dolist (probe '(("sizes from the list, on no row" nil nil
+                 ":admin-action schema sizes")
+                ("sizes from a schema row" nil "audit"
+                 ":admin-action schema sizes audit")
+                ("sizes from inside one schema" "tables" nil
+                 ":admin-action schema sizes dbo")))
+  (let (sent)
+    (with-temp-buffer
+      (setq-local sql-datum--admin-panel-name "schema")
+      (setq-local sql-datum--admin-panel-data
+                  (if (nth 1 probe) '((sub_panel . "tables")) '()))
+      (setq-local sql-datum--admin-context '((schema . "dbo")))
+      (when (nth 2 probe)
+        (insert (nth 2 probe) "\n")
+        (put-text-property (point-min) (point-max)
+                           'sql-datum-row-id (nth 2 probe)))
+      (goto-char (point-min))
+      (cl-letf (((symbol-function 'sql-datum--admin-send-command)
+                 (lambda (c) (setq sent c))))
+        (sql-datum-admin-table-sizes)))
+    (test-table-keys-assert (nth 0 probe) (equal sent (nth 3 probe)))))
+
+(test-table-keys-assert "Z is bound to it"
+                        (eq (lookup-key sql-datum--admin-mode-map "Z")
+                            'sql-datum-admin-table-sizes))
+
 (message "\n%d passed, %d failed" test-table-keys--pass test-table-keys--fail)

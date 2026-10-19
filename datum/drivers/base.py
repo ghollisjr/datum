@@ -514,6 +514,17 @@ class BaseDriver(ABC):
         """Return (headers, rows) describing the tables in SCHEMA."""
         return [], []
 
+    def list_table_sizes(self, cursor, schema=None):
+        """Return (headers, rows) for tables by size, largest first.
+
+        With no SCHEMA, every table in the database, which is what the
+        question "what is taking up the room" actually asks.  Rows are
+        ordered biggest first because that is the order the question is
+        asked in; the client can still re-sort, and the size columns are
+        written as sizes so that sorting them reads the unit.
+        """
+        return [], []
+
     def table_options(self, cursor, schema):
         """Field descriptors for the table builder."""
         return []

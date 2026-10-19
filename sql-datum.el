@@ -1886,6 +1886,7 @@ SQLI-BUF is the originating SQLi buffer."
     (define-key map "K" #'sql-datum-admin-database-backups)
     ;; Schema panel
     (define-key map "T" #'sql-datum-admin-schema-tables)
+    (define-key map "Z" #'sql-datum-admin-table-sizes)
     ;; R restores a backup, but revokes in the permissions view.
     (define-key map "R" #'sql-datum-admin-restore-or-revoke)
     ;; Security panel: database user mappings and permissions
@@ -2500,10 +2501,24 @@ from those sections"))
     (sql-datum--admin-send-command
      (format ":admin-action schema new-table %s" schema))))
 
+(defun sql-datum--admin-cell (header)
+  "Return the cell under HEADER on the row at point, or nil.
+
+A panel that spans the database carries each row\='s schema on the row
+rather than in the panel\='s context, since there is no one schema for
+the panel to be about."
+  (let* ((headers (alist-get 'headers sql-datum--admin-panel-data))
+         (index (and headers (cl-position header headers :test #'equal)))
+         (cells (and index (sql-datum--admin-row-cells-at-point))))
+    (when (and cells (< index (length cells)))
+      (let ((value (nth index cells)))
+        (and (stringp value) (not (string-empty-p value)) value)))))
+
 (defun sql-datum-admin-edit-table ()
   "Alter the columns of the table at point."
   (interactive)
-  (let ((schema (alist-get 'schema sql-datum--admin-context))
+  (let ((schema (or (sql-datum--admin-cell "Schema")
+                    (alist-get 'schema sql-datum--admin-context)))
         (table (sql-datum--admin-row-id-at-point)))
     (unless (and schema table) (user-error "No table at point"))
     (sql-datum--admin-send-command
@@ -2511,10 +2526,32 @@ from those sections"))
              (sql-datum--admin-payload
               `((schema . ,schema) (table . ,table)))))))
 
+(defun sql-datum-admin-table-sizes ()
+  "Show the database\='s tables by size, largest first.
+
+From the schema list this is the whole database, which is the question
+being asked: which tables are taking up the room.  From inside one
+schema it stays in that schema."
+  (interactive)
+  (unless (equal sql-datum--admin-panel-name "schema")
+    (user-error "Table sizes are only available in the schema panel"))
+  (let ((schema (if (equal (alist-get 'sub_panel sql-datum--admin-panel-data)
+                           "tables")
+                    (alist-get 'schema sql-datum--admin-context)
+                  ;; On a schema row the key means that schema; on the
+                  ;; list with point elsewhere it means the database.
+                  (sql-datum--admin-row-id-at-point))))
+    (sql-datum--admin-request-display "schema" nil "sizes")
+    (sql-datum--admin-send-command
+     (if schema
+         (format ":admin-action schema sizes %s" schema)
+       ":admin-action schema sizes"))))
+
 (defun sql-datum-admin-drop-table ()
   "Drop the table at point."
   (interactive)
-  (let ((schema (alist-get 'schema sql-datum--admin-context))
+  (let ((schema (or (sql-datum--admin-cell "Schema")
+                    (alist-get 'schema sql-datum--admin-context)))
         (table (sql-datum--admin-row-id-at-point)))
     (unless (and schema table) (user-error "No table at point"))
     (when (yes-or-no-p (format "Drop table %s.%s? " schema table))

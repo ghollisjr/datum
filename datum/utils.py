@@ -60,3 +60,51 @@ def completion_sort_key(name):
     sorts beside its siblings.
     """
     return ".".join(split_identifier(name)) if name else name
+
+
+def human_bytes(value):
+    """Return VALUE as a short binary size, or "" if it is not known.
+
+    A disk is the one place raw bytes stop being readable: a drive's
+    free space runs to twelve digits, and nobody reads that as a size.
+    Directory listings keep their byte counts, where the numbers are
+    small enough to mean something and sorting wants them bare.  Table
+    sizes are the other place this is wanted, and for the same reason.
+    """
+    if value is None or value == "":
+        return ""
+    try:
+        size = float(value)
+    except (TypeError, ValueError):
+        return ""
+    if size < 1024:
+        return f"{int(size)} B"
+    for unit in ("KiB", "MiB", "GiB", "TiB", "PiB"):
+        size /= 1024.0
+        if size < 1024 or unit == "PiB":
+            # One decimal reads as a size; three read as a measurement
+            # the server is not actually making.
+            return f"{size:.1f} {unit}"
+    return ""
+
+
+def parse_human_bytes(text):
+    """Return the byte count TEXT names, or None if it names none.
+
+    The inverse of `human_bytes', for adding a column of them up.  Only
+    the shapes that function produces are accepted -- anything else
+    returns None rather than a number that would quietly be wrong.
+    """
+    if not text or not isinstance(text, str):
+        return None
+    parts = text.split()
+    if len(parts) != 2:
+        return None
+    number, unit = parts
+    units = ("B", "KiB", "MiB", "GiB", "TiB", "PiB")
+    if unit not in units:
+        return None
+    try:
+        return float(number) * (1024 ** units.index(unit))
+    except ValueError:
+        return None

@@ -48,6 +48,48 @@ class PostgreSQLDriver(BaseDriver):
             ORDER BY n.nspname, c.relname
         """
 
+    def list_table_sizes(self, cursor, schema=None):
+        """Return (headers, rows) for tables by size, largest first.
+
+        pg_total_relation_size is the whole thing -- heap, indexes and
+        TOAST -- and the parts are subtracted out of it rather than
+        added up, so the columns always sum to the total.  Row counts
+        come from the planner's estimate, which is what is available
+        without counting: -1 means never analysed, and is shown as
+        unknown rather than as a number.
+        """
+        from ..utils import human_bytes
+
+        sql = """
+            SELECT n.nspname, c.relname,
+                   c.reltuples::bigint,
+                   pg_total_relation_size(c.oid),
+                   pg_relation_size(c.oid),
+                   pg_indexes_size(c.oid),
+                   pg_total_relation_size(c.oid)
+                     - pg_relation_size(c.oid)
+                     - pg_indexes_size(c.oid)
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE c.relkind IN ('r', 'p')
+              AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+        """
+        params = []
+        if schema:
+            sql += " AND n.nspname = ?"
+            params = [schema]
+        sql += " ORDER BY pg_total_relation_size(c.oid) DESC, c.relname"
+        cursor.execute(sql, params) if params else cursor.execute(sql)
+        rows = []
+        for r in cursor.fetchall():
+            estimate = int(r[2])
+            rows.append([str(r[0]), str(r[1]),
+                         "unknown" if estimate < 0 else f"{estimate:,}",
+                         human_bytes(r[3]), human_bytes(r[4]),
+                         human_bytes(r[5]), human_bytes(r[6])])
+        return (["Schema", "Table", "Rows (est)", "Total", "Heap", "Index",
+                 "TOAST"], rows)
+
     @property
     def sql_current_user(self):
         return "SELECT current_user"
